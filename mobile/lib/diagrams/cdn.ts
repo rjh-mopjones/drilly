@@ -36,7 +36,7 @@ export const CDN: Diagram = {
       label: "Client",
       sub: "TLS 1.3, resumed",
       kind: "external",
-      col: 0,
+      col: 1,
       row: 0,
       detail: {
         what: "A browser or player asking for one object, over a connection it would rather resume than establish.",
@@ -51,7 +51,7 @@ export const CDN: Diagram = {
       label: "Anycast BGP + GeoDNS",
       sub: "one prefix from 200 PoPs",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 1,
       detail: {
         what: "The request router: a small number of /24s announced from every PoP, with GeoDNS choosing between a few independently announced anycast rings.",
@@ -74,8 +74,8 @@ export const CDN: Diagram = {
       label: "Edge PoP (x200)",
       sub: "TLS + cache key, ~50 servers",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 1,
+      row: 2,
       detail: {
         what: "A rack of commodity servers in a carrier-neutral facility that terminates TLS, builds the cache key, and serves ~95% of requests without a single upstream byte.",
         why: "This tier exists purely for latency: it is the only one a user's clock ever sees. An L4 balancer hashes the connection to one of ~50 servers, and the cache key is consistent-hashed to a single owning server so that one object has one home inside the PoP.",
@@ -97,8 +97,8 @@ export const CDN: Diagram = {
       label: "Single-flight + SWR",
       sub: "stale served, refresh behind",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 1,
+      row: 3,
       detail: {
         what: "The miss handler: claim a per-key lock, return the stale copy immediately under stale-while-revalidate, and revalidate upstream in the background.",
         why: "A TTL is not a per-object timer, it is a timer that fires at 200 PoPs within a second or two of each other because all 200 fetched from the same origin response. Without coalescing, expiry of one hot object is a synchronised global event aimed at an origin provisioned for 2% of delivered bytes.",
@@ -120,8 +120,8 @@ export const CDN: Diagram = {
       label: "Regional mid-tier (x20)",
       sub: "10 PoPs fetch through each",
       kind: "service",
-      col: 0,
-      row: 5,
+      col: 2,
+      row: 3,
       detail: {
         what: "A bigger, disk-heavy cache that roughly 10 edge PoPs fetch through, one per region.",
         why: "It exists for exactly one reason: fan-out collapse. The same object missed at 200 edges is 200 origin requests without it and 20 with it. It is a hop that adds ~35ms to a miss and earns its place by making the origin's load profile stable rather than spiky.",
@@ -143,8 +143,8 @@ export const CDN: Diagram = {
       label: "Origin shield",
       sub: "1 PoP per origin, fill bucket",
       kind: "service",
-      col: 0,
-      row: 6,
+      col: 2,
+      row: 4,
       detail: {
         what: "One PoP per customer origin, chosen for network proximity to it, that all 20 mid-tiers fetch through and that rate-limits refill.",
         why: "It takes 20 concurrent fetches to 1 and gives the origin a small, stable set of source IPs to allowlist. It is also the only place where a per-origin concurrency cap can be enforced, which is what stops a bulk purge or a cold start from becoming an outage.",
@@ -166,8 +166,8 @@ export const CDN: Diagram = {
       label: "Customer origin",
       sub: "object store, not yours",
       kind: "external",
-      col: 0,
-      row: 7,
+      col: 3,
+      row: 4,
       detail: {
         what: "The customer's own object store or application, the source of truth for every byte in the fleet and the only writer of the data you are caching.",
         why: "It is drawn as external because that is the whole difficulty. You do not control the writer, so you learn about a change either by asking (conditional revalidation) or by being told through a customer-facing purge API, never by observing the write.",
@@ -181,14 +181,19 @@ export const CDN: Diagram = {
       label: "Cache key + TTL policy",
       sub: "allowlist, jitter, SWR window",
       kind: "service",
-      col: 1,
+      col: 0,
       row: 2,
       detail: {
-        what: "The per-origin rules that decide what an object's identity is: host, normalised path, allowlisted query parameters, keyed headers, plus the TTL and stale-while-revalidate windows.",
-        why: "The key is the product. Anything you fail to strip multiplies one object into thousands of entries and the hit ratio falls; anything you wrongly strip makes two different responses share an identity, which is a security incident rather than a caching bug.",
-        numbers: ["one point of byte hit ratio ~ $420k/month", "TTL jittered +/-10% at storage time", "SLO >=95% by request, >=90% by byte"],
+        what: "The per-origin rules that decide what an object's identity is: host, normalised path, allowlisted query parameters, keyed headers, plus the TTL and stale-while-revalidate windows. Where the customer owns the URL, the real policy is to make invalidation unnecessary: their build hashes bytes into the filename (app.7f3c9a2b.js) and serves it immutable, so a changed object is a different object at a different address no cache has heard of yet.",
+        why: "The key is the product. Anything you fail to strip multiplies one object into thousands of entries and the hit ratio falls; anything you wrongly strip makes two different responses share an identity, which is a security incident rather than a caching bug. Content-hashed naming is not a cheaper broadcast, it is the absence of one: nothing in the fleet is ever wrong, because the whole freshness problem concentrates into one short-TTL HTML shell that references the hashed assets instead of spreading over millions of objects.",
+        numbers: [
+          "one point of byte hit ratio ~ $420k/month",
+          "TTL jittered +/-10% at storage time",
+          "SLO >=95% by request, >=90% by byte",
+          "hashed assets: max-age=31536000 immutable, 0 purge messages, ~100% hit ratio",
+        ],
         breaks:
-          "Cache poisoning: an origin returns one user's page with Set-Cookie and no Cache-Control: private, the edge stores it under a key with no identity in it, and the next user is served that session. Never-store on Set-Cookie, private and Authorization has to be enforced inside the engine where no config change can switch it off.",
+          "Cache poisoning: an origin returns one user's page with Set-Cookie and no Cache-Control: private, the edge stores it under a key with no identity in it, and the next user is served that session. Never-store on Set-Cookie, private and Authorization has to be enforced inside the engine where no config change can switch it off. And hashed naming only covers URLs the customer owns; their /index.html, API paths and anything SEO-visible keep fixed names and fall back to purge.",
         choice: {
           pick: "Allowlist query parameters, canonicalise their order, normalise User-Agent to a device class",
           instead: "Key on the full URL and honour whatever Vary the origin happens to send.",
@@ -204,8 +209,8 @@ export const CDN: Diagram = {
       label: "Edge object cache",
       sub: "S3-FIFO on NVMe, W-TinyLFU",
       kind: "database",
-      col: 1,
-      row: 4,
+      col: 2,
+      row: 2,
       detail: {
         what: "Two tiers per server: a 256GB page cache in RAM over 15TB of NVMe, with W-TinyLFU deciding what is admitted and S3-FIFO deciding what survives.",
         why: "Under Zipf with alpha ~0.9 there is no small hot set: reaching a 95% request hit ratio means holding roughly 320M objects, about 32TB, which is most of what a PoP sees in a day. So the cache is sized for residency and the interesting question becomes what you refuse to admit.",
@@ -223,34 +228,11 @@ export const CDN: Diagram = {
       },
     },
     {
-      id: "hashnames",
-      label: "Content-hashed URLs",
-      sub: "app.7f3c9a2b.js, immutable",
-      kind: "external",
-      col: 1,
-      row: 7,
-      detail: {
-        what: "The customer's build pipeline putting a hash of the bytes into the filename, so changed content is a different object at a different address.",
-        why: "This is the real answer to invalidation and it is not a cheaper broadcast, it is the absence of one. New content is a new URL, every cached copy stays valid forever, and the entire freshness problem concentrates into one small short-TTL pointer instead of spreading over millions of objects.",
-        numbers: ["max-age=31536000, immutable", "0 purge messages, 0 stale windows", "asset hit ratio approaching 100%"],
-        breaks:
-          "Something still has to say which version is current, so the short-TTL HTML shell that references the hashed assets inherits the whole staleness problem in concentrated form.",
-        choice: {
-          pick: "Content-addressed immutable names wherever you own the URL",
-          instead: "Keep stable URLs and push an invalidation to all ~13,000 edge servers whenever content changes.",
-          decider:
-            "Whether the name is yours to choose. Where it is, hashing wins on every axis and costs a build step. Where it is not, purge is the only lever and its guarantee is '99.9% of servers within ~2s, and a partitioned PoP replays the log when it returns', which is not a consistency guarantee at all. Purge stays affordable only because it is rare, at ~1,000/s.",
-          flips:
-            "Names you do not own: a customer's /index.html, an API path, an RSS feed, a takedown. Also a 4GB video whose title changed, where re-hashing forces a global refill of 750TB-scale caches and a targeted purge of the small objects costs a few hundred bytes.",
-        },
-      },
-    },
-    {
       id: "purgelog",
       label: "Durable purge log",
       sub: "Kafka, per-PoP offsets",
       kind: "queue",
-      col: 2,
+      col: 3,
       row: 1,
       parent: "control-zone",
       detail: {
@@ -274,8 +256,8 @@ export const CDN: Diagram = {
       label: "Fan-out tree",
       sub: "200 relays, in-PoP multicast",
       kind: "service",
-      col: 2,
-      row: 3,
+      col: 3,
+      row: 2,
       parent: "control-zone",
       detail: {
         what: "The push path: the control plane writes once, 200 PoP relays consume, and each relay multicasts inside its own PoP to reach every edge server.",
@@ -298,8 +280,8 @@ export const CDN: Diagram = {
       label: "Tag generation table",
       sub: "global KV, O(1) counter bump",
       kind: "database",
-      col: 2,
-      row: 5,
+      col: 3,
+      row: 0,
       detail: {
         what: "A globally replicated read-mostly KV of tag to generation counter, pushed to every PoP, with every cached object recording the generations of its tags at fetch time.",
         why: "Bulk invalidation cannot be an enumeration. Purging a tag becomes one counter bump and the comparison is deferred to read time, where a server that finds a stored generation behind the current one simply treats the entry as a miss.",
@@ -322,8 +304,8 @@ export const CDN: Diagram = {
       id: "e1",
       from: "client",
       to: "router",
+      tier: "hot",
       label: "SYN to the anycast IP",
-      animated: true,
       detail: {
         what: "The user's resolver returns one anycast address and the connection is opened to it, with no per-PoP address anywhere in the answer.",
         why: "Routing decisions that live in DNS are held by resolvers and client runtimes for far longer than the TTL says, so the data plane deliberately does not depend on them. GeoDNS only chooses which ring the user gets, not which PoP.",
@@ -336,8 +318,8 @@ export const CDN: Diagram = {
       id: "e2",
       from: "router",
       to: "edge",
+      tier: "hot",
       label: "nearest PoP, ~8ms",
-      animated: true,
       detail: {
         what: "BGP delivers the packet to whichever PoP is topologically nearest the client, and an L4 balancer inside it hashes the connection to one of ~50 servers.",
         why: "The internet's own routing is doing the work, which is why removing a PoP is a route withdrawal that reconverges in seconds rather than a record you wait out. It is also why a distributed attack spreads itself across all 200 PoPs for free.",
@@ -350,10 +332,8 @@ export const CDN: Diagram = {
       id: "e3",
       from: "edge",
       to: "cachestore",
+      tier: "hot",
       label: "key lookup, ~95% hit",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The cache key is consistent-hashed to its owning server inside the PoP and the object is read from page cache or NVMe.",
         why: "One key having exactly one home inside the PoP is what makes single-flight work later: without it, 50 servers each hold their own copy and each independently decides to refill it when the TTL fires.",
@@ -366,10 +346,8 @@ export const CDN: Diagram = {
       id: "e4",
       from: "cachekey",
       to: "edge",
+      tier: "control",
       label: "key rules, TTL, SWR",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Per-origin configuration mirrored into a global KV that every PoP reads: which query parameters are keyed, which headers are keyed, the default TTL and the stale-while-revalidate window.",
         why: "It is drawn as a control path because it never sits on the request path. The PoP reads it locally, so a control-plane outage degrades config changes and purges rather than the serving of bytes.",
@@ -382,8 +360,8 @@ export const CDN: Diagram = {
       id: "e5",
       from: "cachekey",
       to: "cachestore",
+      tier: "control",
       label: "TTL +/-10% at write",
-      dashed: true,
       detail: {
         what: "The TTL is jittered by +/-10% at the moment the object is stored, and the stale window is recorded alongside it.",
         why: "200 PoPs that fetched the same object within the same second would otherwise expire within the same second. Jitter turns a synchronised global edge into a smear, which is what the coalescers downstream actually want.",
@@ -396,6 +374,7 @@ export const CDN: Diagram = {
       id: "e6",
       from: "edge",
       to: "coalesce",
+      tier: "hot",
       label: "miss or stale, ~5%",
       detail: {
         what: "The ~5% of requests where the entry is absent or past its TTL, handed to the miss handler rather than answered directly.",
@@ -409,6 +388,7 @@ export const CDN: Diagram = {
       id: "e7",
       from: "coalesce",
       to: "midtier",
+      tier: "hot",
       label: "one fetch per key",
       detail: {
         what: "The single background revalidation that survives the per-server single-flight lock and the PoP's key ownership, sent over a pooled HTTP/2 connection.",
@@ -422,6 +402,7 @@ export const CDN: Diagram = {
       id: "e8",
       from: "midtier",
       to: "shield",
+      tier: "hot",
       label: "200 to 20 to 1",
       detail: {
         what: "The regional fetch that missed regionally, forwarded to the single shield PoP designated for this customer origin.",
@@ -435,6 +416,7 @@ export const CDN: Diagram = {
       id: "e9",
       from: "shield",
       to: "origin",
+      tier: "hot",
       label: "1 conditional GET",
       detail: {
         what: "One conditional GET with If-None-Match for the entire planet, usually answered with a ~200B 304 rather than a 100KB body.",
@@ -445,26 +427,11 @@ export const CDN: Diagram = {
       },
     },
     {
-      id: "e10",
-      from: "hashnames",
-      to: "origin",
-      label: "new bytes, new URL",
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "The build publishes assets whose names contain a hash of their contents, and the deploy changes the reference in a short-TTL HTML shell rather than changing any object.",
-        why: "This edge is the one that removes work from every other arrow in the diagram. Nothing anywhere in the fleet is ever wrong, because a changed object is a different object at a different address that no cache has yet heard of.",
-        numbers: ["max-age=31536000, immutable", "0 invalidation messages"],
-        breaks:
-          "It only covers the URLs the customer owns. Their /index.html, their API paths and anything SEO-visible keep fixed names and fall back to purge.",
-      },
-    },
-    {
       id: "e11",
       from: "purgelog",
       to: "relay",
+      tier: "control",
       label: "consume by offset",
-      dashed: true,
       detail: {
         what: "Each of the 200 PoP relays consumes the purge log at its own offset and applies records in order.",
         why: "The offset is the entire recovery story. A PoP that was partitioned when a purge was pushed resumes exactly where it stopped instead of needing the control plane to remember who missed what, which is what makes the fan-out safe to run without acknowledgements.",
@@ -477,10 +444,8 @@ export const CDN: Diagram = {
       id: "e12",
       from: "relay",
       to: "edge",
+      tier: "control",
       label: "purge to 13k in ~2s",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The in-PoP multicast that marks the named objects stale on every server in the PoP, including the replicas of hot keys.",
         why: "It is idempotent by construction, because forgetting an object twice is the same as forgetting it once, and that is what allows replay after a partition without any bookkeeping about what was already applied.",
@@ -493,10 +458,8 @@ export const CDN: Diagram = {
       id: "e13",
       from: "relay",
       to: "midtier",
+      tier: "control",
       label: "invalidate regional copy",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The same purge applied at the regional mid-tier and the shield, not only at the edge.",
         why: "Purging only the edge would be worse than useless: the next request misses at the edge, fetches the old bytes from a mid-tier that still holds them, and re-caches the thing you just purged. Every tier holding a copy has to be told.",
@@ -509,10 +472,8 @@ export const CDN: Diagram = {
       id: "e14",
       from: "purgelog",
       to: "taggen",
+      tier: "control",
       label: "tag purge, 40B bump",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 60,
       detail: {
         what: "A purge-by-tag record turning into a single increment of that tag's counter in the globally replicated generation table.",
@@ -526,10 +487,8 @@ export const CDN: Diagram = {
       id: "e15",
       from: "taggen",
       to: "cachestore",
+      tier: "data",
       label: "generation compare on read",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "On every lookup the server compares the tag generations stored with the object against the current ones and treats any mismatch as a miss.",
         why: "This is where the deferred work from a tag purge is finally paid, one request at a time, on the objects that are actually being asked for. Objects nobody requests cost nothing and are eventually evicted.",

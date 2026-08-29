@@ -27,14 +27,9 @@ export const ZOOM: Diagram = {
   },
   nodes: [
     {
-      id: "media-plane",
-      label: "Media plane · RTP over UDP · 150ms budget",
-      kind: "zone",
-    },
-    {
       id: "publisher",
       label: "Sending client",
-      sub: "libwebrtc, three simulcast encodes",
+      sub: "libwebrtc, 3 simulcast encodes",
       kind: "external",
       col: 0,
       row: 0,
@@ -59,41 +54,12 @@ export const ZOOM: Diagram = {
       },
     },
     {
-      id: "ice",
-      label: "ICE + STUN/TURN",
-      sub: "direct path, relay fallback",
-      kind: "service",
-      col: 0,
-      row: 1,
-      parent: "media-plane",
-      detail: {
-        what: "Candidate gathering and connectivity checks that find a working UDP path between a client behind NAT and the relay, with a TURN server carrying the media when no direct pair survives.",
-        why: "Almost every participant sits behind a NAT that will not accept unsolicited UDP. STUN tells a client its public mapping so a pair can be punched open, and TURN is the honest fallback: an SFU with the forwarding intelligence removed, existing purely so the call connects at all.",
-        numbers: [
-          "~80 to 85 percent of 1:1 attempts find a direct path",
-          "a relay hop costs 15 to 40ms of the 150ms budget",
-          "first mile budgeted at 10 to 30ms once the path is up",
-        ],
-        breaks:
-          "Symmetric NAT and corporate firewalls that block UDP outright fail every candidate pair, so the call falls back to TURN and sometimes to TCP on 443, paying both the extra hop and the head-of-line blocking the whole design exists to avoid.",
-        choice: {
-          pick: "ICE over UDP, TURN only as a fallback",
-          instead: "Relay everything through TURN, or tunnel all media over TCP on 443.",
-          decider:
-            "The 15 to 40ms a relay hop adds, against a budget where the jitter buffer alone claims 50 to 100ms of 150ms. Since 80 to 85 percent of paths do not need a relay, forcing everyone through one spends real latency on the majority to simplify the minority.",
-          flips:
-            "Locked-down enterprise networks where UDP never leaves the building, and a TCP/443 TURN path is the only thing that connects at all.",
-        },
-      },
-    },
-    {
       id: "sfu",
       label: "SFU relay (region A)",
       sub: "forwards RTP, never decodes",
       kind: "service",
-      col: 0,
-      row: 2,
-      parent: "media-plane",
+      col: 1,
+      row: 0,
       detail: {
         what: "The selective forwarding unit: it ingests every publisher's three layers and forwards packets from exactly one of them to each receiver, treating the layers as three unrelated streams.",
         why: "It is the cheapest thing that still gives per-receiver adaptation. Nothing is decoded, so the participant on hotel wifi is served 180p out of the same ingress that feeds 720p to everybody else, and one bad link is invisible to the rest of the call. That isolation is the entire reason the relay exists rather than a mesh.",
@@ -117,11 +83,10 @@ export const ZOOM: Diagram = {
     {
       id: "allocator",
       label: "Per-receiver allocator",
-      sub: "TWCC estimate, knapsack per receiver",
+      sub: "TWCC estimate, knapsack/receiver",
       kind: "service",
-      col: 0,
-      row: 3,
-      parent: "media-plane",
+      col: 2,
+      row: 1,
       detail: {
         what: "The control loop that answers one question per sender-receiver pair, over and over: which of this sender's three layers do I forward to this receiver right now, or none at all.",
         why: "A receiver with 3 Mbps down in a nine-person call cannot take eight 720p streams, which would be 12 Mbps. So the budget is spent rather than filled: audio is allocated first and is never a candidate for sacrifice, then video layers are chosen to maximise a weighted quality score under the estimate.",
@@ -146,10 +111,10 @@ export const ZOOM: Diagram = {
     {
       id: "jitter",
       label: "Jitter buffer + repair",
-      sub: "50-100ms adaptive, NACK / FEC / PLC",
+      sub: "50-100ms, NACK / FEC / PLC",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 2,
+      row: 0,
       detail: {
         what: "The receiver-side buffer that absorbs reordering and network jitter, plus the loss repair that has to complete inside it: selective retransmit, forward error correction and concealment.",
         why: "Playout is never delayed to wait for a repair. Everything here is a race against the frame's deadline, and a fix that lands after the frame was due is worse than useless because the bandwidth it consumed was taken from frames that could still have arrived in time.",
@@ -174,10 +139,10 @@ export const ZOOM: Diagram = {
     {
       id: "receiver",
       label: "Receiving client",
-      sub: "decode, composite, report viewport",
+      sub: "decode, composite, viewport",
       kind: "external",
-      col: 0,
-      row: 5,
+      col: 3,
+      row: 0,
       detail: {
         what: "The far endpoint: it decodes whichever layers it was given, lays out the tiles, and tells the relay what it is actually showing.",
         why: "The allocator's weights come from here rather than from the server guessing. Which tile is pinned, which is the active speaker, and critically which tiles are scrolled off screen, because the client unsubscribes from those outright and that is the single largest saving available in a large grid.",
@@ -201,10 +166,10 @@ export const ZOOM: Diagram = {
     {
       id: "signalling",
       label: "Signalling (WebSocket)",
-      sub: "join, mute, hand, layout, presence",
+      sub: "join, mute, layout, presence",
       kind: "service",
-      col: 1,
-      row: 0,
+      col: 0,
+      row: 1,
       detail: {
         what: "The stateful control plane: one WebSocket per participant carrying join and leave, mute, raise hand, layout and presence updates.",
         why: "It is a separate fleet because it is a different system in every dimension. It tolerates 200ms happily, it must never lose a message, and it is two orders of magnitude smaller than the media plane in bandwidth, so sizing the two together would size both of them wrong.",
@@ -230,8 +195,8 @@ export const ZOOM: Diagram = {
       label: "Meeting metadata",
       sub: "wide-column, ~5 KB per meeting",
       kind: "database",
-      col: 1,
-      row: 1,
+      col: 0,
+      row: 2,
       detail: {
         what: "Per-meeting bookkeeping written by signalling: host, schedule, participant history, chat references and the recording URL.",
         why: "Nothing in the media path reads it, which is exactly the point. It is the durable record that a meeting existed, written at a rate the media plane would consider a rounding error, and it is the only genuinely stateful thing in the control plane.",
@@ -284,8 +249,8 @@ export const ZOOM: Diagram = {
       label: "MCU mixer",
       sub: "decode, composite, re-encode",
       kind: "service",
-      col: 1,
-      row: 3,
+      col: 2,
+      row: 2,
       detail: {
         what: "A compositing mixer that decodes every input, paints one gallery-view frame, re-encodes it, and hands each receiver exactly one stream regardless of call size.",
         why: "It exists for endpoints that can physically accept only one stream and for audiences large enough that per-receiver egress dominates. It is genuinely the wrong tool for interaction and genuinely the right one for broadcast, and a hybrid webinar runs both at once: the panel talks over the relay while the mixer composites them for the audience.",
@@ -311,8 +276,8 @@ export const ZOOM: Diagram = {
       label: "CDN broadcast leg",
       sub: "HLS, 2 to 6s buffer",
       kind: "external",
-      col: 1,
-      row: 4,
+      col: 2,
+      row: 3,
       detail: {
         what: "The distribution path for a view-only audience: one composited stream segmented and handed to a CDN instead of a per-viewer relay subscription.",
         why: "Above roughly a thousand viewers you have stopped designing a conference. Nobody in that audience publishes anything, so the interactivity the 150ms budget buys them is worth nothing, and a buffered segmented stream costs a fraction of per-receiver egress.",
@@ -338,8 +303,8 @@ export const ZOOM: Diagram = {
       label: "Cloud recorder",
       sub: "subscribes as another receiver",
       kind: "service",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 2,
       detail: {
         what: "A mixer-style process that joins the meeting like any other receiver, decodes, composites to a layout, encodes to MP4 and uploads in chunks with checkpoints.",
         why: "There is no canonical rendering to record. Two receivers watching the same sender sit on different layers with different keyframe histories, so anything that wants a single picture has to construct one by subscribing and building it, which is why the recording is never exactly what any participant saw.",
@@ -365,8 +330,8 @@ export const ZOOM: Diagram = {
       label: "Recording store",
       sub: "MP4 chunks, 90-day retention",
       kind: "database",
-      col: 1,
-      row: 6,
+      col: 3,
+      row: 3,
       detail: {
         what: "Region-local object storage holding finished recordings alongside the chat log and transcription for each meeting.",
         why: "It is the largest storage line in the system by two orders of magnitude, and it is the only place this design stores media at all. Everything else deliberately keeps nothing, which is why the retention default is short rather than generous.",
@@ -393,8 +358,8 @@ export const ZOOM: Diagram = {
       id: "e-ws",
       from: "publisher",
       to: "signalling",
+      tier: "control",
       label: "join · mute · layout",
-      dashed: true,
       detail: {
         what: "Control messages over a persistent WebSocket: join and leave, mute, raise hand, layout changes and presence.",
         why: "This is the plane that is allowed to be reliable and ordered, because none of it expires. It is also the plane a client keeps when media is failing, which is how a session survives a network blip rather than dropping.",
@@ -407,8 +372,8 @@ export const ZOOM: Diagram = {
       id: "e-meta",
       from: "signalling",
       to: "meeting-db",
+      tier: "control",
       label: "meeting + participant state",
-      dashed: true,
       detail: {
         what: "Durable writes of meeting creation, participant joins and leaves, and the recording reference once one exists.",
         why: "The control plane is the only part of this system with state worth persisting, and it must survive a regional failover with zero data loss, which is why it is replicated active-active rather than cached.",
@@ -421,8 +386,8 @@ export const ZOOM: Diagram = {
       id: "e-alloc",
       from: "signalling",
       to: "sfu",
+      tier: "control",
       label: "SFU endpoint + JWT",
-      dashed: true,
       detail: {
         what: "The control plane picking the nearest healthy relay for a joining client and issuing a short-lived meeting token bound to that invitee.",
         why: "Allocation deliberately happens after authorisation and after the waiting room, so a join storm consumes signalling capacity and never causes a relay to be allocated. It is also where anycast routing sends a client to a different region during an outage.",
@@ -432,38 +397,30 @@ export const ZOOM: Diagram = {
       },
     },
     {
-      id: "e-ice",
-      from: "publisher",
-      to: "ice",
-      label: "candidate pairs, STUN",
-      detail: {
-        what: "Candidate gathering and connectivity checks: the client learns its public mapping and probes every address pair until one works.",
-        why: "No media flows until a path exists, and behind NAT a path has to be discovered rather than assumed. Doing it up front is what lets the media plane be plain UDP with no connection semantics of its own.",
-        numbers: ["~80 to 85 percent find a direct path", "the rest fall back to TURN"],
-        breaks:
-          "Every candidate pair failing means the call either relays through TURN, paying 15 to 40ms, or does not connect at all on networks that block UDP entirely.",
-      },
-    },
-    {
       id: "e-pub",
-      from: "ice",
+      from: "publisher",
       to: "sfu",
-      label: "3 layers, 2.5 Mbps up",
-      animated: true,
+      label: "ICE + publish, ~2.5 Mbps",
+      tier: "hot",
       detail: {
-        what: "The publish leg: RTP over UDP carrying all three simulcast layers plus Opus audio, up the established path to the relay.",
-        why: "The sender uploads once regardless of how many people are in the call, which is the whole reason a relay beats a mesh. Cost is flat in N here, where mesh grows linearly and the client's encoder count grows with it.",
-        numbers: ["2.5 Mbps up whatever N is", "Opus audio at 40 to 50 kbps", "first mile 10 to 30ms"],
+        what: "Connectivity setup (ICE, STUN with TURN as fallback) followed by the publish leg: RTP over UDP carrying all three simulcast layers plus Opus audio, once a path is found.",
+        why: "No media flows until a path exists, and behind NAT a path has to be discovered rather than assumed. ICE over UDP with TURN only as fallback keeps most calls off a relay hop: forcing everyone through TURN would spend 15 to 40ms on the 80 to 85 percent of paths that never need it. Once connected, the sender uploads once regardless of participant count, which is the whole reason a relay beats a mesh.",
+        numbers: [
+          "~80 to 85 percent of attempts find a direct path",
+          "2.5 Mbps up whatever N is",
+          "Opus audio at 40 to 50 kbps",
+          "first mile 10 to 30ms, relay hop adds 15 to 40ms",
+        ],
         breaks:
-          "This leg is the sender's own uplink, so congestion here degrades that participant for everybody at once, unlike receive-side congestion which is isolated per receiver.",
+          "Symmetric NAT and corporate firewalls that block UDP fail every candidate pair, falling back to TURN and sometimes TCP on 443. This leg is also the sender's own uplink, so congestion here degrades that participant for everybody at once.",
       },
     },
     {
       id: "e-egress",
       from: "sfu",
       to: "jitter",
+      tier: "hot",
       label: "one layer, ~2.2 Mbps",
-      animated: true,
       detail: {
         what: "The forwarding leg: packets from exactly one chosen layer per sender, plus audio, arriving at this receiver's buffer.",
         why: "Egress sits below ingress on purpose. The relay forwards one layer of three and discards the rest, so a 5-person meeting takes 12.5 Mbps in and pushes about 11 Mbps out, and a slow receiver simply gets a smaller slice of the same ingress.",
@@ -476,8 +433,8 @@ export const ZOOM: Diagram = {
       id: "e-play",
       from: "jitter",
       to: "receiver",
+      tier: "hot",
       label: "decode + render",
-      animated: true,
       detail: {
         what: "Frames leaving the buffer at their playout deadline, decoded and composited into the tile layout.",
         why: "The deadline is absolute: anything not here on time is discarded and concealed rather than waited for. Audio and video are aligned via RTP timestamps mapped to a common wall clock, and video is what waits, never audio.",
@@ -490,11 +447,8 @@ export const ZOOM: Diagram = {
       id: "e-twcc",
       from: "jitter",
       to: "allocator",
+      tier: "data",
       label: "TWCC arrival reports",
-      dashed: true,
-      offset: 30,
-      fromSide: "left",
-      toSide: "left",
       detail: {
         what: "Per-packet arrival timestamps reported back by sequence number, from which the sender and relay derive an available-bandwidth estimate.",
         why: "Comparing inter-arrival deltas against inter-departure deltas catches a queue building before anything is lost, which is 200 to 500ms of warning that loss-based estimation never gives you. Probing upward is deliberate padding, so a wrong guess wastes filler rather than corrupting real media.",
@@ -507,11 +461,8 @@ export const ZOOM: Diagram = {
       id: "e-hint",
       from: "receiver",
       to: "allocator",
+      tier: "data",
       label: "viewport + pin hints",
-      dashed: true,
-      offset: 60,
-      fromSide: "left",
-      toSide: "left",
       detail: {
         what: "Client-side layout context: which tile is pinned, which is the active speaker, and which tiles are off screen and therefore unsubscribed.",
         why: "The weights in the allocator come from the client rather than the server guessing, because only the client knows what is rendered. Unsubscribing off-screen tiles outright is the largest single saving in a big grid and costs nothing to compute.",
@@ -524,8 +475,8 @@ export const ZOOM: Diagram = {
       id: "e-decide",
       from: "allocator",
       to: "sfu",
+      tier: "control",
       label: "forward L0/L1/L2 or none",
-      dashed: true,
       detail: {
         what: "The selection itself: for each sender-receiver pair, the target layer the forwarding loop should match packets against.",
         why: "This is the one decision in the media path and everything else is plumbing around it. Making it per receiver is what stops one participant's bad wifi from being visible to anybody else on the call.",
@@ -538,11 +489,8 @@ export const ZOOM: Diagram = {
       id: "e-pli",
       from: "sfu",
       to: "publisher",
+      tier: "control",
       label: "PLI, 1 per 500ms",
-      dashed: true,
-      offset: 90,
-      fromSide: "left",
-      toSide: "left",
       detail: {
         what: "A picture loss indication sent upstream asking the sender for an immediate keyframe on a layer some receiver wants to switch up to.",
         why: "A decoder cannot start mid group-of-pictures, so an upgrade is invisible until a keyframe arrives, and the sender's periodic one is 1 to 3 seconds away, far too slow for a UI action. Requesting one is the only way to make a tile sharpen when someone expands it.",
@@ -555,6 +503,7 @@ export const ZOOM: Diagram = {
       id: "e-cascade",
       from: "sfu",
       to: "cascade",
+      tier: "hot",
       label: "backbone, FEC pre-applied",
       detail: {
         what: "Relay-to-relay forwarding of every stream a participant in the other region has subscribed to, over dedicated backbone capacity.",
@@ -568,6 +517,7 @@ export const ZOOM: Diagram = {
       id: "e-mcu",
       from: "sfu",
       to: "mcu",
+      tier: "hot",
       label: "view-only leg",
       detail: {
         what: "The relay subscribing the mixer to the panel's streams so it can decode them and paint one composited layout.",
@@ -581,6 +531,7 @@ export const ZOOM: Diagram = {
       id: "e-cdn",
       from: "mcu",
       to: "cdn",
+      tier: "data",
       label: "one composited stream",
       detail: {
         what: "The mixer's single encoded output pushed into CDN distribution as segments for a view-only audience.",
@@ -594,6 +545,7 @@ export const ZOOM: Diagram = {
       id: "e-rec",
       from: "sfu",
       to: "recorder",
+      tier: "data",
       label: "subscribes like a receiver",
       detail: {
         what: "The recorder taking an ordinary subscription to the meeting, with its own bandwidth estimate and its own layer selection.",
@@ -607,6 +559,7 @@ export const ZOOM: Diagram = {
       id: "e-store",
       from: "recorder",
       to: "object-store",
+      tier: "data",
       label: "MP4 chunks every 5-10s",
       detail: {
         what: "Checkpointed chunk uploads: composited MP4 segments flushed to object storage as the meeting runs, not at the end of it.",

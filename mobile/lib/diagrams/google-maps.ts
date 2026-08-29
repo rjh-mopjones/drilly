@@ -33,7 +33,7 @@ export const GOOGLE_MAPS: Diagram = {
       sub: "map view + navigation session",
       kind: "client",
       col: 0,
-      row: 2,
+      row: 0,
       detail: {
         what: "The phone or browser: it fetches tiles, asks for a route once, then runs the navigation session itself against the polyline it was handed.",
         why: "Re-planning is the server's job and noticing that a re-plan is needed is the client's. Matching its own GPS to the polyline locally is what stops 2.5M concurrent navigations from becoming 80k requests/s of drift correction.",
@@ -57,49 +57,24 @@ export const GOOGLE_MAPS: Diagram = {
 
     // ----------------------------------------------------------------- tiles
     {
-      id: "tile-cdn",
-      label: "Tile CDN",
-      sub: "(z, x, y) key, 95%+ hit rate",
-      kind: "gateway",
-      col: 1,
-      row: 0,
-      detail: {
-        what: "The edge tier: a global cache fleet answering tile requests from the point of presence nearest the user, keyed only by zoom, column and row.",
-        why: "Tile popularity is Zipfian, so a small set of city-centre tiles dominates every request pattern. Caching those at the edge is what turns 350k requests/s into an origin that sees single-digit thousands.",
-        numbers: [
-          "10B tile requests/day, ~116k/s average",
-          "~350k/s at commute peak",
-          "z above 14 typically under 90% hit, z below 10 over 99%",
-        ],
-        breaks:
-          "A large diff invalidating millions of tiles at once collapses the hit rate and the origin takes the whole difference, so popular tiles must be pre-warmed before the version pointer flips.",
-        choice: {
-          pick: "CDN in front of immutable, versioned tile objects",
-          instead: "Sizing an origin fleet for peak tile traffic directly.",
-          decider:
-            "Hit rate, which sets origin capacity outright. At 95% the origin sees 5% of 10B/day, 5.8k req/s average and ~17k/s at peak, one modest fleet. At 80% it is 23k/s average, four times the hardware for exactly the same product.",
-          flips:
-            "A private or single-region deployment where the traffic never justifies edge infrastructure and one regional origin is already closer to every user than a point of presence would be.",
-        },
-      },
-    },
-    {
       id: "tile-origin",
       label: "Tile object store",
       sub: "MVT vector tiles, ~1.5PB",
       kind: "blob",
-      col: 3,
-      row: 0,
+      col: 0,
+      row: 1,
       detail: {
-        what: "The materialised tile corpus in object storage: one gzipped MVT object per (z, x, y) that has any content in it, carrying geometry and properties rather than pixels.",
-        why: "The quadtree holds 4^z tiles per zoom, so z=0 to 20 is (4^21 - 1)/3 or about 1.4T addressable tiles. Around 70% of the surface is ocean and most high-zoom land tiles are empty, so you store what exists rather than what is addressable.",
+        what: "The materialised tile corpus in object storage: one gzipped MVT object per (z, x, y) that has any content in it, carrying geometry and properties rather than pixels. A global CDN edge cache sits in front of every read, keyed purely on (z, x, y) with no per-user variation, and a batch tile builder re-renders behind it whenever a map diff touches a tile's bounding box.",
+        why: "The quadtree holds 4^z tiles per zoom, so z=0 to 20 is (4^21 - 1)/3 or about 1.4T addressable tiles. Around 70% of the surface is ocean and most high-zoom land tiles are empty, so you store what exists rather than what is addressable. Tile popularity is Zipfian, so caching city-centre tiles at the edge is what turns 350k requests/s into an origin that sees single-digit thousands; geometry changes on the diff feed's clock rather than traffic's, so re-rendering only the touched bounding boxes is what keeps that cheap.",
         numbers: [
           "1.4T addressable, 1 to 5% materialise",
           "~50B tiles x 30KB blended = 1.5PB",
           "10 to 50KB per tile, rural against dense urban",
+          "CDN: 95%+ hit rate, ~350k req/s peak, 5.8k-17k/s reaching the origin",
+          "builder: ~3M edits/day, ~1% of tiles touched/week, 15TB/week re-render",
         ],
         breaks:
-          "Object count rather than bytes: 50B objects is a metadata problem in its own right, and any operation that wants to enumerate or sweep the corpus will not finish.",
+          "Object count rather than bytes: 50B objects is a metadata problem in its own right, and any operation that wants to enumerate or sweep the corpus will not finish. A large diff invalidating millions of tiles collapses the edge hit rate and the origin takes the whole difference, so popular tiles must be pre-warmed before the version pointer flips, and one boundary edit can touch thousands of tiles from z=10 to z=18 unless the invalidation set is deduped and ordered by predicted miss rate.",
         choice: {
           pick: "One vector (MVT) corpus of immutable objects in blob storage, styled on the client",
           instead: "Pre-rendered raster pyramids, one PNG set per style and display density.",
@@ -111,39 +86,12 @@ export const GOOGLE_MAPS: Diagram = {
       },
     },
     {
-      id: "tile-builder",
-      label: "Tile builder",
-      sub: "re-render on map diff",
-      kind: "service",
-      col: 5,
-      row: 0,
-      detail: {
-        what: "The batch job that turns a map source extract into tile objects, re-rendering only the tiles whose bounding boxes intersect an applied diff.",
-        why: "Geometry changes when someone edits the map, which is a completely different clock from traffic or topology. Treating tiles as a rebuild-on-change asset is what makes them safe to cache for months downstream.",
-        numbers: [
-          "~3M edits/day on the OSM diff feed",
-          "~1% of materialised tiles touched per week",
-          "15TB/week re-render against a 1.5PB corpus",
-        ],
-        breaks:
-          "One edit to an administrative boundary touches thousands of tiles from z=10 to z=18, so the invalidation set must be deduped per cycle and ordered by predicted CDN miss rate or the queue never drains.",
-        choice: {
-          pick: "Incremental re-render driven by the changed bounding boxes in the diff feed",
-          instead: "Rebuilding the planet on a nightly or weekly schedule.",
-          decider:
-            "Churn against corpus size. 3M edits/day touch about 1% of materialised tiles per week, which is 15TB against 1.5PB, roughly 100x less work for the same visible result.",
-          flips:
-            "A change to the tile schema or the encoding itself, where every object is stale by definition and a full rebuild is the only coherent answer.",
-        },
-      },
-    },
-    {
       id: "map-source",
       label: "Map data source",
       sub: "OSM diff feed, ~3M edits/day",
       kind: "external",
-      col: 6,
-      row: 0,
+      col: 1,
+      row: 1,
       detail: {
         what: "The upstream road data everything is derived from: an OpenStreetMap diff feed (or a proprietary survey extract) carrying geometry, topology and restrictions such as one-ways, turn bans and vehicle class.",
         why: "It is the single source the three subsystems share. The whole 'three pipelines, one graph' shape of this design only means something because tiles and the contraction order are two different renderings of the same upstream edits.",
@@ -168,10 +116,10 @@ export const GOOGLE_MAPS: Diagram = {
     // --------------------------------------------------------------- routing
     {
       id: "routing-pod",
-      label: "Routing pod (one continent)",
+      label: "Routing pod",
       kind: "serviceGroup",
       col: 1,
-      row: 1,
+      row: 0,
       detail: {
         what: "One deployable query server per continent. It holds the shortcut hierarchy in memory and answers a route request end to end: search, unpack, ETA. The three stages below are in-process, not services.",
         why: "They are drawn as stages rather than peers because they share the resident graph and the current metric, and a network hop between them would cost more than the query itself. The pseudocode in the write-up is literally these three lines inside one process.",
@@ -194,11 +142,11 @@ export const GOOGLE_MAPS: Diagram = {
     },
     {
       id: "upward-search",
-      label: "Bidirectional upward search",
+      label: "Upward search",
       sub: "~1ms, settles hundreds of nodes",
       kind: "process",
       col: 1,
-      row: 1,
+      row: 0,
       parent: "routing-pod",
       detail: {
         what: "The query itself: relax only edges toward higher-ranked nodes from the source, only edges from higher-ranked nodes in the reverse graph from the target, and stop when the smallest tentative key exceeds the best combined distance found.",
@@ -224,10 +172,10 @@ export const GOOGLE_MAPS: Diagram = {
     {
       id: "shortcut-unpack",
       label: "Shortcut unpacking",
-      sub: "recursive, recovers road segments",
+      sub: "recursive, recovers segments",
       kind: "process",
       col: 1,
-      row: 3,
+      row: 0,
       parent: "routing-pod",
       detail: {
         what: "The winning path is a chain of shortcuts, each standing in for a two-hop path through a contracted node. Unpacking expands them recursively until only original road segments remain, which is what the polyline and the turn list are built from.",
@@ -254,7 +202,7 @@ export const GOOGLE_MAPS: Diagram = {
       sub: "current weights then profiles",
       kind: "process",
       col: 1,
-      row: 4,
+      row: 0,
       parent: "routing-pod",
       detail: {
         what: "Turns the unpacked path into an arrival time, costing the near part of the trip on the current metric and the far part on historical time-of-day profiles.",
@@ -298,7 +246,7 @@ export const GOOGLE_MAPS: Diagram = {
       label: "Hierarchy topology",
       sub: "order + shortcuts, ~2GB",
       kind: "blob",
-      col: 3,
+      col: 2,
       row: 1,
       parent: "hierarchy-group",
       detail: {
@@ -326,8 +274,8 @@ export const GOOGLE_MAPS: Diagram = {
       label: "Weight metric",
       sub: "one float per edge, 240MB",
       kind: "blob",
-      col: 3,
-      row: 3,
+      col: 2,
+      row: 0,
       parent: "hierarchy-group",
       detail: {
         what: "A versioned, immutable array of edge weights for the current traffic window, published every 5 minutes and swapped into pods behind an atomic pointer flip.",
@@ -351,11 +299,11 @@ export const GOOGLE_MAPS: Diagram = {
     },
     {
       id: "order-builder",
-      label: "Contraction order builder",
+      label: "Order builder",
       sub: "nested dissection, weekly",
       kind: "service",
-      col: 5,
-      row: 1,
+      col: 2,
+      row: 2,
       detail: {
         what: "The batch job that derives a node ordering from graph structure alone and inserts every shortcut that order implies, with no witness search and no weights involved.",
         why: "This is the half of preprocessing that must not depend on travel time. Deriving the order by nested dissection over a separator hierarchy makes the resulting topology valid for any non-negative metric, which is exactly what lets weights be refreshed without touching structure.",
@@ -380,9 +328,9 @@ export const GOOGLE_MAPS: Diagram = {
     {
       id: "customisation-pass",
       label: "Customisation pass",
-      sub: "bottom-up sweep, ~1s per continent",
+      sub: "bottom-up sweep, ~1s",
       kind: "service",
-      col: 5,
+      col: 2,
       row: 3,
       detail: {
         what: "One bottom-up sweep over the contracted nodes, setting every shortcut weight to the minimum over its two-hop paths under the current travel times, and publishing the result as a new metric version.",
@@ -407,48 +355,23 @@ export const GOOGLE_MAPS: Diagram = {
 
     // --------------------------------------------------------------- closures
     {
-      id: "closure-source",
-      label: "Closure sources",
-      sub: "transport authorities, police feeds",
-      kind: "external",
-      col: 6,
-      row: 1,
-      detail: {
-        what: "The third parties who know a road is shut: transport authorities, police and highways feeds, and roadworks schedules. Outside our trust boundary and outside our pager.",
-        why: "A closed road produces no probes, which reads to the aggregator exactly like a quiet road. This is the one input the traffic pipeline structurally cannot derive, so it has to come from outside it.",
-        numbers: [
-          "requirement: closure reflected in routing within 60s",
-          "against a 300s aggregation window",
-        ],
-        breaks:
-          "Their coverage and latency are not ours to fix, and a feed can go quiet without failing: no closures reported is indistinguishable from no closures happening, so a silent feed needs a heartbeat rather than an error rate.",
-        choice: {
-          pick: "Verified institutional feeds only",
-          instead: "Accept crowdsourced user reports of closures directly.",
-          decider:
-            "The cost of a false positive. A wrongly closed motorway re-plans every navigation in the region within one window, so the bar for writing straight into a live metric is confirmation, not volume. User reports are a useful signal for prioritising verification, not an authority to close an edge.",
-          flips:
-            "Disasters and fast-moving events, where institutional feeds lag by hours and being roughly right immediately beats being exactly right late. Then clustered user reports promote to a lower-confidence closure with a short expiry.",
-        },
-      },
-    },
-    {
       id: "closure-gate",
       label: "Closure override gate",
       sub: "two-source confirm, kill switch",
       kind: "service",
-      col: 6,
+      col: 0,
       row: 3,
       detail: {
-        what: "Our side of the override channel: it confirms, rate-limits and applies closures, writing edges impassable straight into the live weight array and handing the same set to the next customisation pass.",
-        why: "The external feed is a claim; this is the component that decides whether to act on it. It exists because the override path writes into a live artefact with none of the gating a deploy gets, so the gating has to live somewhere and it cannot live in the third party.",
+        what: "Our side of the override channel: it confirms, rate-limits and applies closures reported by third parties — transport authorities, police and highways feeds, and roadworks schedules, all outside our trust boundary and our pager — writing edges impassable straight into the live weight array and handing the same set to the next customisation pass.",
+        why: "The external feed is a claim; this is the component that decides whether to act on it. It exists because the override path writes into a live artefact with none of the gating a deploy gets, so the gating has to live somewhere and it cannot live in the third party. A closed road produces no probes, which reads to the aggregator exactly like a quiet road, so this is the one input the traffic pipeline structurally cannot derive itself.",
         numbers: [
           "impassable within 60s of a confirmed closure",
           "two-source confirmation on motorway-class edges",
           "per-region rate limit on closure events",
+          "source requirement: closure reflected within 60s against a 300s aggregation window",
         ],
         breaks:
-          "It owns the largest blast radius in the system. A bad polygon flagging a motorway closed re-plans every navigation in the region inside one window, and there is no gradual rollout for a metric write, so the operator kill switch is the mitigation of last resort rather than a nice-to-have.",
+          "It owns the largest blast radius in the system. A bad polygon flagging a motorway closed re-plans every navigation in the region inside one window, and there is no gradual rollout for a metric write, so the operator kill switch is the mitigation of last resort rather than a nice-to-have. The upstream feeds' own coverage and latency are not ours to fix, and a feed can go quiet without failing: no closures reported is indistinguishable from no closures happening, so the source needs a heartbeat rather than an error rate.",
         choice: {
           pick: "Confirm and rate-limit, then write directly into the current weight array",
           instead: "Let the closure show up through the next aggregation window like any other speed change.",
@@ -463,11 +386,11 @@ export const GOOGLE_MAPS: Diagram = {
     // ---------------------------------------------------------------- traffic
     {
       id: "history-profiles",
-      label: "Historical speed profiles",
+      label: "Speed profiles",
       sub: "per segment, per time of day",
       kind: "database",
-      col: 2,
-      row: 5,
+      col: 1,
+      row: 3,
       detail: {
         what: "The prior: a typical speed for every segment, keyed by time of day and day of week, fitted from months of past windows. It is what fills in the ~97% of edges no probe touched, and what the ETA model uses beyond the near horizon.",
         why: "The reduce step cannot publish a weight for a segment it has no samples for, and leaving a hole is not an option because the router has to cost that edge somehow. This is where the number comes from when there is no measurement.",
@@ -494,7 +417,7 @@ export const GOOGLE_MAPS: Diagram = {
       sub: "anonymised GPS, ~1M/s peak",
       kind: "queue",
       col: 0,
-      row: 6,
+      row: 2,
       detail: {
         what: "The ingest path for anonymised location pings from every device in motion with location sharing on, not only from devices actively navigating.",
         why: "It is a reduce-and-drop stream. Probes exist to produce this window's segment speeds and nothing downstream needs them afterwards, which is why the design has no long-term storage line for them at all.",
@@ -517,10 +440,10 @@ export const GOOGLE_MAPS: Diagram = {
     },
     {
       id: "traffic-agg",
-      label: "Traffic aggregator: one job, one window watermark",
+      label: "Traffic aggregator",
       kind: "serviceGroup",
       col: 1,
-      row: 6,
+      row: 2,
       detail: {
         what: "The streaming job that turns probes into the next weight metric. Match, reduce and state are stages of it rather than services: they are bound to the same 5-minute window and share its watermark.",
         why: "Splitting them into separate deployables buys nothing and costs a queue per boundary, because none of them can advance past the window the others are on. The write-up treats them as one component for the same reason: they share one pager row, and every symptom of a matching failure appears as a reduce-side lag.",
@@ -547,7 +470,7 @@ export const GOOGLE_MAPS: Diagram = {
       sub: "HMM over candidate segments",
       kind: "process",
       col: 1,
-      row: 6,
+      row: 2,
       parent: "traffic-agg",
       detail: {
         what: "Snaps each probe to a road segment using position, heading and the recent trajectory rather than distance alone, emitting (segment, speed) pairs.",
@@ -570,8 +493,8 @@ export const GOOGLE_MAPS: Diagram = {
       label: "Window reduce",
       sub: "trimmed mean, 5-min tumbling",
       kind: "process",
-      col: 2,
-      row: 6,
+      col: 1,
+      row: 2,
       parent: "traffic-agg",
       detail: {
         what: "Reduces the matched pairs into one speed per segment per 5-minute window, discarding the top and bottom 10% of samples, and falling back to the historical profile for any segment with too few.",
@@ -596,10 +519,10 @@ export const GOOGLE_MAPS: Diagram = {
     {
       id: "segment-state",
       label: "Segment state machine",
-      sub: "free/slow/heavy/stopped, 2-window hysteresis",
+      sub: "free/slow/heavy/stopped",
       kind: "process",
-      col: 4,
-      row: 6,
+      col: 1,
+      row: 2,
       parent: "traffic-agg",
       detail: {
         what: "Compares each segment's reduced speed against its typical profile and drives a small state machine — free, slow, heavy, stopped, plus a Closed state only the override can set — requiring a state to hold for two consecutive windows before it changes.",
@@ -625,62 +548,29 @@ export const GOOGLE_MAPS: Diagram = {
   edges: [
     // ----------------------------------------------------------------- tiles
     {
-      id: "e1",
+      id: "e-tiles",
       from: "client",
-      to: "tile-cdn",
+      to: "tile-origin",
+      tier: "hot",
       label: "tiles (z, x, y)",
-      animated: true,
-      fromSide: "top",
-      toSide: "left",
       detail: {
-        what: "Tile fetches as the user pans and zooms, addressed by zoom, column and row.",
-        why: "The map on screen is bytes written weeks ago. Keeping the key purely geometric, with no per-user variation in it, is what makes every response cacheable for everybody at the edge.",
-        numbers: ["~20 tiles per session", "10B/day, ~350k/s at peak", "p99 under 500ms"],
+        what: "Tile fetches as the user pans and zooms, addressed by zoom, column and row, answered from the nearest edge cache over 95% of the time and falling through to the object store on a miss.",
+        why: "The map on screen is bytes written weeks ago. Keeping the key purely geometric, with no per-user variation, is what makes every response cacheable for everybody at the edge, and cold tiles are the long tail of a Zipfian distribution so they are pulled lazily on first request rather than pushed.",
+        numbers: ["~20 tiles per session", "10B/day, ~350k/s at peak", "p99 under 500ms", "5% miss reaches the origin, ~5.8k/s average, ~17k/s peak"],
         breaks:
-          "High zoom bands cache worst, typically under 90% hit above z=14 against over 99% below z=10, so the miss traffic concentrates in exactly the detailed tiles that cost most to render.",
+          "High zoom bands cache worst, typically under 90% hit above z=14 against over 99% below z=10, so the miss traffic concentrates in exactly the detailed tiles that cost most to render. Origin capacity is a consequence of cache behaviour: an 80% hit rate needs 23k/s of origin instead of 5.8k/s for the same traffic.",
       },
     },
     {
-      id: "e2",
-      from: "tile-cdn",
-      to: "tile-origin",
-      label: "5% miss, ~5.8k/s",
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "The cache miss path: a tile the edge does not hold being fetched from object storage.",
-        why: "Cold tiles are the long tail of a Zipfian distribution, so they are pulled lazily on first request rather than pushed. The origin exists to be boring and small.",
-        numbers: ["5% of 10B/day = 500M/day", "~5.8k req/s average, ~17k/s at peak"],
-        breaks:
-          "Origin capacity is a consequence of cache behaviour rather than of user traffic: at an 80% hit rate the same product needs 23k/s of origin instead of 5.8k/s.",
-      },
-    },
-    {
-      id: "e3",
-      from: "tile-builder",
-      to: "tile-origin",
-      label: "re-rendered tiles",
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "Newly rendered tile objects written back to the corpus for the regions a diff touched.",
-        why: "Tiles are versioned rather than mutated so the CDN can be told about a new pointer instead of being asked to invalidate individual keys across every point of presence.",
-        numbers: ["15TB/week", "~1% of materialised tiles"],
-        breaks:
-          "Flipping the version pointer before popular tiles are warm dumps the whole invalidation set onto the origin at once, which is the failure that takes tile serving down after a large edit.",
-      },
-    },
-    {
-      id: "e4",
+      id: "e-tilebuild",
       from: "map-source",
-      to: "tile-builder",
-      label: "diff bounding boxes",
-      fromSide: "left",
-      toSide: "right",
+      to: "tile-origin",
+      tier: "data",
+      label: "diff-driven re-render",
       detail: {
-        what: "The applied diff, reduced to the bounding boxes of what changed so the builder can compute the tile set to re-render.",
-        why: "Geometry is the fastest-changing of the three derivations and the cheapest to redo, so it takes the diff directly rather than waiting for anything to be rebuilt.",
-        numbers: ["~3M edits/day", "~1% of materialised tiles touched per week"],
+        what: "The applied diff, reduced to the bounding boxes of what changed, driving a batch re-render that writes new tile objects back into the corpus and flips the version pointer once the popular ones are warm.",
+        why: "Geometry is the fastest-changing of the three derivations and the cheapest to redo, so it takes the diff directly rather than waiting for anything to be rebuilt. Tiles are versioned rather than mutated so the CDN can be told about a new pointer instead of being asked to invalidate individual keys across every point of presence.",
+        numbers: ["~3M edits/day", "~1% of materialised tiles touched per week", "15TB/week re-render against a 1.5PB corpus"],
         breaks:
           "One boundary edit expands to thousands of tiles from z=10 to z=18, so the bounding box has to be expanded per zoom level and deduped before it reaches the render queue, or the queue length becomes a function of editor behaviour.",
       },
@@ -689,10 +579,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e5",
       from: "map-source",
       to: "order-builder",
+      tier: "control",
       label: "topology changes",
-      fromSide: "bottom",
-      toSide: "top",
-      dashed: true,
       detail: {
         what: "The same upstream data, read for structure rather than geometry: which intersections exist, which segments connect them, and what the turn restrictions are.",
         why: "Drawn dashed and slow because the order only has to track when roads physically change, not when the map is edited. A relabelled café moves a tile and nothing else.",
@@ -707,10 +595,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e6",
       from: "client",
       to: "upward-search",
+      tier: "hot",
       label: "POST /route",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A route request carrying origin, destination, mode and preferences.",
         why: "One request per trip start plus a re-plan only on genuine deviation. Everything expensive about routing has already happened by the time this arrives, which is why a 100ms in-pod budget is achievable at all.",
@@ -749,10 +635,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e9",
       from: "eta-model",
       to: "client",
+      tier: "hot",
       label: "polyline + turns + ETA",
-      animated: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The response: the route polyline, the turn instructions and an arrival time, plus the metric version it was planned against.",
         why: "This is the whole contract with the client for the rest of the trip. Everything after it — speaking turns, matching GPS, deciding whether to ask again — happens on the phone against these bytes.",
@@ -765,10 +649,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e10",
       from: "cch-topology",
       to: "upward-search",
+      tier: "control",
       label: "order + shortcuts, weekly",
-      dashed: true,
-      fromSide: "left",
-      toSide: "top",
       detail: {
         what: "The topology being loaded into pod memory, which happens on the weekly order cadence rather than the traffic cadence.",
         why: "Drawn as a control path because it is not traffic, it is a deployment. Separating it from the metric swap is what makes a bad order rollback-able without touching freshness.",
@@ -781,10 +663,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e11",
       from: "weight-metric",
       to: "upward-search",
+      tier: "hot",
       label: "metric swap, every 5 min",
-      animated: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The current weight array being swapped into a running pod behind a pointer flip. This is the arrow the whole design is about.",
         why: "It is not a request path. It is the weights being replaced underneath a resident graph, which is how a structure preprocessed for one metric keeps answering questions about a world that changed 90 seconds ago.",
@@ -799,9 +679,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e12",
       from: "order-builder",
       to: "cch-topology",
+      tier: "data",
       label: "weekly rebuild",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "A newly computed order and its shortcut set published as an artefact.",
         why: "Roads change on the timescale of construction, not congestion, so this pipeline runs on its own slow clock and never blocks the fast one.",
@@ -814,11 +693,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e13",
       from: "cch-topology",
       to: "customisation-pass",
+      tier: "control",
       label: "shortcut topology",
-      dashed: true,
-      fromSide: "top",
-      toSide: "top",
-      offset: 60,
       detail: {
         what: "The pass reading the current order and shortcut set so it knows which weights to compute and in what sequence.",
         why: "The sweep is defined by the topology: visit contracted nodes in order, take the minimum over each shortcut's two-hop paths. Without the order there is nothing to sweep, which is why the two artefacts are versioned together.",
@@ -831,9 +707,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e14",
       from: "customisation-pass",
       to: "weight-metric",
+      tier: "data",
       label: "writes 240MB array",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The output of the sweep: a complete new weight array keyed by edge id, published as a new version.",
         why: "Publishing a whole artefact rather than a patch is what makes the swap atomic and the result reproducible. Versions are cheap and being able to recost a complaint against the exact metric that produced it is the only debugging tool that works.",
@@ -848,10 +723,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e15",
       from: "client",
       to: "probe-bus",
+      tier: "hot",
       label: "anonymised GPS pings",
-      animated: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "Location pings with lat, lng, heading, speed, timestamp and a rotating id, sent from devices in motion.",
         why: "The probe stream is not a navigation feature: it comes from everyone with location sharing on, which is what gives coverage on roads nobody is currently being routed along.",
@@ -864,9 +737,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e16",
       from: "probe-bus",
       to: "map-match",
+      tier: "data",
       label: "~1M probes/s",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Batches of raw probes handed to matching.",
         why: "Ingest and matching are the one boundary in this pipeline that is genuinely a queue: ingest is network bound and trivially partitioned, matching is CPU bound and needs a probe's recent history, and the buffer between them absorbs the commute ramp.",
@@ -880,8 +752,6 @@ export const GOOGLE_MAPS: Diagram = {
       from: "map-match",
       to: "window-reduce",
       label: "(segment, speed)",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Matched pairs: one road segment and one observed speed per probe.",
         why: "This is where a location becomes a fact about a road. Everything downstream is arithmetic over segments, so the graph identity is attached exactly once, here.",
@@ -895,8 +765,6 @@ export const GOOGLE_MAPS: Diagram = {
       from: "window-reduce",
       to: "segment-state",
       label: "trimmed mean/segment",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "One speed per segment for the closed window, measured where there were enough samples and taken from the profile where there were not.",
         why: "The state machine needs a single settled number per segment per window; comparing a distribution against a profile every window is the same decision made with more moving parts.",
@@ -909,10 +777,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e19",
       from: "history-profiles",
       to: "window-reduce",
+      tier: "control",
       label: "under 5 samples",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "The fallback lookup: a segment with too few probes in the window takes its typical speed for this weekday and time bucket instead.",
         why: "There is no third option. The router has to cost every edge, so a segment with no measurement gets a prior rather than a hole, and the prior is calibrated well enough on aggregate to be defensible.",
@@ -925,10 +791,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e20",
       from: "history-profiles",
       to: "eta-model",
+      tier: "control",
       label: "beyond ~20 min",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The far half of the trip costed on typical speeds for the time the driver will actually be there, rather than on this window's numbers.",
         why: "Current weights are the best estimate for the next 15 to 20 minutes and a worse one after that, because congestion moves. This is the cheap approximation of time-dependent routing.",
@@ -941,9 +805,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e21",
       from: "segment-state",
       to: "customisation-pass",
+      tier: "data",
       label: "per-segment speeds",
-      fromSide: "top",
-      toSide: "bottom",
       detail: {
         what: "The settled per-segment speeds for the closed window, handed to the sweep as the metric to customise against.",
         why: "The pass needs one complete, consistent picture rather than a stream, because a hierarchy customised against a half-formed window is internally inconsistent in ways no query can detect.",
@@ -955,29 +818,11 @@ export const GOOGLE_MAPS: Diagram = {
 
     // --------------------------------------------------------------- closures
     {
-      id: "e22",
-      from: "closure-source",
-      to: "closure-gate",
-      label: "verified closures",
-      fromSide: "bottom",
-      toSide: "top",
-      detail: {
-        what: "Closure notices from transport authorities and police feeds arriving as edge or polygon claims.",
-        why: "This is the only input to the routing metric that does not come from probes, and it exists because a closed road generates no probes at all.",
-        numbers: ["must reach routing within 60s", "against a 300s aggregation window"],
-        breaks:
-          "Silence is ambiguous: a feed that has stopped publishing looks exactly like a period with no closures, so this arrow needs a heartbeat rather than an error rate to be monitorable at all.",
-      },
-    },
-    {
       id: "e23",
       from: "closure-gate",
       to: "weight-metric",
+      tier: "control",
       label: "impassable now",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "bottom",
-      offset: 70,
       detail: {
         what: "A confirmed closure setting the affected edges impassable in the array pods are currently serving, without waiting for a window.",
         why: "It is the one input allowed to skip the pipeline, because the pipeline structurally cannot see it: no probes are generated on a closed road, so aggregation reads a closure as quiet traffic.",
@@ -990,10 +835,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e24",
       from: "closure-gate",
       to: "customisation-pass",
+      tier: "control",
       label: "folded next window",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The same closure set handed to the next sweep, so the closure becomes part of the metric properly rather than remaining a patch on top of one version of it.",
         why: "Without this the override would be lost at the next pointer flip: the sweep rebuilds every shortcut weight from the traffic metric, and anything written directly into the previous array is simply overwritten.",

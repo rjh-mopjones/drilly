@@ -103,39 +103,21 @@ export const HOTEL_RESERVATION: Diagram = {
       },
     },
     {
-      id: "search-cache",
-      label: "Query cache",
-      sub: "Redis, 60s TTL",
-      kind: "cache",
-      col: 0,
-      row: 2,
-      detail: {
-        what: "A read-through cache keyed on (city, date range, guests), holding the rendered result page for 60 seconds.",
-        why: "The cache key repeats heavily across users: Sunday-evening planners search the same twenty cities for the same weekends. Absorbing that repetition is what keeps the index tier small, and 60 seconds of staleness is invisible next to the change-capture lag already in front of it.",
-        numbers: ["~70% hit rate", "4k/s peak in, ~1.2k/s reaching the index", "60-second TTL"],
-        breaks:
-          "It is the component you are allowed to lose. A cold cache costs latency and index load, not correctness. What it does do is make scraping cheap: a sequential sweep of a city and date grid is served from the same cache that makes real search affordable.",
-        choice: {
-          pick: "A 60-second TTL on the query key, plus the top few hundred city and date combinations pre-rendered to static JSON at the edge",
-          instead: "No cache and a bigger index tier, or a long TTL with explicit invalidation on every inventory change.",
-          decider:
-            "Hit rate against tolerable staleness. 60 seconds buys ~70% of a 4k/s peak, and going longer buys very little more while pushing staleness past the point where the NO_AVAILABILITY rate at booking becomes noticeable. Invalidating per change means 3.2M invalidations a day against a key space nobody can enumerate.",
-          flips:
-            "Personalised or logged-in pricing, where the key includes the user and the hit rate collapses, so the cache earns nothing and only adds a staleness bug.",
-        },
-      },
-    },
-    {
       id: "search-index",
       label: "Search index",
       sub: "Elasticsearch, denormalised docs",
       kind: "database",
       col: 0,
-      row: 3,
+      row: 2,
       detail: {
-        what: "A denormalised, eventually consistent copy of hotel documents with cached minimum prices and coarse availability, plus a geo index behind 'hotels within 5km'.",
-        why: "It answers 'plausibly available' cheaply, and the booking path answers the real question authoritatively. It never touches the inventory table, which is what keeps a 4k/s peak read load off the write path entirely.",
-        numbers: ["5M docs x ~5KB = 25GB primary, ~75GB with replica and analysis", "~10GB geo index", "sharded by city"],
+        what: "A denormalised, eventually consistent copy of hotel documents with cached minimum prices and coarse availability, plus a geo index behind 'hotels within 5km'. A Redis query cache keyed on (city, date range, guests) sits in front, holding rendered result pages for 60 seconds.",
+        why: "It answers 'plausibly available' cheaply, and the booking path answers the real question authoritatively. It never touches the inventory table, which is what keeps a 4k/s peak read load off the write path entirely. The query cache absorbs most of that peak before it reaches the index at all: the key repeats heavily, since Sunday-evening planners search the same twenty cities for the same weekends, and losing the cache costs latency and index load, never correctness.",
+        numbers: [
+          "5M docs x ~5KB = 25GB primary, ~75GB with replica and analysis",
+          "~10GB geo index",
+          "sharded by city",
+          "cache: ~70% hit rate, 60s TTL, 4k/s peak in vs ~1.2k/s reaching the index",
+        ],
         breaks:
           "It is allowed to be wrong and regularly is. The failure that actually hurts is out-of-order application, so events carry a monotonic log position and documents are written idempotently by key, or a slow partition regresses a document to an older state.",
         choice: {
@@ -153,8 +135,8 @@ export const HOTEL_RESERVATION: Diagram = {
       label: "Change capture",
       sub: "Debezium off the WAL",
       kind: "queue",
-      col: 0,
-      row: 4,
+      col: 3,
+      row: 2,
       detail: {
         what: "A durable stream of the transactional store's write log, carrying hotel, price and availability changes to be denormalised into search documents.",
         why: "It is the only link between the two halves and it points one way: the transactional store feeds the index, never the reverse. Reading the write log means the index cannot miss a change that a dual write would drop.",
@@ -203,7 +185,7 @@ export const HOTEL_RESERVATION: Diagram = {
       sub: "stage 2",
       kind: "process",
       col: 1,
-      row: 2,
+      row: 1,
       parent: "booking-svc",
       detail: {
         what: "Picks the cheapest legal combination of rate plans across the nights of the stay, as a pure read against a price snapshot, before any lock is taken.",
@@ -227,7 +209,7 @@ export const HOTEL_RESERVATION: Diagram = {
       sub: "stage 3",
       kind: "process",
       col: 1,
-      row: 3,
+      row: 1,
       parent: "booking-svc",
       detail: {
         what: "Drives reserve, authorise, confirm and fan-out as separate persisted steps, with compensations keyed to (booking_id, step_id).",
@@ -248,40 +230,17 @@ export const HOTEL_RESERVATION: Diagram = {
 
     // --- idempotency ----------------------------------------------------
     {
-      id: "idem-cache",
-      label: "Idempotency cache",
-      sub: "Redis, read-through",
-      kind: "cache",
-      col: 2,
-      row: 0,
-      detail: {
-        what: "A read-through cache of recently seen idempotency keys, answering 'have I seen this key' without a round trip to the durable table.",
-        why: "It is drawn outside the transaction frame on purpose. It makes the common case cheap and it is allowed to be lost; the guarantee lives one box down in a unique constraint that cannot be lost.",
-        numbers: ["fast path only", "TTL comfortably longer than the 10-minute hold", "~120 lookups/s at peak"],
-        breaks:
-          "A failover loses in-flight keys, and the duplicate-key rate spikes exactly when clients are retrying hardest. That costs latency and a burst of constraint violations, which is the correct outcome: the insert below still rejects the duplicate.",
-        choice: {
-          pick: "Cache in front, durable constraint behind",
-          instead: "Skip the cache and go to Postgres for every attempt.",
-          decider:
-            "At ~120 bookings/s peak the durable lookup is affordable, so the cache buys latency rather than capacity. It earns its place because it also absorbs the retry storm itself: a client hammering a dropped request hits Redis, not the shard holding the inventory rows.",
-          flips:
-            "Any deployment where an extra tier is not worth a few milliseconds. This box is a fast path, and removing it changes nothing about correctness.",
-        },
-      },
-    },
-    {
       id: "idem-table",
       label: "Idempotency keys",
       sub: "Postgres, unique constraint",
       kind: "database",
-      col: 2,
-      row: 1,
+      col: 1,
+      row: 0,
       parent: "txn",
       detail: {
-        what: "A durable (key, booking_id, state) table with a unique constraint on key, inserted in the same transaction as the decrement.",
-        why: "The constraint is the guarantee. A duplicate insert failing is how a retry is detected, and doing it inside the transaction means a rolled-back stay does not leave a key claimed by a booking that never happened.",
-        numbers: ["1M rows/day", "insert and decrement commit together", "0 rows returned means retry"],
+        what: "A durable (key, booking_id, state) table with a unique constraint on key, inserted in the same transaction as the decrement. A Redis read-through cache sits in front as a fast path only, answering 'have I seen this key' without a round trip here.",
+        why: "The constraint is the guarantee. A duplicate insert failing is how a retry is detected, and doing it inside the transaction means a rolled-back stay does not leave a key claimed by a booking that never happened. The cache is allowed to be lost because the guarantee lives in the constraint, not in Redis; it earns its place by absorbing the retry storm itself before it reaches the shard holding the inventory rows.",
+        numbers: ["1M rows/day", "insert and decrement commit together", "0 rows returned means retry", "cache: ~120 lookups/s peak, TTL longer than the 10-minute hold"],
         breaks:
           "If this record can be lost, the guarantee degrades to a probability, and it degrades exactly during a burst when retries are most likely. The guest then holds two confirmations for the same stay.",
         choice: {
@@ -302,7 +261,7 @@ export const HOTEL_RESERVATION: Diagram = {
       sub: "sharded by hotel_id",
       kind: "service",
       col: 2,
-      row: 2,
+      row: 1,
       parent: "txn",
       detail: {
         what: "Owns the smallest possible critical section: one statement that increments sold on every night of the stay where sold < allowance, and returns the dates it changed.",
@@ -323,17 +282,22 @@ export const HOTEL_RESERVATION: Diagram = {
     {
       id: "inventory-table",
       label: "Inventory rows",
-      sub: "(hotel, room_type, date) -> sold, allowance",
+      sub: "(hotel, room_type, date) counts",
       kind: "database",
       col: 3,
-      row: 3,
+      row: 1,
       parent: "txn",
       detail: {
-        what: "One row per bookable room-night, sharded by hotel_id, holding two independently owned counters plus price and restrictions.",
-        why: "The two columns exist because two writers touch the row. The booking path owns sold and the nightly forecast job overwrites allowance, and neither has to read the other's value to write its own, which removes the read-modify-write race by construction.",
-        numbers: ["5M hotels x 50 room types x 730 days = 182.5B rows", "~100B per row, ~18.25TB", "one touch every ~7,000 days on the mean row"],
+        what: "One row per bookable room-night, sharded by hotel_id, holding two independently owned counters plus price and restrictions. allowance is overwritten nightly by a revenue forecast job, per property and room-type class, as physical capacity plus a demand-driven oversell; the job never reads or writes sold.",
+        why: "The two columns exist because two writers touch the row. The booking path owns sold and the nightly forecast job overwrites allowance, and neither has to read the other's value to write its own, which removes the read-modify-write race by construction. Overselling is a deliberate strategy, not an accident: roughly one flexible booking in ten no-shows or cancels, and at a $200 ADR against a ~$300 walk cost the critical fractile is 0.4, so a 120-room class oversold by 11 recovers ~$2,200 a night against ~$270 of expected walk cost.",
+        numbers: [
+          "5M hotels x 50 room types x 730 days = 182.5B rows",
+          "~100B per row, ~18.25TB",
+          "one touch every ~7,000 days on the mean row",
+          "forecast: physical + 5-15% oversell, hard-clamped at physical x 1.2, none below ~20 units",
+        ],
         breaks:
-          "Collapsing the two columns into a single available_count reintroduces the race: a job that runs at 02:00 and takes four minutes over a 500-hotel chain will occasionally resurrect inventory that was sold while it was thinking.",
+          "Collapsing the two columns into a single available_count reintroduces the race: a job that runs at 02:00 and takes four minutes over a 500-hotel chain will occasionally resurrect inventory that was sold while it was thinking. A stale or broken forecast is caught by the hard clamp rather than trusted silently, and classes below about 20 units get no oversell at all: with 8 suites the no-show mean is 0.8 and one extra sold walks a guest on 43% of nights.",
         choice: {
           pick: "Sharded Postgres, primary key (hotel_id, room_type_id, date), sold and allowance as separate columns",
           instead: "A single available_count per row, or a per-unit calendar with a status per physical room.",
@@ -344,29 +308,6 @@ export const HOTEL_RESERVATION: Diagram = {
         },
       },
     },
-    {
-      id: "forecast-job",
-      label: "Revenue forecast job",
-      sub: "writes allowance nightly",
-      kind: "service",
-      col: 4,
-      row: 3,
-      detail: {
-        what: "A nightly job per property and room-type class that writes allowance as physical capacity plus a forecast-driven oversell. It never touches sold.",
-        why: "Roughly one flexible booking in ten no-shows or cancels on the day, and an unsold room-night is revenue that never comes back. Overselling is the strategy; this job is what makes it a controlled number rather than an accident.",
-        numbers: ["blended no-show ~10%", "critical fractile 200/(200+300) = 0.4", "120 rooms sold as 131, a 9% oversell"],
-        breaks:
-          "A stale or broken forecast writes an allowance far above policy, so the write path hard-clamps anything above physical x 1.2 and alerts rather than truncating silently. Classes below about 20 units get no oversell at all: with 8 suites the no-show mean is 0.8 and selling one extra walks a guest on 0.9^8 = 43% of nights.",
-        choice: {
-          pick: "Sell against a forecast allowance, enforced exactly by the transactional path",
-          instead: "Put the physical room count in the row and never sell the 121st room.",
-          decider:
-            "Walk cost against nightly rate and class size. At $200 ADR and a ~$300 walk the critical fractile is 0.4, so a 120-room class oversells by 11 and recovers 11 x $200 = $2,200 a night against ~$270 of expected walk cost, roughly eight to one.",
-          flips:
-            "When units are not substitutable, so there is nothing to walk a guest into: unique listings, a 12-room boutique with no comparable property in town, or accessible and connecting rooms booked for a stated reason. Small classes too, where the arithmetic inverts.",
-        },
-      },
-    },
 
     // --- saga legs ------------------------------------------------------
     {
@@ -374,8 +315,8 @@ export const HOTEL_RESERVATION: Diagram = {
       label: "Bookings + saga state",
       sub: "partitioned by month",
       kind: "database",
-      col: 2,
-      row: 4,
+      col: 1,
+      row: 2,
       detail: {
         what: "The reservation record and the saga's persisted state machine: INVENTORY_RESERVED, PaymentAuthorized, CONFIRMED, and the compensation states beside them.",
         why: "The row is inserted as INVENTORY_RESERVED inside the inventory transaction, and every later transition is written as it happens. Without state at every step a crashed orchestrator cannot tell what it already did.",
@@ -397,8 +338,8 @@ export const HOTEL_RESERVATION: Diagram = {
       label: "Payment provider",
       sub: "authorise now, capture later",
       kind: "external",
-      col: 1,
-      row: 5,
+      col: 2,
+      row: 2,
       detail: {
         what: "A third-party card network call made after inventory has committed: authorise the full stay, capture at check-in for flexible rates and immediately for prepaid ones.",
         why: "An authorisation holds funds without moving them and voids at zero cost, whereas a capture moves money and reversing it means a refund with a per-transaction fee and accounting noise. Holds survive about 7 days, which comfortably covers the saga.",
@@ -421,13 +362,18 @@ export const HOTEL_RESERVATION: Diagram = {
       sub: "retry queue, per-consumer",
       kind: "queue",
       col: 2,
-      row: 5,
+      row: 3,
       detail: {
-        what: "The durable topic the saga publishes to once a booking is CONFIRMED, with an independent subscription per downstream consumer.",
-        why: "The booking is already committed by this point, so everything downstream is an effect rather than a step. Independent subscriptions mean a stalled loyalty consumer cannot delay confirmation emails, and each retries on its own clock.",
-        numbers: ["1M confirmations/day", "published after commit, never inside the ~2ms transaction", "per-consumer backpressure"],
+        what: "The durable topic the saga publishes to once a booking is CONFIRMED, with an independent subscription per downstream consumer: a notification service that renders and sends the confirmation email, SMS and partner callbacks, and a loyalty service that credits points keyed by booking id and runs a periodic reconciliation sweep against the bookings table.",
+        why: "The booking is already committed by this point, so everything downstream is an effect rather than a step. Independent subscriptions mean a stalled loyalty consumer cannot delay confirmation emails, and each retries on its own clock. The user already has their reference number from the HTTP response, so a missing email is a support ticket, not a lost booking; a missed accrual is noticed only months later, which is why loyalty additionally reconciles against the bookings table instead of trusting the queue alone.",
+        numbers: [
+          "1M confirmations/day, 1M accruals/day",
+          "published after commit, never inside the ~2ms transaction",
+          "per-consumer backpressure",
+          "notification: best-effort with a resend endpoint; loyalty: event-driven plus reconciliation",
+        ],
         breaks:
-          "Publishing after commit means the publish itself can be lost, so the queue is not a guarantee on its own. What closes it is that every consumer can be driven from the bookings table instead, which is what reconciliation does.",
+          "Publishing after commit means the publish itself can be lost, so the queue is not a guarantee on its own. Retries cannot recover an event that was never published: notifications cover that with a resend endpoint, loyalty covers it by reconciling against the bookings table, which is the only check that closes the gap for a silently dropped accrual.",
         choice: {
           pick: "Asynchronous fan-out on a retry queue after the booking commits",
           instead: "Sending the confirmation inside the booking transaction so the user cannot be told without it.",
@@ -438,61 +384,35 @@ export const HOTEL_RESERVATION: Diagram = {
         },
       },
     },
-    {
-      id: "notification-svc",
-      label: "Notification service",
-      sub: "email / SMS, partner callbacks",
-      kind: "service",
-      col: 2,
-      row: 6,
-      detail: {
-        what: "Renders and sends the confirmation, plus any partner callbacks, from the booking event.",
-        why: "It is downstream of a booking that is already durable, so a missing email is not a lost booking. The reference number comes back on the confirmation response and is retrievable from the account.",
-        numbers: ["1M confirmations/day", "retries with backoff", "resend is an endpoint, not an incident"],
-        breaks:
-          "Never let email be how the user learns they booked. If the confirmation response is the only carrier of the reference number, a provider outage becomes a support queue instead of a retry.",
-        choice: {
-          pick: "Best-effort delivery with a resend endpoint, reference number returned synchronously",
-          instead: "Treat the email as the receipt and block confirmation on it being accepted by the provider.",
-          decider:
-            "What the user actually needs at the moment of booking, which is the reference number, and it is already in the HTTP response. Blocking on an external SMTP or push provider imports its availability into the booking SLO for no gain.",
-          flips:
-            "Channels where the message is the contract, such as a partner that only learns about the booking through the callback and has no API to poll.",
-        },
-      },
-    },
-    {
-      id: "loyalty-svc",
-      label: "Loyalty service",
-      sub: "accrual + reconciliation",
-      kind: "service",
-      col: 3,
-      row: 6,
-      detail: {
-        what: "Credits points for a confirmed stay, and runs a periodic sweep comparing confirmed bookings against accruals to catch anything the stream missed.",
-        why: "This is the downstream leg users actually notice missing, and it is the one where a silently dropped event has no other symptom. A retry only helps with deliveries that failed loudly.",
-        numbers: ["1M accruals/day", "reconciliation sweep over the bookings table", "accrual keyed by booking id"],
-        breaks:
-          "Double accrual is as bad as none, so the credit is keyed by booking id and the reconciliation job re-checks rather than re-emits. A blind replay of yesterday's events doubles everybody's points.",
-        choice: {
-          pick: "Event-driven accrual with a reconciliation job against the bookings table",
-          instead: "Retries on the queue alone, or computing balances on read from booking history.",
-          decider:
-            "Retries cannot see an event that was never published, and a publish after commit can be lost. The bookings table is the system of record for what happened, so reconciliation against it is the only check that closes the gap.",
-          flips:
-            "Deriving the balance from booking history on read, which removes the accrual entirely, and is viable while the history is small enough to aggregate at query time.",
-        },
-      },
-    },
 
     // --- recovery -------------------------------------------------------
     {
+      id: "recovery-svc",
+      label: "Recovery workers",
+      sub: "resume worker + sweeper",
+      kind: "serviceGroup",
+      col: 1,
+      row: 3,
+      detail: {
+        what: "Two background jobs that keep an abandoned or crashed saga from either stranding inventory forever or confirming with nothing behind it: a resume worker that replays a stalled saga forward from its last persisted step, and a leader-elected sweeper that releases room-nights still held after a 10-minute abandonment window.",
+        why: "Payment sits outside the inventory transaction, so there is a real window in which a crash or an abandoned checkout leaves room-nights consumed by a booking that never confirms. The resume worker's 60-second threshold races the sweeper's 10-minute one by design, so a process crash is normally recovered before the hold expires; when it is not, the confirm step re-checks state rather than trusting either job blindly.",
+        numbers: [
+          "resume: 60s threshold, forward-step keys make replay a no-op",
+          "sweeper: 10-minute hold, releases oldest first, idempotent by booking id",
+          "alert when the oldest non-terminal saga exceeds 60s",
+        ],
+        breaks:
+          "The sweeper releasing rows for a booking whose authorisation later succeeds is a real race; the confirm step must void that authorisation rather than confirm a booking with no inventory behind it. A blind decrement running twice gives two rooms back, which is why releases are keyed to (booking_id, step_id).",
+      },
+    },
+    {
       id: "resume-worker",
-      label: "Saga resume worker",
+      label: "Resume worker",
       sub: "replays from last step",
-      kind: "service",
-      col: 4,
-      row: 4,
+      kind: "process",
+      col: 1,
+      row: 3,
+      parent: "recovery-svc",
       detail: {
         what: "Picks up sagas that stopped mid-flight and replays them forward from the last persisted step.",
         why: "The dangerous crash is after the card is authorised and before the booking is written: money is held, inventory is consumed, and nothing is driving the booking to a terminal state. Replaying forward completes it; letting the sweeper release it would throw away a paid-for stay.",
@@ -513,9 +433,10 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "sweeper",
       label: "Expiry sweeper",
       sub: "leader-elected, 10 min hold",
-      kind: "service",
-      col: 4,
-      row: 5,
+      kind: "process",
+      col: 1,
+      row: 3,
+      parent: "recovery-svc",
       detail: {
         what: "A leader-elected job that releases the room-nights of any booking still in INVENTORY_RESERVED after 10 minutes, oldest first.",
         why: "Payment sits outside the inventory transaction, so there is a real window in which room-nights are consumed by a booking that never confirms. Abandonment on a payment form runs at tens of percent, so without this every abandoned checkout removes a room-night from sale permanently.",
@@ -538,8 +459,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e1",
       from: "client",
       to: "search-svc",
+      tier: "hot",
       label: "search: city + dates",
-      animated: true,
       detail: {
         what: "A search for a city, a date range and a guest count.",
         why: "This is where almost all of the traffic is: 43 searches for every booking, and around 400 reads per write once hotel-detail and calendar views are counted. Everything about the read path is shaped by that ratio.",
@@ -549,28 +470,15 @@ export const HOTEL_RESERVATION: Diagram = {
       },
     },
     {
-      id: "e2",
+      id: "e-search-query",
       from: "search-svc",
-      to: "search-cache",
-      label: "key: city, dates, guests",
-      animated: true,
-      detail: {
-        what: "The cache lookup on the normalised query key, taken before anything touches the index.",
-        why: "The key repeats heavily across users, so most of a peak is other people's identical searches. 60 seconds of TTL is enough to collapse them without adding staleness anyone can perceive next to the change-capture lag already in the pipeline.",
-        numbers: ["~70% hit rate", "60-second TTL"],
-        breaks:
-          "Adding the user to the key, for personalised pricing, collapses the hit rate and with it the entire capacity argument for this hop.",
-      },
-    },
-    {
-      id: "e3",
-      from: "search-cache",
       to: "search-index",
-      label: "miss: ~1.2k/s at peak",
+      tier: "hot",
+      label: "cache, then query on miss",
       detail: {
-        what: "The query into the denormalised index on a cache miss: geo filter, date filter, then ranking, returning about 20 hotel documents.",
-        why: "Availability in the index is deliberately coarse. It exists to say 'plausibly available' so the result set is small and cheap, and the authoritative answer is deferred to the write path.",
-        numbers: ["~1.2k/s of the 4k/s peak reaches the index", "~50ms per query"],
+        what: "The query key (city, date range, guests) checked against a 60s read-through cache first; on a miss, a geo filter, date filter and rank against the denormalised index, returning about 20 hotel documents.",
+        why: "The cache key repeats heavily across users, so most of a peak is other people's identical searches, and 60 seconds of staleness is invisible next to the change-capture lag already in front of it. Availability in the index itself is deliberately coarse: it exists to say 'plausibly available' cheaply, and the authoritative answer is deferred to the write path.",
+        numbers: ["~70% cache hit rate, 60s TTL", "~1.2k/s of the 4k/s peak reaches the index", "~50ms per query"],
         breaks:
           "A stale document means the user clicks a room that has gone. That costs one NO_AVAILABILITY and a re-search, which is friction and not a correctness failure.",
       },
@@ -579,10 +487,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e4",
       from: "client",
       to: "bk-dedupe",
+      tier: "hot",
       label: "POST /booking + key",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The booking request carrying hotel, room type, check-in, check-out, guest and a client-generated idempotency key.",
         why: "The key is on the request rather than derived server-side because only the client knows that a retry after a dropped connection is the same intent as the attempt it never saw a response to.",
@@ -592,28 +498,11 @@ export const HOTEL_RESERVATION: Diagram = {
       },
     },
     {
-      id: "e5",
-      from: "bk-dedupe",
-      to: "idem-cache",
-      label: "read-through fast path",
-      fromSide: "top",
-      toSide: "left",
-      detail: {
-        what: "The cheap lookup: has this key been seen recently.",
-        why: "It short-circuits the retry storm before it reaches the shard holding the inventory rows, which matters precisely because retries cluster in the same seconds as the load that caused them.",
-        numbers: ["hit means return the existing booking", "miss falls through to the insert"],
-        breaks:
-          "A miss here is never authoritative. Treating a cache miss as 'not a retry' without the durable insert is how the duplicate gets through, so this arrow can only ever save work, never decide.",
-      },
-    },
-    {
       id: "e6",
       from: "bk-dedupe",
       to: "idem-table",
+      tier: "data",
       label: "INSERT key, unique index",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Inserting (idempotency_key, booking_id) under a unique constraint, in the same transaction as the decrement.",
         why: "A duplicate insert failing the constraint is how a retry is detected, and the handler returns the existing booking rather than starting a second one. Doing it in the same transaction means a rolled-back stay does not leave a key claimed.",
@@ -652,10 +541,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e9",
       from: "bk-saga",
       to: "inventory-svc",
+      tier: "hot",
       label: "reserve 3 room-nights",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The request to take every night of the stay: all of them or none.",
         why: "A three-night stay is three rows and a partial reservation is meaningless to a guest, so atomicity across the range is the contract this hop carries.",
@@ -668,10 +555,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e10",
       from: "inventory-svc",
       to: "inventory-table",
+      tier: "hot",
       label: "conditional UPDATE, ~2ms",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "UPDATE inventory SET sold = sold + 1 WHERE ... AND date >= ? AND date < ? AND sold < allowance RETURNING date.",
         why: "One statement rather than SELECT ... FOR UPDATE then UPDATE, because the two-round-trip version holds locks across an application hop, a garbage-collection pause and whatever else the service is doing.",
@@ -681,27 +566,11 @@ export const HOTEL_RESERVATION: Diagram = {
       },
     },
     {
-      id: "e11",
-      from: "forecast-job",
-      to: "inventory-table",
-      label: "writes allowance nightly",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "The nightly overwrite of allowance from a demand and no-show forecast, touching one column and never reading sold.",
-        why: "Column ownership is the whole point of this arrow, and so is the fact that it crosses into the transaction frame from outside. The job writes freely because it needs nothing from the booking path, so a four-minute run over a 500-hotel chain cannot race live bookings.",
-        numbers: ["physical + 5 to 15% oversell", "hard clamp at physical x 1.2", "no oversell below ~20 units"],
-        breaks:
-          "A date whose cancellations in the last hour ran 5x above normal has a count that no longer reflects demand, so oversell is suppressed there until the forecast has seen the new data.",
-      },
-    },
-    {
       id: "e12",
       from: "bk-saga",
       to: "payment",
+      tier: "hot",
       label: "authorise, not capture",
-      animated: true,
       detail: {
         what: "The authorisation call, made after the inventory transaction has already committed.",
         why: "This is the arrow that must not be inside the transaction. Authorisation takes 200ms to 30 seconds, so holding row locks across it would drop a single row from ~500 attempts/s to about 5/s and pin a database connection per user staring at a card form.",
@@ -714,9 +583,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e13",
       from: "bk-saga",
       to: "bookings-table",
+      tier: "data",
       label: "saga state per step",
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "Writing the booking row as INVENTORY_RESERVED inside the inventory transaction, then persisting each saga transition through to CONFIRMED.",
         why: "State at every transition is what makes a crash recoverable: a resume worker replays from the last persisted step, and forward-step idempotency keys make re-running it safe.",
@@ -729,9 +597,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e14",
       from: "bk-saga",
       to: "booking-events",
+      tier: "data",
       label: "CONFIRMED: fan out",
-      fromSide: "bottom",
-      toSide: "left",
       detail: {
         what: "Publishing the confirmed booking once the card is authorised and the record is written.",
         why: "It is emitted after commit, deliberately, so nothing downstream can extend the critical section or fail a booking that has already happened.",
@@ -741,41 +608,11 @@ export const HOTEL_RESERVATION: Diagram = {
       },
     },
     {
-      id: "e15",
-      from: "booking-events",
-      to: "notification-svc",
-      label: "confirmation email",
-      detail: {
-        what: "The confirmation subscription: render and send the email, SMS or partner callback.",
-        why: "The user already has their reference number from the HTTP response, so this hop is a convenience with its own retry budget rather than part of the booking.",
-        numbers: ["1M/day", "retry with backoff"],
-        breaks:
-          "A provider outage here is visible to users and harmless to bookings, which is exactly the trade the asynchronous fan-out was chosen for.",
-      },
-    },
-    {
-      id: "e16",
-      from: "booking-events",
-      to: "loyalty-svc",
-      label: "points accrual",
-      fromSide: "right",
-      toSide: "top",
-      detail: {
-        what: "The accrual subscription, keyed by booking id so a redelivery credits nothing twice.",
-        why: "This consumer is separate from notifications because its failure mode is different: an unsent email is noticed and resent, an uncredited stay is noticed months later by the guest.",
-        numbers: ["1M accruals/day", "credit keyed by booking id"],
-        breaks:
-          "Retries cannot recover an event that was never published, so this leg needs a reconciliation sweep against the bookings table rather than trusting the queue.",
-      },
-    },
-    {
       id: "e17",
       from: "inventory-table",
       to: "cdc",
+      tier: "control",
       label: "WAL stream",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "right",
       detail: {
         what: "The transactional store's write-ahead log being tailed for inserts and updates to hotels, prices and availability.",
         why: "Reading the log rather than dual-writing means the index inherits the transaction's durability: a change that committed cannot fail to be published, because publishing is downstream of the commit rather than beside it.",
@@ -788,10 +625,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e18",
       from: "cdc",
       to: "search-index",
+      tier: "control",
       label: "reindex, <5s p95",
-      dashed: true,
-      fromSide: "top",
-      toSide: "bottom",
       detail: {
         what: "Denormalised hotel documents being written into the index, idempotently by key.",
         why: "This is the only arrow between the two halves of the system and it points one way. Search is allowed to be seconds behind precisely because the booking path re-checks, so a stale hit costs one NO_AVAILABILITY.",
@@ -804,10 +639,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e19",
       from: "resume-worker",
       to: "bookings-table",
+      tier: "control",
       label: "replay from last step",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Finding sagas that have been non-terminal for more than 60 seconds and driving them forward from the last state written.",
         why: "The steps are already persisted with forward-step keys, so replay is safe: re-authorising is a no-op against the same key, and re-confirming writes the same state.",
@@ -820,10 +653,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e20",
       from: "sweeper",
       to: "bookings-table",
+      tier: "control",
       label: "scan INVENTORY_RESERVED",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Scanning for bookings still in INVENTORY_RESERVED past the 10-minute hold, oldest first.",
         why: "The reserved state is the observable form of an abandoned checkout, and the sweeper is the only thing watching for it once the user has closed the tab.",
@@ -836,10 +667,8 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e21",
       from: "sweeper",
       to: "inventory-table",
+      tier: "control",
       label: "release after 10 min",
-      dashed: true,
-      fromSide: "top",
-      toSide: "bottom",
       detail: {
         what: "Giving the room-nights back: sold = sold - 1 on the same rows, keyed to the booking id so it is a no-op if it runs twice.",
         why: "Without this arrow, every abandoned payment form permanently removes a room-night from sale, and abandonment runs at tens of percent. This is a correctness component, not housekeeping.",

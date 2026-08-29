@@ -46,7 +46,6 @@ export const AUTH_SERVICE: Diagram = {
       kind: "external",
       col: 0,
       row: 0,
-      parent: "verify-zone",
       detail: {
         what: "The public client that holds the tokens: a browser SPA, a native app, or a third-party OAuth client we do not control.",
         why: "It is drawn explicitly because it is the copy of the credential we can never reach. Revocation propagates to our verifiers over a feed we own; it does not propagate to the attacker's machine, which is the copy we would most like back.",
@@ -60,14 +59,19 @@ export const AUTH_SERVICE: Diagram = {
       label: "Auth Service",
       sub: "/authorize · /token · /revoke",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 0,
       detail: {
-        what: "The only component that can mint tokens: authorization-code with PKCE, consent, MFA orchestration and revocation endpoints.",
-        why: "Request handling is stateless and all state lives in the identity DB and session store, so it scales horizontally with logins rather than with verifications. Kept small and boring because it is a single point of compromise for the entire platform.",
-        numbers: ["~5k logins/s peak", "~170ms p50, ~500ms p99 machine time", "~300k unredeemed codes in flight"],
+        what: "The only component that can mint tokens: authorization-code with PKCE, consent, MFA orchestration and revocation endpoints. Every outcome is also appended to a Kafka-backed audit trail, tiered to columnar storage after 90 days.",
+        why: "Request handling is stateless and all state lives in the identity DB and session store, so it scales horizontally with logins rather than with verifications. Kept small and boring because it is a single point of compromise for the entire platform. The audit trail exists because this event volume would swamp the transactional store logins depend on, and it is how a lost denylist shard gets rebuilt, by replaying the last TTL window.",
+        numbers: [
+          "~5k logins/s peak",
+          "~170ms p50, ~500ms p99 machine time",
+          "~300k unredeemed codes in flight",
+          "~300M audit events/day, ~75GB/day raw, 90d hot",
+        ],
         breaks:
-          "Naive per-account lockout turns into its own denial of service: five failures and an hour freeze lets an attacker lock any user out for the cost of six requests a minute.",
+          "Naive per-account lockout turns into its own denial of service: five failures and an hour freeze lets an attacker lock any user out for the cost of six requests a minute. The audit trail is also only eventually consistent with the decisions it records, so a gap is invisible without a monotonic per-user sequence number.",
         choice: {
           pick: "Authorization-code with PKCE for every client type, including confidential ones",
           instead: "The implicit flow, which returns the access token directly in the URL fragment.",
@@ -81,11 +85,10 @@ export const AUTH_SERVICE: Diagram = {
     {
       id: "hashing-pool",
       label: "argon2id hashing pool",
-      sub: "64MB · t=3 · p=1 · isolated cores",
+      sub: "64MB, t=3, p=1, isolated cores",
       kind: "service",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
+      col: 1,
+      row: 1,
       detail: {
         what: "An isolated worker pool with bounded concurrency that does nothing but memory-hard password hashing.",
         why: "One cheap HTTP request buys 75ms of CPU and 64MB of RAM, roughly a 1000x amplification, so the hash cannot share a thread pool with anything else and rate limiting has to sit in front of it rather than behind it.",
@@ -105,11 +108,10 @@ export const AUTH_SERVICE: Diagram = {
     {
       id: "mfa",
       label: "MFA step",
-      sub: "WebAuthn strong tier, TOTP fallback",
+      sub: "WebAuthn strong, TOTP fallback",
       kind: "service",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
+      col: 1,
+      row: 2,
       detail: {
         what: "The second factor: a WebAuthn assertion or a TOTP code, with step-up required on login from an unrecognised device even when the password is correct.",
         why: "The password is assumed breached. Step-up on device mismatch, rather than the failure counter, is the real defence against credential stuffing, because an attack spread over 10,000 IPs barely engages per-pair throttling.",
@@ -129,11 +131,10 @@ export const AUTH_SERVICE: Diagram = {
     {
       id: "token-mint",
       label: "Token mint + rotation",
-      sub: "10 min access JWT · id_token · refresh",
+      sub: "10min JWT, id_token, refresh",
       kind: "service",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
+      col: 1,
+      row: 3,
       detail: {
         what: "The /token exchange: verifies SHA-256(code_verifier) against the stored challenge, burns the code, and signs a short-lived access JWT, an OIDC id_token and an opaque rotating refresh token.",
         why: "This is where the long-lived authority is moved off the request path. Every use of a refresh token invalidates it and issues a successor in the same family, so a second presentation of a superseded token proves two parties hold the lineage and the safe response is to kill the whole family.",
@@ -151,37 +152,12 @@ export const AUTH_SERVICE: Diagram = {
       },
     },
     {
-      id: "audit-log",
-      label: "Audit log",
-      sub: "Kafka → columnar, 90 days hot",
-      kind: "queue",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
-      detail: {
-        what: "An append-only stream of every authentication event: logins, refreshes, logouts, consent grants and permission changes.",
-        why: "It is a compliance requirement and the forensic record, and at this volume it cannot go through the transactional database without swamping the store that logins depend on. It is also how a lost denylist shard is rebuilt, by replaying the last TTL window.",
-        numbers: ["~300M events/day, ~75GB/day raw", "~225GB/day at RF=3", "~7TB for 90 days hot"],
-        breaks:
-          "The trail is eventually consistent with the decisions it records, so a gap is invisible unless each user's events carry a monotonic sequence number to detect one.",
-        choice: {
-          pick: "Kafka into a columnar store, tiered to Parquet in object storage after 90 days",
-          instead: "Audit rows in the identity database.",
-          decider:
-            "Write volume against the store that logins depend on. ~300M events/day at ~75GB/day raw is larger than the ~300GB identity store itself every four days, and it is append-only with analytical read patterns. Putting it in Postgres puts the audit trail in the blast radius of every login.",
-          flips:
-            "A small deployment where the event rate is thousands a day, where one table and a retention job is dramatically simpler than a broker plus a lake.",
-        },
-      },
-    },
-    {
       id: "identity-db",
       label: "Identity DB",
       sub: "PostgreSQL · users, MFA, roles",
       kind: "database",
-      col: 0,
+      col: 2,
       row: 0,
-      parent: "verify-zone",
       detail: {
         what: "Users, credential hashes, kdf_params, MFA enrolments, account status and the per-user tokens_valid_after timestamp.",
         why: "The constraints matter more than the throughput: a unique index on email_hash, foreign keys to MFA factors, and a transactional password change. The write rate is trivially small, so the interesting property is correctness rather than scale.",
@@ -200,12 +176,11 @@ export const AUTH_SERVICE: Diagram = {
     },
     {
       id: "session-store",
-      label: "Session + denylist store",
-      sub: "Redis Cluster · hashed refresh, jti",
+      label: "Session + denylist",
+      sub: "Redis: refresh hash + denylist",
       kind: "database",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
+      col: 2,
+      row: 3,
       detail: {
         what: "Hashed refresh tokens keyed by family with a rotation counter and device fingerprint, the 60s authorization codes, and the revoked-jti denylist.",
         why: "Every access pattern here is a point lookup with a TTL, which is exactly what an in-memory store is good at. The denylist entry only has to outlive an unexpired access token, so the whole set stays tiny and disposable.",
@@ -225,11 +200,10 @@ export const AUTH_SERVICE: Diagram = {
     {
       id: "kms",
       label: "KMS / HSM",
-      sub: "private signing keys, 90 day rotation",
+      sub: "signing keys, 90-day rotation",
       kind: "database",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
+      col: 1,
+      row: 4,
       detail: {
         what: "The custody boundary for the signing keys. The auth service asks the KMS to sign, or holds a short-lived unwrapped key in memory; the private half never lands on a disk we operate.",
         why: "A stolen signing key mints valid tokens for any user at any service and nothing on the verification path can tell. That is the only single compromise in this design with unbounded blast radius, so it gets hardware custody and an access log.",
@@ -251,9 +225,8 @@ export const AUTH_SERVICE: Diagram = {
       label: "JWKS endpoint",
       sub: "CDN, kid → public key, 5 min TTL",
       kind: "database",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
+      col: 2,
+      row: 4,
       detail: {
         what: "The public halves of the signing keys, indexed by kid, served from a CDN and cached in-process by every verifier.",
         why: "This is what makes local verification possible at all: the verifier holds the key rather than asking for a decision. It is also the hidden single point of failure for the whole platform, because a verifier that cannot resolve a kid rejects every request.",
@@ -273,11 +246,10 @@ export const AUTH_SERVICE: Diagram = {
     {
       id: "revocation-feed",
       label: "Revocation feed",
-      sub: "pub/sub · jti + tokens_valid_after",
+      sub: "pub/sub, jti + valid_after",
       kind: "queue",
-      col: 0,
-      row: 0,
-      parent: "verify-zone",
+      col: 2,
+      row: 1,
       detail: {
         what: "A pub/sub topic carrying revoked jti values and per-user tokens_valid_after bumps into every verifier's in-process set.",
         why: "This is revocation bought as a push rather than a lookup. It is the only mechanism that closes the window between a revocation and the access token's expiry, and it exists precisely because the alternative costs a network call on all 500k verifications a second.",
@@ -299,8 +271,8 @@ export const AUTH_SERVICE: Diagram = {
       label: "Resource services",
       sub: "verify in-process, ~40µs, no RPC",
       kind: "service",
-      col: 0,
-      row: 0,
+      col: 3,
+      row: 1,
       parent: "verify-zone",
       detail: {
         what: "Every service on the platform, verifying the bearer token locally: signature by cached public key, then exp, iss, aud, jti against the pushed denylist and iat against tokens_valid_after.",
@@ -323,8 +295,8 @@ export const AUTH_SERVICE: Diagram = {
       label: "Policy engine",
       sub: "RBAC now, OPA or Cedar later",
       kind: "service",
-      col: 0,
-      row: 0,
+      col: 3,
+      row: 2,
       parent: "verify-zone",
       detail: {
         what: "Evaluates whether this subject may perform this action on this resource, at the resource service, against a cached role and permission set.",
@@ -348,6 +320,7 @@ export const AUTH_SERVICE: Diagram = {
       id: "e1",
       from: "client",
       to: "auth-service",
+      tier: "hot",
       label: "1. login (5k/s)",
       detail: {
         what: "The browser redirected to /authorize with client_id, redirect_uri, scope, state, nonce and a code_challenge, followed by the credential POST.",
@@ -361,9 +334,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e2",
       from: "auth-service",
       to: "identity-db",
+      tier: "hot",
       label: "email_hash lookup",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Resolving the identity row by a hash of the normalised email, reading the stored credential hash, kdf_params, status and tokens_valid_after.",
         why: "The lookup is indexed on email_hash rather than the email itself so the hot index stays fixed-width and the plaintext address is not the join key. Everything the login decision needs comes back in one read.",
@@ -376,8 +348,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e3",
       from: "auth-service",
       to: "hashing-pool",
+      tier: "hot",
       label: "argon2id 75ms / 64MB",
-      animated: true,
       detail: {
         what: "The submitted password handed to the isolated pool for a memory-hard comparison against the stored hash.",
         why: "This is where the login path spends almost all of its machine time and all of its CPU budget, deliberately. The cost is the feature: it is what removes the GPU's advantage against a stolen dump.",
@@ -390,6 +362,7 @@ export const AUTH_SERVICE: Diagram = {
       id: "e4",
       from: "hashing-pool",
       to: "mfa",
+      tier: "hot",
       label: "password verified",
       detail: {
         what: "A successful credential comparison escalating to the second factor rather than issuing anything.",
@@ -403,6 +376,7 @@ export const AUTH_SERVICE: Diagram = {
       id: "e5",
       from: "mfa",
       to: "token-mint",
+      tier: "hot",
       label: "one-time code, 60s TTL",
       detail: {
         what: "A one-time authorization code stored with the code_challenge, then redeemed on the back channel with the raw code_verifier.",
@@ -416,10 +390,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e6",
       from: "token-mint",
       to: "kms",
+      tier: "control",
       label: "sign, key never exported",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The signing request for the access token and the id_token, made against a key the service can use but cannot read.",
         why: "Two signatures dominate the ~25ms token exchange, and this is the one operation in the system whose compromise cannot be detected downstream, so the key stays in hardware custody with an access log.",
@@ -432,9 +404,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e7",
       from: "token-mint",
       to: "session-store",
+      tier: "data",
       label: "hashed refresh family",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Writing the hashed refresh token with its family_id, rotation counter and device fingerprint, and invalidating the predecessor in the same write.",
         why: "This is the one lookup the design keeps: once per session per 10 minutes rather than once per request, which is ~1.7k/s instead of ~500k/s. Rotation is what makes reuse detectable at all.",
@@ -447,9 +418,10 @@ export const AUTH_SERVICE: Diagram = {
       id: "e8",
       from: "token-mint",
       to: "client",
-      label: "access + id + refresh",
       fromSide: "left",
       toSide: "left",
+      tier: "hot",
+      label: "access + id + refresh",
       offset: 90,
       detail: {
         what: "Three artefacts returned on the back channel: a ~10 minute access JWT, an OIDC id_token for the client, and an opaque rotating refresh token.",
@@ -463,10 +435,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e9",
       from: "client",
       to: "resource-services",
+      tier: "hot",
       label: "2. bearer (500k/s)",
-      animated: true,
-      fromSide: "right",
-      toSide: "top",
       detail: {
         what: "Every authenticated API call on the platform, carrying Authorization: Bearer and nothing else the verifier needs.",
         why: "This is the arrow the whole design is sized for. It is 100x the login arrow and it terminates locally, which is the only reason the auth service can be a 5k/s service instead of a 500k/s one.",
@@ -479,8 +449,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e10",
       from: "kms",
       to: "jwks",
+      tier: "control",
       label: "publish public halves",
-      dashed: true,
       detail: {
         what: "The public half of each signing key published under its kid, with retired keys kept in the set well after they stop signing.",
         why: "Verifiers need the key, not a decision, and this is the only thing they ever fetch from us on a schedule. Publishing early and retiring late is what makes rotation invisible to them.",
@@ -493,8 +463,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e11",
       from: "session-store",
       to: "revocation-feed",
+      tier: "control",
       label: "revocations fan out",
-      dashed: true,
       detail: {
         what: "Revoked jti values and killed token families published onto the feed the moment they are written.",
         why: "The store is the source of truth but nothing on the verification path reads it, so a revocation is only real once it has been pushed. Publishing on write is what keeps propagation inside the 1s SLO.",
@@ -507,10 +477,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e12",
       from: "identity-db",
       to: "revocation-feed",
+      tier: "control",
       label: "tokens_valid_after bump",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 90,
       detail: {
         what: "A per-user timestamp bumped on logout-everywhere, admin disable or password change, pushed out and compared against each token's iat.",
@@ -524,8 +492,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e13",
       from: "jwks",
       to: "resource-services",
+      tier: "control",
       label: "public keys by kid",
-      dashed: true,
       detail: {
         what: "Each verifier pulling the key set on a jittered 5 minute schedule and holding it in process.",
         why: "It is a pull rather than a push because keys change every 90 days and staleness is harmless: a retired key's tokens have already expired. The verifier never asks about a specific token, only for the keys.",
@@ -538,8 +506,8 @@ export const AUTH_SERVICE: Diagram = {
       id: "e14",
       from: "revocation-feed",
       to: "resource-services",
+      tier: "control",
       label: "revoked jti, pushed",
-      dashed: true,
       detail: {
         what: "The in-memory revoked set kept current at each verifier by subscription rather than by lookup.",
         why: "It is the only wire between the two halves of the system that carries anything per-token, and it carries kilobytes rather than requests. Push is what stops revocation costing 500k GETs/s.",
@@ -552,6 +520,7 @@ export const AUTH_SERVICE: Diagram = {
       id: "e15",
       from: "resource-services",
       to: "policy-engine",
+      tier: "hot",
       label: "may subject do action?",
       detail: {
         what: "The authorization check itself, run at the resource service against a cached role and permission set once the token has been verified.",
@@ -559,22 +528,6 @@ export const AUTH_SERVICE: Diagram = {
         numbers: ["sub-microsecond against a cached role set", "at most 1 to 2 coarse role claims in the token"],
         breaks:
           "Bounded staleness is fine for reading a dashboard and not fine for a wire transfer. High-consequence boundaries need a synchronous check that does not inherit the feed's fail-open default, and sorting actions between the two paths is done by hand.",
-      },
-    },
-    {
-      id: "e16",
-      from: "auth-service",
-      to: "audit-log",
-      label: "login / refresh events",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "top",
-      detail: {
-        what: "Every authentication outcome appended with user_id, client_id, ip, device fingerprint and result.",
-        why: "Two of the metrics that actually catch attacks are ratios computed here: distinct usernames per source and distinct sources per username, which separate credential stuffing from a targeted attack and drive different responses.",
-        numbers: ["~300M events/day", "alert on a 3x shift in either ratio within 15 minutes"],
-        breaks:
-          "It is written asynchronously, so the trail lags the decisions it records and a burst of failures shows up after the attack rather than during it.",
       },
     },
   ],

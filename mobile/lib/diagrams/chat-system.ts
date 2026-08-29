@@ -122,15 +122,16 @@ export const CHAT_SYSTEM: Diagram = {
       col: 1,
       row: 1,
       detail: {
-        what: "The box holding Alice's socket. Terminates TLS, frames the protocol, and hands sends to the persist path. It never writes to the log itself.",
-        why: "HTTP is request-response and closes; a chat server has to push at any moment without being asked, so the connection stays open for the life of the app session. Sub-second delivery is bought with a stateful tier, and that is the trade.",
+        what: "The box holding Alice's socket. Terminates TLS, frames the protocol, and hands sends to the persist path. It never writes to the log itself. It also runs the ephemeral presence/typing fan-out: whichever edge holds a socket publishes heartbeats with a TTL, and edges holding interested peers subscribe.",
+        why: "HTTP is request-response and closes; a chat server has to push at any moment without being asked, so the connection stays open for the life of the app session. Sub-second delivery is bought with a stateful tier, and that is the trade. Presence rides the same socket but must never touch the durable path: it is worthless the moment it is stale, so writing it durably would buy nothing and cost 30M writes every heartbeat interval.",
         numbers: [
           "1M sockets per box planned, 2M demonstrated by WhatsApp in 2012",
           "16KB per tuned socket, 16GB of connection state on a 128GB box",
           "60 boxes for 30M peak sockets, 2x for deploys and a lost AZ",
+          "presence: TTL 30s, ~1M heartbeat events/s fleet-wide",
         ],
         breaks:
-          "An edge is not interchangeable while it holds sockets, so a rolling deploy has to drain over ~5 minutes rather than restart, or it is a self-inflicted reconnect storm.",
+          "An edge is not interchangeable while it holds sockets, so a rolling deploy has to drain over ~5 minutes rather than restart, or it is a self-inflicted reconnect storm. Lost presence shows a stale 'online' dot for up to one TTL, which is the correct failure: wrong-but-harmless rather than blocking a message.",
         choice: {
           pick: "One long-lived TLS connection per device on an event-loop runtime (Go goroutines or Erlang's BEAM)",
           instead:

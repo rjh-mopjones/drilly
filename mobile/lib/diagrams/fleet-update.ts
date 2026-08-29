@@ -75,8 +75,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "Signed artifact store",
       sub: "content addressed, immutable",
       kind: "database",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       detail: {
         what: "Object storage keyed by digest, holding the ~144 artifacts of a release with their signatures and index rows.",
         why: "Content addressing makes an artifact immutable by construction, which removes invalidation entirely and lets the whole release be pre-positioned at the edge before any band opens. The signature is what lets you serve those bytes over infrastructure you do not trust.",
@@ -98,8 +98,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "CDN edge PoPs",
       sub: "committed egress, ranged GETs",
       kind: "external",
-      col: 0,
-      row: 2,
+      col: 2,
+      row: 0,
       detail: {
         what: "A commodity CDN in front of the artifact store, holding the entire release at every PoP and streaming resumable ranges to devices.",
         why: "This is the easiest caching problem you will ever be given, because every device on earth wants the same dozen objects. The hard part is not hit rate, it is the bill, and the bill is set by the schedule the controller chose rather than by anything cache-shaped.",
@@ -121,8 +121,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "Update client",
       sub: "separately versioned track",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 2,
+      row: 1,
       detail: {
         what: "Your code on someone else's device: it checks in, evaluates conditions, fetches, verifies the digest and signature, applies the delta and stages the result.",
         why: "It is the last remaining channel to the device and the only component in this design whose failure is unrecoverable. Everything else can be fixed by shipping something new, but a device that cannot ask for an update cannot be given one.",
@@ -145,7 +145,7 @@ export const FLEET_UPDATE: Diagram = {
       sub: "unmetered, charging, idle",
       kind: "external",
       col: 0,
-      row: 4,
+      row: 1,
       detail: {
         what: "The fleet you do not own: a dozen live versions across hundreds of hardware variants, mostly offline at any given instant, in regions and price tiers you do not control.",
         why: "It is drawn explicitly because its conditions, not your bandwidth, set the schedule. A device cooperates only when it is on an unmetered network, charging and idle, and that eligibility funnel is what turns a few hours of bytes into a fortnight of rollout.",
@@ -159,8 +159,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "Check-in service",
       sub: "anycast, 95% answer NONE",
       kind: "service",
-      col: 1,
-      row: 3,
+      col: 2,
+      row: 2,
       parent: "control-plane",
       detail: {
         what: "The stateless endpoint devices poll: it reads rollout state for the device's cohort and answers either NONE or an artifact URL with a not_before timestamp.",
@@ -183,8 +183,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "Rollout controller",
       sub: "cohorts, bands, halt switch",
       kind: "service",
-      col: 1,
-      row: 0,
+      col: 0,
+      row: 2,
       parent: "control-plane",
       detail: {
         what: "The single place that answers 'does this device get it, and when': it assigns cohorts, opens bands under policy, sets conditions and owns the halt.",
@@ -208,7 +208,7 @@ export const FLEET_UPDATE: Diagram = {
       sub: "0.1 -> 1 -> 5 -> 20 -> 100%",
       kind: "database",
       col: 1,
-      row: 1,
+      row: 2,
       parent: "control-plane",
       detail: {
         what: "The ladder as data rather than as a runbook: one row per band with the admitted cohort ceiling, minimum soak, smear window and status.",
@@ -231,8 +231,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "Rollout state",
       sub: "Postgres releases + KV cohorts",
       kind: "database",
-      col: 1,
-      row: 2,
+      col: 2,
+      row: 3,
       parent: "control-plane",
       detail: {
         what: "Release and band rows in Postgres, plus a KV keyed by device holding cohort, holdback flag, variant, region and carrier hash.",
@@ -255,8 +255,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "Telemetry ingest",
       sub: "1% success, failures whole",
       kind: "queue",
-      col: 1,
-      row: 4,
+      col: 3,
+      row: 2,
       detail: {
         what: "The append-only stream of apply outcomes, batched onto the next check-in rather than sent the moment an update lands.",
         why: "500M immediate acknowledgements is a self-inflicted denial of service, and failures cluster exactly when the system is already unhappy. Piggybacking on a call that already exists removes an entire ingest spike from the design.",
@@ -278,8 +278,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "Health analyser",
       sub: "effect size + significance",
       kind: "service",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 3,
       detail: {
         what: "A stream job computing crash rate, battery and engagement per admitted cohort bucket against the holdback, with confidence intervals, and driving widen or halt.",
         why: "A halt has to be a statement rather than a vibe. Comparing an admitted cohort against last week compares against a different world, so the analyser only ever works on a difference against a concurrent population.",
@@ -301,8 +301,8 @@ export const FLEET_UPDATE: Diagram = {
       label: "1% holdback",
       sub: "5M devices, never admitted",
       kind: "database",
-      col: 1,
-      row: 6,
+      col: 3,
+      row: 4,
       detail: {
         what: "A permanent cohort, roughly 1% of the fleet, that receives no release at all and exists purely as a concurrent baseline.",
         why: "Crash rate, battery drain and engagement all move for reasons that have nothing to do with your build. A concurrent holdback controls for the day, the weather, the football and the third-party outage in a way that last week's numbers cannot.",
@@ -325,6 +325,7 @@ export const FLEET_UPDATE: Diagram = {
       id: "e1",
       from: "release-pipeline",
       to: "artifact-store",
+      tier: "data",
       label: "144 signed artifacts",
       detail: {
         what: "The generated delta matrix being written as content-addressed objects with their signatures and index rows.",
@@ -338,6 +339,7 @@ export const FLEET_UPDATE: Diagram = {
       id: "e2",
       from: "artifact-store",
       to: "cdn",
+      tier: "data",
       label: "pre-position ~17GB",
       detail: {
         what: "The whole release being pushed to every PoP before any band opens.",
@@ -351,8 +353,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e3",
       from: "cdn",
       to: "update-client",
+      tier: "hot",
       label: "25MB delta, ranged GET",
-      animated: true,
       detail: {
         what: "The actual payload transfer: ~25MB streamed with resumable ranges to a device that has decided it is allowed to spend the bandwidth.",
         why: "This is where the entire 11.5PB lives, and it is deliberately the dumbest hop in the system. The CDN knows nothing about cohorts, bands or halt, so a decision made in the control plane never has to propagate through a cache.",
@@ -365,6 +367,7 @@ export const FLEET_UPDATE: Diagram = {
       id: "e4",
       from: "update-client",
       to: "device-fleet",
+      tier: "hot",
       label: "verify, stage, commit",
       detail: {
         what: "Digest and signature verification, then applying the delta and staging the result before committing it.",
@@ -378,10 +381,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e5",
       from: "device-fleet",
       to: "update-client",
+      tier: "control",
       label: "unmetered, charging, idle",
-      dashed: true,
-      fromSide: "left",
-      toSide: "left",
       offset: 70,
       detail: {
         what: "The device's own state, evaluated after the server has said yes but before a single byte is requested.",
@@ -395,10 +396,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e6",
       from: "update-client",
       to: "checkin",
+      tier: "hot",
       label: "~200B fingerprint",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The poll: current version, variant, region and rollout token, sent on a server-assigned schedule with full jitter.",
         why: "Devices must ask before they can receive, so this is the request that happens 500M times a day whether or not a release exists. It is also, unsampled, the census that tells you the true version distribution across the fleet.",
@@ -411,9 +410,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e7",
       from: "checkin",
       to: "update-client",
+      tier: "hot",
       label: "NONE, or url + not_before",
-      fromSide: "left",
-      toSide: "right",
       offset: 60,
       detail: {
         what: "The answer: usually NONE, and when it is not, an artifact URL, digest, signature, conditions and a not_before timestamp minutes to hours out.",
@@ -427,8 +425,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e8",
       from: "checkin",
       to: "rollout-state",
+      tier: "control",
       label: "cohort + holdback flag",
-      dashed: true,
       detail: {
         what: "The lookup behind every check-in: which cohort this device is in, whether it is in the holdback, and which band is currently open.",
         why: "It is a single-key read served by a regional replica, which is what keeps the negative path from ever touching the release database. The halt switch is read here too, on the same normal path, so halting works when everything upstream is broken.",
@@ -441,8 +439,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e9",
       from: "rollout-controller",
       to: "band-ladder",
+      tier: "control",
       label: "opens the next band",
-      dashed: true,
       detail: {
         what: "The controller advancing the ladder: a write that raises the admitted cohort ceiling and stamps the band's open time.",
         why: "Every widen is a deliberate, auditable decision about how many devices you are prepared to strand, which is why it is a row in a table rather than a config push or a runbook step.",
@@ -455,8 +453,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e10",
       from: "band-ladder",
       to: "rollout-state",
+      tier: "control",
       label: "admitted_cohort_max",
-      dashed: true,
       detail: {
         what: "The current band's cohort ceiling and smear window landing where the check-in path can read it.",
         why: "This is the join between policy and traffic. The check-in tier does not evaluate a rollout plan, it compares one integer, which is what keeps a 5,800 req/s path free of any release logic.",
@@ -469,6 +467,7 @@ export const FLEET_UPDATE: Diagram = {
       id: "e11",
       from: "checkin",
       to: "telemetry",
+      tier: "data",
       label: "outcomes on next check-in",
       detail: {
         what: "Apply outcomes and version fingerprints riding along on a call that was going to happen anyway.",
@@ -482,6 +481,7 @@ export const FLEET_UPDATE: Diagram = {
       id: "e12",
       from: "telemetry",
       to: "health-analyser",
+      tier: "data",
       label: "1% success, all failures",
       detail: {
         what: "The sampled outcome stream feeding cohort health metrics: crash rate, battery, engagement, bucketed by cohort and variant.",
@@ -495,8 +495,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e13",
       from: "health-analyser",
       to: "holdback",
+      tier: "control",
       label: "vs never-updated 5M",
-      dashed: true,
       detail: {
         what: "The comparison that makes a halt decision defensible: admitted cohort metrics against the concurrent never-updated population.",
         why: "It controls for everything that is not your build. The same day, the same third-party outage, the same weather, so the difference is attributable and comes with a confidence interval instead of a hunch.",
@@ -509,10 +509,8 @@ export const FLEET_UPDATE: Diagram = {
       id: "e14",
       from: "health-analyser",
       to: "rollout-controller",
+      tier: "control",
       label: "widen or halt",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 90,
       detail: {
         what: "The feedback that closes the loop: either the band has soaked cleanly and may widen, or admission stops immediately.",

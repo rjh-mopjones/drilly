@@ -28,7 +28,7 @@ export const MATCHING_ENGINE: Diagram = {
   nodes: [
     {
       id: "book-group",
-      label: "The book in memory: one instrument, one thread, no locks",
+      label: "The book in memory",
       kind: "zone",
     },
     {

@@ -82,15 +82,20 @@ export const TICKETMASTER: Diagram = {
       label: "Admission controller",
       sub: "token bucket, ~100 users/s",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 2,
       parent: "gate-group",
       detail: {
-        what: "One leader per event popping the lowest sort key and granting 15-minute purchase sessions at a rate derived from inventory.",
-        why: "This is the component the question exists for. The purchase path is only ever allowed to see a few hundred concurrent buyers however many are outside, and the cap is chosen so that even in the worst case the in-flow crowd can hold exactly one venue's worth of seats and no more.",
-        numbers: ["C = 25,000 in flow", "25,000 x 2.4 = 60,000 seats", "25,000 ÷ 240s ≈ ~100 admissions/s"],
+        what: "One leader per event popping the lowest sort key, re-scoring the token against fingerprint, ASN and identity-graph signals (challenge, allow or shadow-deny, never a hard block), and granting 15-minute purchase sessions at a rate derived from inventory.",
+        why: "This is the component the question exists for. The purchase path is only ever allowed to see a few hundred concurrent buyers however many are outside, and the cap is chosen so that even in the worst case the in-flow crowd can hold exactly one venue's worth of seats and no more. Risk scoring sits at this gate, not at checkout, because rejecting a bot after it holds a seat has already cost the seat for ten minutes; a first, cheap pass already ran at token issue.",
+        numbers: [
+          "C = 25,000 in flow",
+          "25,000 x 2.4 = 60,000 seats",
+          "25,000 ÷ 240s ≈ ~100 admissions/s",
+          "~15% challenged, target ≥90% of inventory to humans",
+        ],
         breaks:
-          "The leader dying mid-on-sale stops admissions entirely; detection is the watermark going flat while queue depth is non-zero, and the new leader resumes from the persisted watermark.",
+          "The leader dying mid-on-sale stops admissions entirely; detection is the watermark going flat while queue depth is non-zero, and the new leader resumes from the persisted watermark. The risk lookup is in the critical path of every admission, so it fails open: a bot-heavy on-sale beats a dead one, with per-identity caps tightened automatically to bound the damage.",
         choice: {
           pick: "Token bucket refilled by completions, cap set by Little's law",
           instead: "A fixed admission schedule on a timer, or no gate at all with autoscaling behind it.",
@@ -106,7 +111,7 @@ export const TICKETMASTER: Diagram = {
       label: "Purchase API",
       sub: "atomic hold, ascending seat ids",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 3,
       detail: {
         what: "The seat-hold endpoint: sorts requested seat ids, conditionally sets each one, and rolls back the partial set on the first conflict.",
@@ -129,7 +134,7 @@ export const TICKETMASTER: Diagram = {
       label: "Checkout",
       sub: "payment saga, see #23",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 4,
       detail: {
         what: "Extends the hold to cover the payment timeout, runs the payment saga, flips held to sold and emits ticket records with rotating barcode seeds.",
@@ -152,8 +157,8 @@ export const TICKETMASTER: Diagram = {
       label: "Payment provider",
       sub: "authorise, capture on flip",
       kind: "external",
-      col: 0,
-      row: 5,
+      col: 2,
+      row: 4,
       detail: {
         what: "The third-party processor, outside the trust boundary and the slowest hop in the funnel.",
         why: "It is drawn because it controls the admission rate without knowing it. Mean session time is mostly this call, and Little's law turns its p99 straight into the rate at which the gate can release people.",
@@ -210,35 +215,11 @@ export const TICKETMASTER: Diagram = {
       },
     },
     {
-      id: "risk",
-      label: "Risk engine",
-      sub: "fingerprint, ASN, identity graph",
-      kind: "service",
-      col: 1,
-      row: 2,
-      parent: "gate-group",
-      detail: {
-        what: "Scores every token at issue and again at admission on device fingerprint, TLS/JA3 signature, proxy ASN reputation, account age and payment-instrument reuse.",
-        why: "It sits at the gate rather than at checkout because rejecting a bot after it holds a seat has already cost you the seat for ten minutes. Its output is challenge, allow or shadow-deny, never a hard block, since a hard block is a free A/B signal for the operator.",
-        numbers: ["~15% challenged", "target: ≥ 90% of inventory to humans", "~200ms proof-of-work at the token gate"],
-        breaks:
-          "A misfiring rule challenges every real user and conversion collapses, so it fails open on unavailability and auto-rolls back any rule whose challenge rate deviates more than 3σ from baseline.",
-        choice: {
-          pick: "Cheap detection at the gate, with the real spend on removing the resale margin",
-          instead: "Detection only, leaving the ticket a freely transferable bearer instrument.",
-          decider:
-            "Attacker economics. A $150 ticket reselling at $600 leaves $450 of margin, so 1,000 tickets is ~$450k; residential proxy bandwidth and CAPTCHA farms at ~$1 to $2 per 1,000 solves put attacker cost in single-digit cents, a ratio near 10,000:1 at which no detection control clears its own false-positive cost. A 10% resale cap collapses $450 to ~$15.",
-          flips:
-            "Markets where transfer restriction is unlawful or contractually barred, or where the ticket genuinely is a tradeable asset, at which point detection is all you have and it is a permanent operations budget rather than a feature.",
-        },
-      },
-    },
-    {
       id: "seat-state",
       label: "Seat state",
       sub: "Redis, CAS plus native TTL",
       kind: "database",
-      col: 1,
+      col: 2,
       row: 3,
       detail: {
         what: "The authoritative hot copy of every seat: key seat:{event}:{seat}, value holder session, expiry carried by the native key TTL.",
@@ -261,8 +242,8 @@ export const TICKETMASTER: Diagram = {
       label: "Edge publisher",
       sub: "2 bits/seat, 5KB gzipped",
       kind: "service",
-      col: 1,
-      row: 4,
+      col: 2,
+      row: 2,
       detail: {
         what: "Renders the whole event's seat status into one 2-bit-per-seat bitmap every second, and the now_serving watermark every couple of seconds, and pushes both to the edge.",
         why: "This is the inversion the design turns on: mutating state that 1.5M people want is published once as a shared artefact rather than queried 1.5M times. Immutable geometry is deliberately kept out of the tick and cached forever behind a versioned URL.",
@@ -284,8 +265,8 @@ export const TICKETMASTER: Diagram = {
       label: "Exhaustion projector",
       sub: "sold-out rank, 2x margin",
       kind: "service",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 3,
       detail: {
         what: "Continuously projects the rank at which inventory runs out from observed sell-through, and terminates everyone beyond a safety multiple of it.",
         why: "The queue's most important output is a rejection. 60k seats need ~42k admissions and are gone in about seven minutes, while draining 1.5M at 100/s would take 4.2 hours, so 97% of the crowd is never getting in and the only decision left is how fast you say so.",
@@ -307,8 +288,8 @@ export const TICKETMASTER: Diagram = {
       label: "Orders and tickets",
       sub: "Postgres, partitioned by event",
       kind: "database",
-      col: 1,
-      row: 6,
+      col: 3,
+      row: 4,
       detail: {
         what: "The durable record: orders, tickets with rotating barcode seeds, and the append-only hold log arriving write-behind through Kafka.",
         why: "It is the source of truth that survives a Redis rebuild, and it is deliberately small. The difficulty here is arrival shape rather than volume, which is why the flip to sold is a synchronous transaction and everything else is asynchronous.",
@@ -331,10 +312,8 @@ export const TICKETMASTER: Diagram = {
       id: "e1",
       from: "clients",
       to: "cdn",
+      tier: "hot",
       label: "poll two shared objects",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Every waiting client polling the now_serving watermark every 5s and the seat bitmap every 1s.",
         why: "It is drawn as the hot path because this is where the traffic actually is. Both objects are identical bytes for all 1.5M viewers, so the volume terminates at the edge and the origin never learns how big the crowd was.",
@@ -347,6 +326,7 @@ export const TICKETMASTER: Diagram = {
       id: "e2",
       from: "clients",
       to: "token-svc",
+      tier: "hot",
       label: "join queue, ~150k/s",
       detail: {
         what: "POST /event/{id}/queue, the one and only origin write an unadmitted user makes.",
@@ -360,8 +340,8 @@ export const TICKETMASTER: Diagram = {
       id: "e3",
       from: "token-svc",
       to: "queue-tokens",
+      tier: "hot",
       label: "ZADD random sort key",
-      animated: true,
       detail: {
         what: "Writing the token id into the event's sorted set with a random 64-bit score.",
         why: "Random scores are what make this shardable sixteen ways with zero coordination. A monotonic score would put every one of 150k writes a second through a single incrementing key.",
@@ -371,27 +351,11 @@ export const TICKETMASTER: Diagram = {
       },
     },
     {
-      id: "e4",
-      from: "token-svc",
-      to: "risk",
-      label: "score at issue",
-      dashed: true,
-      detail: {
-        what: "Fingerprint, JA3 signature and ASN reputation evaluated as the token is minted.",
-        why: "Scoring early is nearly free and gives the gate something to sort on later. It cannot be the enforcement point though, because binding a token to a verified identity at issue means demanding a payment method before someone may queue for something they may never be offered.",
-        numbers: ["~200ms proof-of-work", "scored again at admission"],
-        breaks:
-          "A high score here still consumes a lottery entry. Identity that would make the draw fair per person only exists at admission or checkout, which is the design's stated unresolved gap.",
-      },
-    },
-    {
       id: "e5",
       from: "queue-tokens",
       to: "admission",
+      tier: "hot",
       label: "lowest sort key first",
-      animated: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The gate popping the next token in ascending sort key order.",
         why: "This is the draw being resolved. Because the order was random at issue, popping in key order is a lottery result rather than a race result, and it costs nothing to compute.",
@@ -401,25 +365,11 @@ export const TICKETMASTER: Diagram = {
       },
     },
     {
-      id: "e6",
-      from: "admission",
-      to: "risk",
-      label: "re-score at the gate",
-      dashed: true,
-      detail: {
-        what: "A second risk lookup before a session is granted, returning challenge, allow or shadow-deny.",
-        why: "The gate is the last point where refusal is free. Past it the user can hold seats for ten minutes, so a bot caught at checkout has already taken inventory off the market and an admission slot from a human.",
-        numbers: ["~40ms admission handshake", "~15% challenged"],
-        breaks:
-          "This lookup is in the critical path of every admission, so it fails open: a bot-heavy on-sale beats a dead one, with per-identity caps tightened automatically to bound the damage.",
-      },
-    },
-    {
       id: "e7",
       from: "admission",
       to: "purchase-api",
+      tier: "hot",
       label: "session, 15 min",
-      animated: true,
       detail: {
         what: "A granted purchase session moving the user from the waiting room into the seat map.",
         why: "This arrow is the boundary the whole design defends. Above it, unbounded arrivals against cached bytes; below it, at most 25,000 concurrent buyers against real inventory.",
@@ -432,8 +382,10 @@ export const TICKETMASTER: Diagram = {
       id: "e8",
       from: "purchase-api",
       to: "seat-state",
+      fromSide: "right",
+      toSide: "left",
+      tier: "hot",
       label: "SET NX EX 600",
-      animated: true,
       detail: {
         what: "The conditional set that actually decides who gets seat 118-C-7, one key per seat, ten-minute expiry.",
         why: "The famous race lives on this arrow and it is one operation: both writes land on the same shard, which runs them serially, one returns OK and one returns nil. No version compare, no retry loop.",
@@ -446,8 +398,8 @@ export const TICKETMASTER: Diagram = {
       id: "e9",
       from: "seat-state",
       to: "edge-publisher",
+      tier: "data",
       label: "seat bitmap, 1 Hz",
-      dashed: true,
       detail: {
         what: "The full status of all 60k seats read once a second and encoded at two bits each.",
         why: "Reading everything on a tick is deliberately dumber than tracking deltas: the whole snapshot is 15KB raw, so there is nothing to gain from incremental publishing and a great deal to lose in correctness.",
@@ -460,8 +412,8 @@ export const TICKETMASTER: Diagram = {
       id: "e10",
       from: "admission",
       to: "edge-publisher",
+      tier: "control",
       label: "now_serving watermark",
-      dashed: true,
       detail: {
         what: "The single global rank the gate has reached, about 20 bytes, published for everyone to subtract against.",
         why: "This is the inversion of the position query. The client already knows its own rank because the token carried it, so one number for the whole crowd replaces a per-user lookup at 300k QPS.",
@@ -474,8 +426,8 @@ export const TICKETMASTER: Diagram = {
       id: "e11",
       from: "seat-state",
       to: "exhaustion",
+      tier: "control",
       label: "sell-through velocity",
-      dashed: true,
       detail: {
         what: "Observed rate of seats moving to sold, feeding the projection of where the queue stops being winnable.",
         why: "The projection has to come from actual sell-through rather than a pre-computed estimate, because release-backs and checkout abandonment move the exhaustion point by thousands of ranks during the sale.",
@@ -488,10 +440,8 @@ export const TICKETMASTER: Diagram = {
       id: "e12",
       from: "exhaustion",
       to: "edge-publisher",
+      tier: "control",
       label: "sold-out rank, 2x margin",
-      dashed: true,
-      fromSide: "left",
-      toSide: "left",
       offset: 80,
       detail: {
         what: "The termination rank published into the same shared object the crowd is already polling.",
@@ -505,10 +455,8 @@ export const TICKETMASTER: Diagram = {
       id: "e13",
       from: "edge-publisher",
       to: "cdn",
+      tier: "control",
       label: "5KB gzipped, 1s TTL",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 100,
       detail: {
         what: "Both micro-objects pushed to the edge, where roughly 100 POPs fan them out to the whole crowd.",
@@ -522,6 +470,7 @@ export const TICKETMASTER: Diagram = {
       id: "e14",
       from: "purchase-api",
       to: "checkout",
+      tier: "hot",
       label: "hold, 10 min",
       detail: {
         what: "A confirmed all-or-nothing hold handed to the payment flow, with the price snapshotted onto it.",
@@ -535,6 +484,7 @@ export const TICKETMASTER: Diagram = {
       id: "e15",
       from: "checkout",
       to: "payments",
+      tier: "data",
       label: "authorise, not capture",
       detail: {
         what: "An authorisation against the provider while the seat is frozen and marked committing.",
@@ -548,6 +498,7 @@ export const TICKETMASTER: Diagram = {
       id: "e16",
       from: "checkout",
       to: "orders-db",
+      tier: "data",
       label: "held to sold + tickets",
       detail: {
         what: "The synchronous transaction that flips the seats to sold and writes order and ticket rows with barcode seeds.",
@@ -561,10 +512,10 @@ export const TICKETMASTER: Diagram = {
       id: "e17",
       from: "checkout",
       to: "admission",
-      label: "completions refill bucket",
-      dashed: true,
       fromSide: "left",
       toSide: "left",
+      tier: "control",
+      label: "completions refill bucket",
       offset: 90,
       detail: {
         what: "Checkouts, abandonments and TTL expiries returning tokens to the admission bucket.",

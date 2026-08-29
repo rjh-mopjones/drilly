@@ -113,7 +113,7 @@ export const RAG_SYSTEM: Diagram = {
       sub: "~3.6TB at RF=3",
       kind: "database",
       col: 1,
-      row: 1,
+      row: 3,
       detail: {
         what: "The text of every chunk plus its heading path, char span, effective dates and ACL group IDs, keyed by (doc_id, ordinal).",
         why: "The indexes hold vectors and postings, not prose, so the words that eventually reach the prompt have to come from somewhere. Keeping the ACL groups here as well is what makes a permission change a metadata upsert on 12 rows instead of a re-embed.",
@@ -135,7 +135,7 @@ export const RAG_SYSTEM: Diagram = {
       sub: "inverted index, see #47",
       kind: "database",
       col: 1,
-      row: 2,
+      row: 1,
       detail: {
         what: "A classic inverted index over the same chunks, carrying the same filterable payload of ACL groups, effective dates and source type.",
         why: "Embeddings encode topic, and they compress away exactly the low-magnitude signals that identifiers are made of. This arm exists to catch error codes, ticket IDs, product names and acronyms the embedding model has effectively never seen.",
@@ -157,7 +157,7 @@ export const RAG_SYSTEM: Diagram = {
       sub: "500M x int8, 6 shards, RF=3",
       kind: "database",
       col: 1,
-      row: 3,
+      row: 2,
       detail: {
         what: "A layered navigable-small-world graph over 500M scalar-quantised vectors, each node wired to ~32 neighbours, with ACL groups and effective dates as a filterable payload.",
         why: "Approximate search is the only way to touch 500M vectors in 25ms, and the payload has to live in the index rather than beside it, because the permission predicate must be evaluated during the graph walk rather than after it.",
@@ -174,40 +174,23 @@ export const RAG_SYSTEM: Diagram = {
       },
     },
     {
-      id: "acl",
-      label: "ACL resolver",
-      sub: "Redis, principal to groups, 60s TTL",
-      kind: "database",
-      col: 1,
-      row: 4,
-      detail: {
-        what: "Maps a principal to the set of group IDs they hold, cached on a short TTL, and hands that set to retrieval as a hard predicate.",
-        why: "Chunks carry group IDs rather than user IDs, so a document shared with 5,000 people is one small array and removing someone from a group revokes their access on the next query without touching 500M rows.",
-        numbers: ["~2ms p95 resolve", "60s TTL, revocation effective within 60s", "acl_group_ids ~64B per chunk (8 x 8B)"],
-        breaks:
-          "If the resolver is unavailable the system must fail closed and refuse the query. Falling back to unfiltered retrieval is a cross-ACL leak, and a single unauthorised chunk is a paging incident rather than a dashboard trend.",
-        choice: {
-          pick: "Pre-filter: evaluate acl_group_ids intersect user_groups inside the ANN walk and the BM25 query",
-          instead: "Retrieve the global top 100 and drop what the caller cannot read. One line of code, works with any off-the-shelf vector store.",
-          decider:
-            "Filter selectivity, which is unbounded. A contractor who can read 0.5% of the corpus needs ~200x over-fetch to recover 8 usable chunks, and no single k is correct for both them and an employee who reads everything. Post-filtering also leaks existence through result counts and latency.",
-          flips: "A uniformly readable corpus such as a public docs site or a single-team wiki, where the predicate is a no-op. It also survives as a second layer: re-checking the final 8 costs one lookup and closes the 60s TTL window.",
-        },
-      },
-    },
-    {
       id: "query-api",
       label: "Query API",
       sub: "embed question, semantic cache",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 2,
+      row: 0,
       detail: {
-        what: "The request entry point: resolves the caller, embeds the question with the ingest-time model, checks the cache, and streams the answer back.",
-        why: "The query has to be embedded by the same model that embedded the corpus, so this stage is coupled to the index version rather than free to upgrade. It also owns the cheapest win available: deflecting repeat questions before they reach a 220-accelerator generation tier.",
-        numbers: ["500 q/s peak, ~15M queries/day", "query embed ~15ms p95", "~15% semantic-cache deflection"],
+        what: "The request entry point: resolves the caller to ACL group IDs from a Redis cache (60s TTL), embeds the question with the ingest-time model, checks the cache, and streams the answer back.",
+        why: "The query has to be embedded by the same model that embedded the corpus, so this stage is coupled to the index version rather than free to upgrade. It also owns the cheapest win available: deflecting repeat questions before they reach a 220-accelerator generation tier. ACL resolution runs first, as stage 0, because retrieval needs the predicate at search time rather than at result time, and an unresolvable principal fails the query closed.",
+        numbers: [
+          "500 q/s peak, ~15M queries/day",
+          "query embed ~15ms p95",
+          "~15% semantic-cache deflection",
+          "ACL resolve ~2ms p95, revocation effective within 60s",
+        ],
         breaks:
-          "Semantic caching is the easiest way to ship a wrong answer: '2024 bonus policy' and '2025 bonus policy' sit at cosine ~0.98, as do 'can I expense alcohol' and 'can I not expense alcohol'.",
+          "Semantic caching is the easiest way to ship a wrong answer: '2024 bonus policy' and '2025 bonus policy' sit at cosine ~0.98, as do 'can I expense alcohol' and 'can I not expense alcohol'. And if the ACL resolver is unavailable the system must fail closed and refuse the query, since falling back to unfiltered retrieval is a cross-ACL leak.",
         choice: {
           pick: "Exact cache always, semantic cache above cosine ~0.97, partitioned by hash(sorted(group_ids))",
           instead: "A single semantic cache keyed on the query vector alone.",
@@ -222,8 +205,8 @@ export const RAG_SYSTEM: Diagram = {
       label: "Hybrid retrieval + RRF",
       sub: "200 + 200 fused to ~300",
       kind: "service",
-      col: 0,
-      row: 5,
+      col: 2,
+      row: 1,
       detail: {
         what: "Fans the query out to the ANN and BM25 arms in parallel, both carrying the ACL predicate, then merges the two ranked lists into roughly 300 unique candidates.",
         why: "The two retrievers fail on disjoint query types, and merging two cheap rankings beats tuning one expensive one. Running them in parallel means the wall cost is the slower arm, about 30ms, not the sum.",
@@ -244,8 +227,8 @@ export const RAG_SYSTEM: Diagram = {
       label: "Cross-encoder reranker",
       sub: "top 100 pairs, ~90ms",
       kind: "service",
-      col: 0,
-      row: 6,
+      col: 2,
+      row: 2,
       detail: {
         what: "Runs the question and one chunk through a single transformer together, so every query token attends to every chunk token, and rescores the top 100 candidates.",
         why: "This is the only stage that separates 'about this topic' from 'answers this question'. A dot product between two independently computed vectors cannot make that distinction, which is precisely the failure that produces a fluent, wrong answer.",
@@ -266,8 +249,8 @@ export const RAG_SYSTEM: Diagram = {
       label: "Context assembly",
       sub: "dedupe, dates, top 8, abstain",
       kind: "service",
-      col: 0,
-      row: 7,
+      col: 2,
+      row: 3,
       detail: {
         what: "Drops near-duplicates and expired chunks, applies the recency prior, keeps the best 8, orders them strongest at both ends of the prompt, and decides whether to answer at all.",
         why: "More context makes answers worse: going from 5 chunks to 20 reliably lowers faithfulness, because each irrelevant chunk is one more thing a wrong sentence can plausibly be grounded in. This stage is where the budget is spent deliberately rather than filled.",
@@ -286,10 +269,10 @@ export const RAG_SYSTEM: Diagram = {
     {
       id: "generation",
       label: "Prompt + LLM tier",
-      sub: "stream, cite every claim, see #46",
       kind: "external",
-      col: 0,
-      row: 8,
+      col: 2,
+      row: 4,
+      sub: "stream + cite, see #46",
       detail: {
         what: "The inference tier that reads the 8 assembled chunks and streams a cited answer. Batching, KV cache and GPU economics belong to question 46; this diagram treats it as a boundary.",
         why: "It is drawn as one box on purpose. It dominates the bill and cannot fix a bad context, so the design's complexity belongs upstream: no model improves an answer built from the wrong chunks.",
@@ -311,7 +294,7 @@ export const RAG_SYSTEM: Diagram = {
       sub: "2,000 span labels, gates CI",
       kind: "service",
       col: 1,
-      row: 7,
+      row: 4,
       detail: {
         what: "A labelled question set plus retrieval metrics (recall@k, MRR, nDCG) and generation metrics (faithfulness, answer relevance, context relevance), wired into CI.",
         why: "Every knob in this diagram is a quality risk taken on faith without it. It is the only thing that can tell you whether last week's chunker change made the product better, and it is a component rather than a phase before launch.",
@@ -333,6 +316,7 @@ export const RAG_SYSTEM: Diagram = {
       id: "e1",
       from: "connectors",
       to: "chunker",
+      tier: "data",
       label: "changed docs",
       detail: {
         what: "A change event carrying {source, external_id, version} plus the fetched document body, handed to parsing and chunking.",
@@ -346,6 +330,7 @@ export const RAG_SYSTEM: Diagram = {
       id: "e2",
       from: "chunker",
       to: "embed",
+      tier: "data",
       label: "changed chunks only",
       detail: {
         what: "Chunks whose content hash differs from the stored one, which is the only work the embedding fleet ever sees.",
@@ -359,9 +344,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e3",
       from: "chunker",
       to: "chunk-store",
+      tier: "data",
       label: "text + ACL payload",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The chunk text, heading path, char span, effective dates and ACL group IDs written as the durable record.",
         why: "This write is what makes an ACL change cheap later: permissions live on the row, so re-sharing a document is a metadata upsert on its ~12 chunks with no embedding involved.",
@@ -374,9 +358,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e4",
       from: "chunker",
       to: "lexical-index",
+      tier: "data",
       label: "tokens + same payload",
-      fromSide: "right",
-      toSide: "left",
       offset: 60,
       detail: {
         what: "Tokenised chunk text and an identical filterable payload posted into the inverted index.",
@@ -390,9 +373,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e5",
       from: "embed",
       to: "vector-index",
+      tier: "data",
       label: "1024-d int8 upsert",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The quantised vector plus its filterable payload upserted into the HNSW graph, tagged with the embedding model version.",
         why: "The model version rides along because it is part of shard identity: a v2 query hitting a v1 shard returns noise that looks like results, so mismatches must be rejected rather than served.",
@@ -402,27 +384,11 @@ export const RAG_SYSTEM: Diagram = {
       },
     },
     {
-      id: "e6",
-      from: "acl",
-      to: "query-api",
-      label: "principal to group IDs",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "The caller's group ID set, resolved from cache before anything else in the request happens.",
-        why: "Nothing downstream can run without it: retrieval needs the predicate at search time, not at result time. That is why it is stage 0 and why an unresolvable principal fails the query closed.",
-        numbers: ["~2ms p95", "60s TTL"],
-        breaks:
-          "Within the TTL a revoked user still holds stale groups, which is the window the final re-check at assembly closes.",
-      },
-    },
-    {
       id: "e7",
       from: "query-api",
       to: "hybrid",
+      tier: "hot",
       label: "qvec + group predicate",
-      animated: true,
       detail: {
         what: "The 1024-dimensional query vector, the raw question text for BM25, and the ACL group set carried as a hard filter.",
         why: "The predicate travels with the query rather than being applied to the results, because a filter evaluated after ranking cannot restore the slots it took away.",
@@ -435,10 +401,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e8",
       from: "hybrid",
       to: "vector-index",
+      tier: "hot",
       label: "ANN top 200, pre-filtered",
-      animated: true,
-      fromSide: "right",
-      toSide: "bottom",
       detail: {
         what: "A filtered approximate-nearest-neighbour search scattered across 6 shards and gathered, returning the top 200 readable chunks.",
         why: "The permission predicate is evaluated during the graph walk so that all 200 results are chunks the caller may read, rather than 200 results of which an unpredictable number survive.",
@@ -451,10 +415,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e9",
       from: "hybrid",
       to: "lexical-index",
+      tier: "hot",
       label: "BM25 top 200, same filter",
-      animated: true,
-      fromSide: "right",
-      toSide: "bottom",
       offset: 70,
       detail: {
         what: "The literal-token arm of the query, running concurrently with the ANN search under an identical ACL and date filter.",
@@ -468,8 +430,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e10",
       from: "hybrid",
       to: "reranker",
+      tier: "hot",
       label: "top 100 by RRF",
-      animated: true,
       detail: {
         what: "The 100 highest-fused candidates out of roughly 300 unique, handed to joint scoring.",
         why: "This is the narrowing that makes an expensive model affordable: cost per candidate rises exactly as candidate count falls, which is the shape of the whole funnel.",
@@ -482,9 +444,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e11",
       from: "reranker",
       to: "chunk-store",
+      tier: "data",
       label: "fetch ~300 texts",
-      fromSide: "right",
-      toSide: "bottom",
       offset: 90,
       detail: {
         what: "Pulling the actual chunk prose for the candidate set, because both the cross-encoder and the prompt need words rather than vectors.",
@@ -498,8 +459,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e12",
       from: "reranker",
       to: "assembler",
+      tier: "hot",
       label: "~85 scored candidates",
-      animated: true,
       detail: {
         what: "Candidates carrying a joint relevance score, which is the first number in the pipeline that means 'answers this question' rather than 'is about this topic'.",
         why: "Assembly needs a calibrated score, not a rank, because both the abstention floor and the recency prior are multiplicative on it and a rank has no scale to threshold against.",
@@ -510,12 +471,10 @@ export const RAG_SYSTEM: Diagram = {
     },
     {
       id: "e13",
-      from: "acl",
       to: "assembler",
+      tier: "control",
+      from: "query-api",
       label: "re-check final 8",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "right",
       detail: {
         what: "A second permission check on the eight chunks that are about to enter the prompt, against freshly resolved groups.",
         why: "Defence in depth for one 8-row lookup. Pre-filtering already used groups that may be up to 60 seconds stale, and this is what closes that window before anything is shown to a user.",
@@ -528,8 +487,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e14",
       from: "assembler",
       to: "generation",
+      tier: "hot",
       label: "top 8, ~6k tokens",
-      animated: true,
       detail: {
         what: "The final context: eight chunks with citations attached, ordered strongest at the beginning and the end of the prompt.",
         why: "The ordering is deliberate, not cosmetic. Models attend well to the start and end of a context and poorly to the middle, so putting the two best chunks at the extremes defeats lost-in-the-middle.",
@@ -542,9 +501,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e15",
       from: "generation",
       to: "query-api",
+      tier: "hot",
       label: "answer + citations",
-      fromSide: "left",
-      toSide: "left",
       offset: 110,
       detail: {
         what: "Streamed answer tokens followed by the citation set of (doc_id, chunk_id, uri, char_span, score), or an abstention with the three best chunks as links.",
@@ -558,8 +516,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e16",
       from: "assembler",
       to: "eval",
+      tier: "control",
       label: "1% judged offline",
-      dashed: true,
       detail: {
         what: "A sampled stream of production candidate sets and answers, plus mined thumbs-down and rephrase events, feeding the labelled set and the rolling faithfulness estimate.",
         why: "The 2,000-question set cannot cover what people actually ask, so the hard cases have to be harvested from traffic. Mining rephrases matters most: they mark questions the system answered badly enough to be asked again.",
@@ -572,10 +530,8 @@ export const RAG_SYSTEM: Diagram = {
       id: "e17",
       from: "eval",
       to: "chunker",
+      tier: "control",
       label: "CI gate on chunk + model",
-      dashed: true,
-      fromSide: "top",
-      toSide: "right",
       offset: 120,
       detail: {
         what: "The merge gate: any change to the chunker, embedding model, retrieval config or prompt runs the harness and is blocked if it regresses the baseline.",

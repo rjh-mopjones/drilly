@@ -56,9 +56,9 @@ export const NEARBY_FRIENDS: Diagram = {
     {
       id: "device",
       label: "alice's phone",
-      sub: "sets its own rate, ~100B Protobuf",
+      sub: "sets own rate, ~100B protobuf",
       kind: "client",
-      col: 1,
+      col: 0,
       row: 0,
       detail: {
         what: "The writer's device: it classifies motion on the sensor coprocessor, picks its sampling interval from that state using a policy table shipped as remote config, and posts { lat, lng, ts, motion_state } as roughly 100 bytes of Protobuf.",
@@ -85,7 +85,7 @@ export const NEARBY_FRIENDS: Diagram = {
       label: "Location Service",
       kind: "serviceGroup",
       col: 1,
-      row: 1,
+      row: 0,
       detail: {
         what: "The write path as one deployable unit: accept POST /location, write the latest position, pre-filter against the local cell, join the permission pair on whatever survived, publish the crossing. Four stages of one request, on one fleet.",
         why: "The prose's own hot-path pseudocode is a single function — set, then crossings(), then permitted(), then publish() — and drawing those as peer services would claim an independence that does not exist. They deploy together, scale on the same signal, and each stage exists only to make the next one affordable. It is stateless on purpose: ten million writes a second arrive whether or not anybody is watching, so the tier that absorbs them has to scale on the shard map and nothing else.",
@@ -104,7 +104,7 @@ export const NEARBY_FRIENDS: Diagram = {
       sub: "SET loc:{user_id}, ex=300",
       kind: "process",
       col: 1,
-      row: 1,
+      row: 0,
       parent: "location-service",
       detail: {
         what: "The first stage: an unconditional overwrite of the user's single position key with a five minute expiry, carrying the previous cell forward from the request.",
@@ -132,7 +132,7 @@ export const NEARBY_FRIENDS: Diagram = {
       sub: "friends ∩ cell, then haversine",
       kind: "process",
       col: 1,
-      row: 2,
+      row: 1,
       parent: "location-service",
       detail: {
         what: "The stage that decides whether a write is interesting to anybody: intersect the writer's friend list, ~200 ids the service already holds because the graph changes on a timescale of days, with this cell's current membership set, then haversine whatever survives.",
@@ -157,10 +157,10 @@ export const NEARBY_FRIENDS: Diagram = {
     {
       id: "acl-gate",
       label: "Permission check",
-      sub: "both directions, on the survivors",
+      sub: "both directions, survivors only",
       kind: "process",
       col: 1,
-      row: 3,
+      row: 2,
       parent: "location-service",
       detail: {
         what: "The second shedding point: for each candidate the distance test kept, join the bidirectional sharing pair and drop anything not currently permitted in both directions.",
@@ -188,7 +188,7 @@ export const NEARBY_FRIENDS: Diagram = {
       sub: "dedup (subject, observer, dir)",
       kind: "process",
       col: 1,
-      row: 4,
+      row: 3,
       parent: "location-service",
       detail: {
         what: "The last stage: emit (subject, observer, entered|left, ts) to the writer's topic, with no coordinates in the payload, and deduplicate on (subject, observer, direction) before it goes.",
@@ -216,7 +216,7 @@ export const NEARBY_FRIENDS: Diagram = {
       sub: "Kafka, topic per user_id",
       kind: "queue",
       col: 1,
-      row: 5,
+      row: 1,
       detail: {
         what: "One topic per user carrying crossing verdicts, buffered for the length of a subscriber's reconnect window.",
         why: "It decouples the write path from the socket fleet, so a delivery outage cannot back-pressure ingest and a subscriber that reconnects can be caught up from the log rather than losing the event. Reducing a position stream to a verdict is also what drops the delivery problem by two orders of magnitude and is a privacy control in its own right: an observer who is not looking at a map never receives a coordinate.",
@@ -240,10 +240,10 @@ export const NEARBY_FRIENDS: Diagram = {
     {
       id: "subscription",
       label: "Subscription Service",
-      sub: "socket routes, hysteresis 1.5/2.0km",
+      sub: "socket routes, 1.5/2.0km band",
       kind: "service",
       col: 1,
-      row: 6,
+      row: 2,
       detail: {
         what: "Holds the sockets for users with a live view and routes crossing events from a publisher's topic to the subscribers who should see them.",
         why: "This is the only stateful thing on the delivery side, and it is affordable precisely because it is sized by crossings rather than positions. It is a separate deployable from the Location Service because it scales on concurrent sockets while that tier scales on write rate, and a socket fleet restarts on a completely different schedule from a stateless write fleet.",
@@ -270,7 +270,7 @@ export const NEARBY_FRIENDS: Diagram = {
       sub: "WebSocket, crossings only",
       kind: "client",
       col: 1,
-      row: 7,
+      row: 3,
       detail: {
         what: "The observer's device holding an open socket, receiving { type: crossing, subject_id, direction, ts } and nothing else.",
         why: "This is the path that works when the app is closed, which is most of the hours it is installed. It is drawn as a separate client from the map view because they are different products with different freshness promises and different failure modes, not because they are different phones: the same device is usually both, one channel at a time.",
@@ -302,10 +302,10 @@ export const NEARBY_FRIENDS: Diagram = {
     {
       id: "latest-loc",
       label: "Latest-position store",
-      sub: "Redis Cluster, geohash(5), ex=300",
+      sub: "Redis Cluster, geohash(5) ex=300",
       kind: "cache",
       col: 2,
-      row: 1,
+      row: 0,
       parent: "shard-node",
       detail: {
         what: "In-memory latest position per user: loc:{user_id} to (lat, lng, ts, prev_cell), five minute expiry, sharded on a coarse geographic cell rather than on the user key.",
@@ -333,7 +333,7 @@ export const NEARBY_FRIENDS: Diagram = {
       sub: "cell:{geohash} to user_id set",
       kind: "cache",
       col: 2,
-      row: 2,
+      row: 1,
       parent: "shard-node",
       detail: {
         what: "The set of user ids currently reporting from each cell, colocated with the shard that holds their positions and rebuilt from the next write cycle if it is lost.",
@@ -404,9 +404,9 @@ export const NEARBY_FRIENDS: Diagram = {
     {
       id: "perm-cache",
       label: "Permission cache",
-      sub: "read-through, invalidated on write",
+      sub: "read-through, write-invalidated",
       kind: "cache",
-      col: 3,
+      col: 2,
       row: 3,
       detail: {
         what: "The read-through tier in front of the sharing pairs, holding (enabled, precision_m, expires_at) per directed pair and evicted by an explicit invalidation on every share write rather than by a TTL.",
@@ -434,7 +434,7 @@ export const NEARBY_FRIENDS: Diagram = {
       sub: "Postgres, share_pairs, both ways",
       kind: "database",
       col: 3,
-      row: 4,
+      row: 3,
       detail: {
         what: "The system of record for consent: (user_id, friend_id, enabled, precision_m, expires_at), written by POST /share and requiring both directions to be enabled before sharing is live.",
         why: "It is transactional rather than a wide-column store because a grant or a revoke has to be atomic across a pair and immediately visible to the invalidation it triggers. Read-your-writes on a revoke is the whole guarantee; an eventually consistent store would give the revoking user a UI that says 'stopped' while a replica keeps answering yes.",
@@ -461,8 +461,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e1",
       from: "device",
       to: "ingest",
+      tier: "hot",
       label: "POST /location, 10s-5min",
-      animated: true,
       detail: {
         what: "The location update itself: ~100B of Protobuf carrying lat, lng, ts, accuracy, motion state and the previous cell.",
         why: "This is the hot path and the reason the whole system exists in this shape: 10M of these per second arrive whether or not anybody is watching, so every stage downstream is built to shed load rather than to serve a query. The interval on this arrow was already chosen on the phone, which is the largest single reduction in the system.",
@@ -475,10 +475,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e2",
       from: "ingest",
       to: "latest-loc",
+      tier: "hot",
       label: "SET loc:{user}, ex=300",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "An unconditional overwrite of the user's single position key, landing on whichever shard owns the geohash of the new coordinates.",
         why: "The write is unconditional because permission is checked on the read, not here. That is what makes revocation a zero-window property: there is no fan-out state to invalidate, only a read that will start returning nothing. The shard it lands on is chosen by geography, which is what puts the writer's nearby friends on the same box.",
@@ -491,10 +489,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e3",
       from: "ingest",
       to: "history",
+      tier: "control",
       label: "opt-in, moved >50m",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "An asynchronous, movement-gated append to the tracking archive, written only for users who explicitly opted in.",
         why: "Drawn dashed and on the opposite side of the write path from everything else because it must never be on the hot path: history is a separate product, and a candidate who lets it share the live write path has coupled a 240TB system to a 60GB one for no benefit.",
@@ -507,8 +503,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e4",
       from: "ingest",
       to: "prefilter",
+      tier: "data",
       label: "prev cell + new position",
-      animated: true,
       detail: {
         what: "The in-process hand-off to the crossing evaluation, carrying both the previous and current cell so the decision is a pure function of the request.",
         why: "There is no network here, which is the point of drawing these as stages of one service rather than as peers. The shard that owns the new cell has never seen this user before, so anything the evaluation needs about where they were has to travel with the write rather than be read back across the shard map.",
@@ -521,10 +517,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e5",
       from: "prefilter",
       to: "cell-members",
+      tier: "data",
       label: "friends ∩ this cell",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The set intersection: the writer's ~200 friend ids against the user ids currently reporting from this cell, then a haversine on whatever survives.",
         why: "This is the operation the entire sharding scheme exists to make local. Both sides are already in memory on the shard the write just landed on, so a writer in Tokyo whose friends are all in London is answered by absence at memory speed with no network hop at all.",
@@ -537,6 +531,7 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e6",
       from: "prefilter",
       to: "acl-gate",
+      tier: "data",
       label: "~15% survive",
       detail: {
         what: "The candidates that were close enough, handed to the permission join: roughly 3 friends on the 15% of writes that had anybody nearby at all.",
@@ -550,9 +545,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e7",
       from: "acl-gate",
       to: "perm-cache",
+      tier: "data",
       label: "permitted pair?",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The bidirectional sharing lookup for each surviving candidate, served from the read-through cache and falling through to the store on a miss.",
         why: "Running the check here, on the request that produces the verdict, rather than on the delivery nodes is what gives revocation a zero-length window. The same cache answers the poll path, which is deliberate: one tier, one invalidation rule, and no second copy of the permission state anywhere.",
@@ -565,6 +559,7 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e8",
       from: "acl-gate",
       to: "publisher",
+      tier: "data",
       label: "authorised crossings",
       detail: {
         what: "The pairs that passed both the distance test and the permission join, handed to the publisher to be deduplicated and emitted.",
@@ -578,6 +573,7 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e9",
       from: "publisher",
       to: "crossing-bus",
+      tier: "hot",
       label: "topic user.crossing.A",
       detail: {
         what: "The crossing verdict published to the writer's own topic as (subject, observer, entered|left, ts), with no coordinates in the payload.",
@@ -591,6 +587,7 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e10",
       from: "crossing-bus",
       to: "subscription",
+      tier: "hot",
       label: "consume + route to sockets",
       detail: {
         what: "Crossing events consumed by the delivery tier and matched against the routing table of currently live sockets.",
@@ -604,6 +601,7 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e11",
       from: "subscription",
       to: "friend-socket",
+      tier: "hot",
       label: "WS push, no coordinates",
       detail: {
         what: "The crossing delivered over the observer's open socket: subject id, direction and timestamp, with no lat/lng in the payload.",
@@ -617,8 +615,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e12",
       from: "map-client",
       to: "nearby-api",
+      tier: "hot",
       label: "GET /nearby every 10s",
-      animated: true,
       detail: {
         what: "The map's periodic pull for its owner's online, permitted friends' positions.",
         why: "This is the arrow that replaces a per-position push and all its delivery-side state. Whoever is looking pays for the freshness they are looking at, and a screen that is switched off costs nothing at all.",
@@ -631,10 +629,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e13",
       from: "nearby-api",
       to: "latest-loc",
+      tier: "hot",
       label: "multi-get ~20 keys",
-      animated: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "A multi-get over the caller's online friends' position keys, roughly 10% of a 200-friend list, fanned across whichever shards those friends currently sit on.",
         why: "No spatial index is consulted, which is the whole contrast with Q13: the candidate set was handed over by the friend graph, so 20 key reads and 20 distance computations are cheaper than any index that would have to be maintained under 10M writes/s. Note this read crosses cells freely — geographic placement exists for the write path, and costs the read path a scatter it can afford at 20 keys.",
@@ -647,8 +643,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e14",
       from: "nearby-api",
       to: "perm-cache",
+      tier: "data",
       label: "join on the read",
-      animated: true,
       detail: {
         what: "The sharing check, joined onto the same request that produces the answer, including the agreed precision for each pair.",
         why: "Attaching the check to the read rather than caching a fan-out decision is what makes a revoke effective on the very next poll, with nothing to invalidate anywhere and no window in which a stale allow is served. It is the heaviest arrow into this cache, at the full poll rate.",
@@ -661,6 +657,7 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e15",
       from: "perm-cache",
       to: "perm-db",
+      tier: "data",
       label: "read-through on miss",
       detail: {
         what: "The fall-through to the system of record on a cache miss, and the write path for grants and revocations in the other direction.",
@@ -674,10 +671,8 @@ export const NEARBY_FRIENDS: Diagram = {
       id: "e16",
       from: "perm-db",
       to: "subscription",
+      tier: "control",
       label: "revoke: drop the route",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The control path a revoke takes to the delivery tier: tear down the socket route for that pair, not merely evict a cached entry.",
         why: "The read-time check gives a zero window on anything not yet evaluated, but a crossing that already passed the check and is in flight to a socket is past every gate this design has. Removing the route is the only thing that stops it. It is drawn because it is the one place where the push path needs a permission mechanism of its own.",

@@ -30,7 +30,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     {
       id: "client",
       label: "Browser client",
-      sub: "150ms debounce, local history merge",
+      sub: "150ms debounce, history merge",
       kind: "client",
       col: 0,
       row: 0,
@@ -190,7 +190,6 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       kind: "cache",
       col: 2,
       row: 2,
-      parent: "serving-node",
       detail: {
         what: "The served artifact: a minimised automaton mapping each prefix to a byte offset, with that prefix's precomputed top-10 stored inline at the offset.",
         why: "Precomputing the top-K at every node is what makes serving cost independent of how many completions a prefix covers. A three-character prefix sits above the order of 100,000 completions; reading the finished list is ~1μs, while gathering and heap-selecting them would be 1 to 3ms. It is a cache rather than a system of record: the copy in object storage is authoritative, and a node that loses this rebuilds it by pulling the file again.",
@@ -215,7 +214,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     {
       id: "loader",
       label: "Snapshot loader",
-      sub: "checksum · canaries · pointer flip",
+      sub: "checksum + canaries + flip",
       kind: "process",
       col: 1,
       row: 4,
@@ -247,7 +246,6 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       kind: "cache",
       col: 2,
       row: 3,
-      parent: "serving-node",
       detail: {
         what: "A small mutable trie of the same node shape, rebuilt every 60 seconds from the recent query stream and merged with the base result at request time.",
         why: "The base snapshot is up to an hour old, and popularity moves faster than that. If a term starts trending at 2:47pm it will not appear until the 3pm snapshot, so freshness shorter than the build cadence has to sit beside the snapshot rather than inside it. It is drawn as a cache because dropping it is a supported operating mode: the node then serves from the base alone.",
@@ -427,7 +425,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       sub: "S3, 12GB immutable artifact",
       kind: "blob",
       col: 1,
-      row: 8,
+      row: 5,
       detail: {
         what: "Object storage holding the published FST snapshots, from which every serving node pulls independently.",
         why: "Distribution, not replication. The served artifact is read-only, so every region holds an identical copy per locale and there is no replication protocol to run, only a fan-out job. It is also the entire disaster recovery story: recovery is 'pull the current snapshot and pass the canaries'.",
@@ -454,7 +452,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       sub: "Flink, 60 second windows",
       kind: "service",
       col: 2,
-      row: 7,
+      row: 4,
       detail: {
         what: "A streaming job that counts the recent query stream in 60 second windows and publishes the small overlay trie the serving nodes merge.",
         why: "It is deployed apart from the hourly build rather than folded into it because the two fail on different schedules and one of them is optional: this job can be switched off, and the product degrades to hourly freshness instead of going down. It also emits 50 to 100MB where the build emits 12GB, so nothing about their capacity or cadence is shared.",
@@ -477,8 +475,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-type",
       from: "client",
       to: "cdn",
+      tier: "hot",
       label: "GET /suggest?q=wea",
-      animated: true,
       detail: {
         what: "A debounced keystroke going out as a plain GET keyed only on prefix and locale.",
         why: "The request carries no user identity, which is the single property that makes it cacheable at the edge. Personal history never becomes a parameter, so the response stays a pure function of (prefix, locale) and one cached copy serves everybody.",
@@ -491,10 +489,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-hit",
       from: "cdn",
       to: "client",
+      tier: "hot",
       label: "10 suggestions, ~10ms",
-      fromSide: "right",
-      toSide: "right",
-      animated: true,
       detail: {
         what: "The cached ~350B JSON payload returned from an edge node without touching the origin.",
         why: "This is where about 95% of all suggest traffic ends. Short prefixes are requested constantly and their answers are identical for everyone, so the common case never reaches a machine that knows anything about tries.",
@@ -507,8 +503,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-miss",
       from: "cdn",
       to: "lb",
+      tier: "hot",
       label: "miss, ~5% of traffic",
-      animated: true,
       detail: {
         what: "The miss path: longer and rarer prefixes that no edge node has a cached response for.",
         why: "The whole fleet is sized against this number rather than against total traffic. 2M peak QPS times 5% is ~100K origin QPS, which at ~50μs of CPU per request is about 20 cores of real work spread over ~200 nodes held there by memory and geography.",
@@ -521,10 +517,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-route",
       from: "lb",
       to: "suggest",
+      tier: "hot",
       label: "any node will do",
-      fromSide: "right",
-      toSide: "left",
-      animated: true,
       detail: {
         what: "The miss handed to whichever node is in the ready pool, with no prefix-to-node mapping consulted.",
         why: "This arrow is deliberately boring, and that is the payoff of the 12GB compile: because every node holds the whole snapshot, there is no routing decision to make, no shard to be hot and no fan-out whose slowest leaf becomes the p99 of the service.",
@@ -537,10 +531,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-lookup",
       from: "suggest",
       to: "fst-index",
+      tier: "hot",
       label: "walk prefix, read top-10",
-      fromSide: "right",
-      toSide: "left",
-      animated: true,
       detail: {
         what: "One character walked per typed character, ending at a node whose finished top-10 is read straight out of memory.",
         why: "This is the payoff for the entire build pipeline: serving cost does not depend on how many completions the prefix covers. The alternative, gathering and ranking the subtree, is 1 to 3ms for a three-character prefix and would be 100 to 300 cores at origin rate.",
@@ -553,9 +545,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-merge",
       from: "suggest",
       to: "overlay",
+      tier: "data",
       label: "merge trending entries",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The overlay lookup whose top few entries are merged with the base list before the policy filter and serialisation.",
         why: "It is the only way to serve something that started trending after the last snapshot was built, and it is deliberately a merge rather than a write into the base structure, because the compiled FST cannot be edited in place at all.",
@@ -568,6 +559,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-filter",
       from: "suggest",
       to: "policy-filter",
+      tier: "data",
       label: "10 merged candidates",
       detail: {
         what: "The merged list handed to the suppression pass before it is serialised.",
@@ -581,9 +573,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-fill",
       from: "policy-filter",
       to: "cdn",
+      tier: "hot",
       label: "350B, max-age 60",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The filtered response travelling back through the load balancer to the edge, to be cached for 60 seconds under the (prefix, locale) key.",
         why: "The TTL is chosen to match the streaming overlay cadence: caching longer would cache away exactly the freshness the overlay exists to provide, and caching shorter erodes the hit rate that holds the origin at ~100K QPS.",
@@ -596,6 +587,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-logs-agg",
       from: "query-logs",
       to: "aggregate",
+      tier: "control",
       label: "24h rolling window",
       detail: {
         what: "A full rolling day of submitted queries read once an hour, not just the hour that has just passed.",
@@ -609,6 +601,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-agg-safety",
       from: "aggregate",
       to: "safety",
+      tier: "control",
       label: "~100M queries kept",
       detail: {
         what: "The surviving distinct query strings with their decayed scores, handed to the suppression pass.",
@@ -622,6 +615,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-safety-topk",
       from: "safety",
       to: "topk",
+      tier: "control",
       label: "blocked strings dropped",
       detail: {
         what: "The permitted strings, sorted lexicographically, streamed into the trie builder.",
@@ -635,6 +629,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-topk-fst",
       from: "topk",
       to: "compile",
+      tier: "control",
       label: "~76GB trie with top-K",
       detail: {
         what: "The finished in-memory trie, every node down to depth 12 carrying its top-10, handed to the minimiser.",
@@ -648,9 +643,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-publish",
       from: "compile",
       to: "object-store",
+      tier: "control",
       label: "12GB immutable snapshot",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The minimised, checksummed artifact written once to object storage as an immutable snapshot.",
         why: "Publishing once and letting the fleet pull is what keeps the build host out of the distribution path. Immutability is also what makes rollback trivial: an older snapshot is still a valid served structure, so recovery is a file choice rather than a repair.",
@@ -663,9 +657,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-pull",
       from: "object-store",
       to: "loader",
+      tier: "data",
       label: "each node pulls 12GB",
-      fromSide: "right",
-      toSide: "bottom",
       detail: {
         what: "Every serving node downloading the new snapshot to a temp path on local NVMe, in parallel with all the others.",
         why: "Pulling from object storage rather than being pushed from the build host is a bandwidth decision: 200 nodes times 12GB is 2.4TB per hour, and one host's egress would be the bottleneck for the entire rollout.",
@@ -678,10 +671,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-swap",
       from: "loader",
       to: "fst-index",
+      tier: "data",
       label: "atomic pointer flip",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       detail: {
         what: "The activation itself: mmap the verified file and flip one pointer from the old FST to the new one, in 10% waves across the fleet.",
         why: "Requests already holding the old pointer finish against the old mapping, which is unmapped when its refcount hits zero, so no request ever sees a half-swapped structure. Waves exist so a build that passes its canaries on one node but is wrong in general cannot take the whole fleet.",
@@ -694,10 +685,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-logs-stream",
       from: "query-logs",
       to: "stream-agg",
+      tier: "control",
       label: "live query stream",
-      fromSide: "right",
-      toSide: "left",
-      animated: true,
       detail: {
         what: "The same log consumed continuously rather than in hourly batches, counted in 60 second windows.",
         why: "Sharing the input with the batch job is deliberate: both paths rank the same thing by the same signal, so the overlay never disagrees with the base snapshot about what a query is, only about how recently it got popular.",
@@ -710,9 +699,8 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       id: "e-overlay-publish",
       from: "stream-agg",
       to: "overlay",
+      tier: "control",
       label: "rebuild every 60s",
-      fromSide: "top",
-      toSide: "left",
       detail: {
         what: "The freshly counted trending entries published as a small trie for every serving node to hold alongside the base snapshot.",
         why: "It is published rather than merged into the index because the base artifact is immutable, and it is small so a node can drop it and serve from the base alone the moment the overlay looks wrong.",

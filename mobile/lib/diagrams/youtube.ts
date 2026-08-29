@@ -47,45 +47,22 @@ export const YOUTUBE: Diagram = {
       },
     },
     {
-      id: "source-store",
-      label: "Source object store",
-      sub: "archive tier, kept forever",
+      id: "encoded-store",
+      label: "Object store",
+      sub: "src/ permanent, seg+mf/ tiered",
       kind: "blob",
       col: 0,
       row: 1,
       detail: {
-        what: "Raw uploads at src/{video_id}/{source_hash}, in an archive-class tier, replicated cross-region before the upload is acknowledged.",
-        why: "Every derivative is recomputable from this object and nothing else is, so it is the only thing in the system with a zero RPO. It is also the input to escalation runs that may happen weeks after the floor pass, and to a codec migration that may happen years after.",
-        numbers: ["~720TB/day of source", "~1GB per source hour", "retained permanently"],
-        breaks:
-          "Cross-region source replication is the dominant DR cost line at 720TB/day, and it is the one thing that cannot be regenerated if you get it wrong.",
-        choice: {
-          pick: "Archive-class object storage, source retained permanently",
-          instead: "Delete the source once the floor rungs exist and treat the 720p rendition as the master.",
-          decider:
-            "What escalation and codec migration need to read. Re-encoding 1080p or AV1 from a 2.5 Mbps 720p rendition compounds generation loss, and at ~720TB/day against 1.15PB/day of derivatives the source is the cheaper half of the bill sitting in a tier 10x to 20x below standard.",
-          flips:
-            "When storage genuinely dominates and the ladder is frozen, so nothing will ever be re-encoded, which is the case for short-lived or ephemeral media rather than a permanent catalogue.",
-        },
-      },
-    },
-    {
-      id: "encoded-store",
-      label: "Encoded object store",
-      sub: "origin, lifecycle by last access",
-      kind: "blob",
-      col: 0,
-      row: 8,
-      detail: {
-        what: "The origin: segments at seg/{source_hash}/{rung}/{encoder_build}/{index}.m4s and manifests at mf/{video_id}, tiered by last access.",
-        why: "Segment paths are content-addressed down to the encoder build so a re-encode can never overwrite an object already cached somewhere in the world. That immutability is what lets segments carry a year of TTL, which is what makes the whole delivery path a dumb cache.",
+        what: "Two regions of the same object storage service. Raw uploads sit at src/{video_id}/{source_hash} in an archive-class tier kept forever. Derivatives sit at seg/{source_hash}/{rung}/{encoder_build}/{index}.m4s and mf/{video_id}, tiered by last access.",
+        why: "Every derivative is recomputable from the source object and nothing else is, so the source region has a zero RPO and is retained permanently, feeding escalation runs that may happen weeks later and codec migrations that may happen years later. The encoded region is different: segment paths are content-addressed down to the encoder build so a re-encode can never overwrite an object already cached somewhere in the world, which is what lets segments carry a year of TTL and makes the whole delivery path a dumb cache.",
         numbers: [
-          "1.15PB/day encoded, ~2.6PB/day with erasure coding",
-          "~950PB/year",
+          "source: ~720TB/day, retained permanently",
+          "encoded: 1.15PB/day, ~2.6PB/day with erasure coding, ~950PB/year",
           "archive tiers 10x to 20x below standard",
         ],
         breaks:
-          "Below a low access threshold the right move is deletion rather than demotion, so a reawakened long-tail video needs a re-encode taking minutes; keeping the 360p rung of everything warm forever removes that from the user-visible path.",
+          "Cross-region source replication is the dominant DR cost line at 720TB/day, and it is the one thing that cannot be regenerated if you get it wrong. On the encoded side, below a low access threshold the right move is deletion rather than demotion, so a reawakened long-tail video needs a re-encode taking minutes; keeping the 360p rung of everything warm forever removes that from the user-visible path.",
         choice: {
           pick: "Lifecycle by last access, then delete derivatives and keep source plus 360p",
           instead: "Keep every rendition of every video in standard storage forever.",
@@ -93,33 +70,6 @@ export const YOUTUBE: Diagram = {
             "~1EB/year of growth. Storing seven renditions of a video with 40 lifetime views for a decade is the single largest avoidable line item, and re-encoding costs seconds of GPU against storage that costs forever. Archive tiers run 10x to 20x below standard and ~90% of the catalogue goes untouched after 30 days.",
           flips:
             "When restore latency is contractual, or the catalogue is small enough that the whole tiering apparatus costs more to operate than the bytes it saves.",
-        },
-      },
-    },
-    {
-      id: "escalation",
-      label: "Escalation controller",
-      sub: "threshold job, ~5% cross it",
-      kind: "service",
-      col: 0,
-      row: 9,
-      detail: {
-        what: "The threshold job: reads the sliding-window view counters plus the channel's median first-day views, and re-enqueues the video for 1080p, 4K, per-title ladder analysis and AV1.",
-        why: "This is the piece that makes the question different from a curated catalogue. Nothing above the floor is produced without its say-so, so the threshold is a control loop against fleet cost rather than a constant somebody hardcoded, and it has to be re-derived as traffic shifts or the fleet size drifts silently.",
-        numbers: [
-          "threshold tuned so ~5% of uploads cross it",
-          "escalation stops paying above ~30%",
-          "escalation is one-way",
-        ],
-        breaks:
-          "It is reactive by construction: a video going from zero to a million views in ten minutes is served at 720p through its entire ramp, and no signal available at ingest distinguishes a first-time uploader from the half that never reach 100 views.",
-        choice: {
-          pick: "Two rungs at ingest, upper rungs commissioned on view velocity and channel priors",
-          instead: "Encode the full seven-rung ladder for every upload and never revisit a video.",
-          decider:
-            "~3,600 GPUs and 2.9PB/day against ~1,200 and 1.15PB/day, a 3x compute and 60% storage difference on a catalogue where half of uploads never reach 100 views. Note that a 1080p floor is not the moderate compromise it looks like: 1080p alone costs more than every rung beneath it combined and takes the fleet back to ~3,100.",
-          flips:
-            "A small or curated catalogue where every asset is known to be worth the money, at low absolute volume where 3x of a small number beats operating a controller, or on a paid tier that contractually promises 4K on publish.",
         },
       },
     },
@@ -153,17 +103,19 @@ export const YOUTUBE: Diagram = {
       sub: "Temporal, owns the graph",
       kind: "service",
       col: 1,
-      row: 2,
+      row: 1,
       detail: {
-        what: "The workflow engine that owns the job graph and the readiness state machine: probe and split, fan segment jobs, run the check branch, verify, publish. It owns no bytes and does no encoding.",
-        why: "The graph is long-running, partially failing and re-entrant. Retrying a single segment rather than the video, and enforcing the uploaded, floor-published and escalated transitions in one place, is what keeps a 240-job pass from becoming 240 chances to publish something broken. It is drawn outside the DAG frame because it drives those stages rather than being one of them.",
+        what: "The workflow engine that owns the job graph and the readiness state machine: probe and split, fan segment jobs, run the check branch, verify, publish. It owns no bytes and does no encoding. It also owns escalation: a threshold job reading a sliding-window view counter (the last hour, held in memory, alongside the channel's median first-day views) that re-enqueues a video into the same graph for 1080p, 4K, per-title ladder analysis and AV1 once it is worth the cost.",
+        why: "The graph is long-running, partially failing and re-entrant. Retrying a single segment rather than the video, and enforcing the uploaded, floor-published and escalated transitions in one place, is what keeps a 240-job pass from becoming 240 chances to publish something broken. It is drawn outside the DAG frame because it drives those stages rather than being one of them. Escalation is the control loop that keeps the fleet at ~1,200 GPUs instead of ~3,600 and 1.15PB/day instead of 2.9PB: nothing above the 720p floor is produced without its say-so, and the threshold is tuned, not hardcoded, so it has to be re-derived as traffic or fleet size drifts. It is reactive by construction — a video going from zero to a million views in ten minutes is served at the floor through its entire ramp — and the channel prior is what buys back part of that gap for known creators. The view counter behind it is approximate and cheap on purpose: a lost window costs one escalation decision, not a video, and arriving an hour late would be worse than being a few percent wrong.",
         numbers: [
           "240 jobs for a 12-minute floor pass",
           "under 60s upload-to-playable at p50",
           "3.6M workflows started per day",
+          "escalation threshold tuned so ~5% of uploads cross it, stops paying above ~30%",
+          "escalation is one-way, ~1B watch-hours/day feed the view counter",
         ],
         breaks:
-          "Publishing a manifest before every segment of a rung exists hands players a mid-playback 404, and most players stall rather than stepping down a rung, so segment count and summed duration are verified unconditionally before promotion.",
+          "Publishing a manifest before every segment of a rung exists hands players a mid-playback 404, and most players stall rather than stepping down a rung, so segment count and summed duration are verified unconditionally before promotion. Counter drift moves the escalation rate off its 5% target in either direction, silently changing fleet cost until the bill arrives, which is why escalation rate and GPU-hours per upload are alarmed rather than reviewed.",
         choice: {
           pick: "Temporal for the DAG and the readiness state machine",
           instead: "Chained queue consumers with the state inferred from what exists in the bucket.",
@@ -196,7 +148,7 @@ export const YOUTUBE: Diagram = {
       sub: "forced closed GOPs at 6s",
       kind: "service",
       col: 1,
-      row: 3,
+      row: 2,
       parent: "pipeline-zone",
       detail: {
         what: "Reads the source object once: rejects a broken container, then re-cuts the timeline on fixed six-second boundaries with a forced closed group of pictures at each cut, recording the byte offset of every segment.",
@@ -224,7 +176,7 @@ export const YOUTUBE: Diagram = {
       sub: "Kafka, floor lane + preemptible",
       kind: "queue",
       col: 1,
-      row: 4,
+      row: 3,
       parent: "pipeline-zone",
       detail: {
         what: "The durable work queue between the orchestrator and the GPU fleet, split into two lanes: the floor pass, and a preemptible lane carrying escalation work.",
@@ -252,7 +204,7 @@ export const YOUTUBE: Diagram = {
       sub: "ffmpeg NVENC, one segment/job",
       kind: "service",
       col: 1,
-      row: 5,
+      row: 4,
       parent: "pipeline-zone",
       detail: {
         what: "Stateless workers that each pull one contiguous byte range of the source and emit one encoded segment for one rung.",
@@ -279,8 +231,8 @@ export const YOUTUBE: Diagram = {
       label: "CMAF packager",
       sub: "fMP4 once, HLS + DASH manifests",
       kind: "service",
-      col: 1,
-      row: 6,
+      col: 2,
+      row: 4,
       parent: "pipeline-zone",
       detail: {
         what: "Writes fragmented MP4 segments once, emits an HLS playlist and a DASH MPD over the same objects, and extracts thumbnails on the floor pass.",
@@ -302,52 +254,30 @@ export const YOUTUBE: Diagram = {
         },
       },
     },
-    {
-      id: "shield",
-      label: "Origin shield",
-      sub: "coalesces concurrent misses",
-      kind: "gateway",
-      col: 1,
-      row: 8,
-      detail: {
-        what: "A mid-tier cache between the edges and the origin that collapses simultaneous misses for the same object into one origin fetch.",
-        why: "Misses are not independent. A fast-rising video has thousands of edges wanting the same segment within the same second, and without coalescing that arrives at the origin as a correlated burst rather than as the 5% average the capacity plan assumed.",
-        numbers: ["~4 Tbps origin at 95% offload", "45PB/day origin egress, ~9PB at 99%"],
-        breaks:
-          "It concentrates the miss path, so a shield outage does not degrade gracefully: every edge falls through to origin at once and cache-fill amplification spikes exactly when demand does.",
-        choice: {
-          pick: "Shield tier between edges and origin",
-          instead: "Let every edge fetch from origin directly.",
-          decider:
-            "The last few percent arrives correlated. At 95% offload the origin still serves 5% of 900PB/day, about 4 Tbps, and that residue is bursty rather than smooth, so the number that sizes origin is the correlated peak and not the average.",
-          flips:
-            "A small edge footprint where fan-in is already low, and the extra hop adds latency to every miss for coalescing that rarely fires.",
-        },
-      },
-    },
     // --- the check branch, column C ---
     {
       id: "moderation",
       label: "Moderation + rights gate",
       kind: "serviceGroup",
       col: 2,
-      row: 3,
+      row: 1,
       parent: "pipeline-zone",
       detail: {
-        what: "One gate service, three stages of a single verdict: sample and classify, fingerprint against the rights catalogue, then decide whether this video may be published.",
-        why: "It is drawn as one service rather than three because it returns one answer to one caller in seconds and is deployed and scaled as a unit — the classifier pass is ~30 GPUs platform-wide, a rounding error against the 1,200-GPU encode fleet. It runs as a parallel branch of the transcode DAG because it is cheap and the encode is not, so gating on it costs nothing in wall clock.",
+        what: "One gate service, three stages of a single verdict: sample and classify, fingerprint against the rights catalogue, then decide whether this video may be published. The rights catalogue is reference fingerprints that rights holders register themselves, each carrying a policy of block, monetise or track rather than a bare identity.",
+        why: "It is drawn as one service rather than three because it returns one answer to one caller in seconds and is deployed and scaled as a unit — the classifier pass is ~30 GPUs platform-wide, a rounding error against the 1,200-GPU encode fleet. It runs as a parallel branch of the transcode DAG because it is cheap and the encode is not, so gating on it costs nothing in wall clock. The rights catalogue is the gate's only durable dependency and its coverage bounds everything downstream: content nobody has registered cannot be matched, so recall is a property of that table rather than of the matcher, and the lookup itself is nearest-neighbour rather than equality since re-encoding changes the bits but not the content.",
         numbers: [
           "verdict in seconds, both branches must be green",
           "~0.7 GPU-seconds/video, ~30 GPUs platform-wide",
           "3.6M videos/day",
+          "rights catalogue queried once per upload, nearest-neighbour not equality",
         ],
         breaks:
-          "It owns the exposure window, and that window can never be driven to zero at 3.6M uploads a day. The honest metric is exposure-hours before takedown rather than an incident count, and the target is a number somebody has to sign off on.",
+          "It owns the exposure window, and that window can never be driven to zero at 3.6M uploads a day. The honest metric is exposure-hours before takedown rather than an incident count, and the target is a number somebody has to sign off on. Coverage gaps in the rights catalogue are invisible the same way: nothing signals that a piece of content was simply never registered.",
       },
     },
     {
       id: "classifiers",
-      label: "Frame + audio classifiers",
+      label: "Frame + audio classifier",
       sub: "1 frame/s sampled",
       kind: "process",
       col: 2,
@@ -429,18 +359,19 @@ export const YOUTUBE: Diagram = {
       label: "CDN edge",
       sub: "immutable segments, ~95% offload",
       kind: "gateway",
-      col: 2,
-      row: 8,
+      col: 3,
+      row: 1,
       detail: {
-        what: "The tier that actually serves the bytes: pull-through on miss, with a predicted-hot slice pushed out in advance.",
-        why: "In aggregate the system serves ~800 bytes for every byte it produces, so the design question is cache strategy and egress rather than application throughput. Nothing between the player and the object store holds per-viewer session state, which is precisely what makes this tier a dumb cache.",
+        what: "The tier that actually serves the bytes: pull-through on miss, with a predicted-hot slice pushed out in advance. A shield tier sits between the edges and the origin, collapsing simultaneous misses for the same object into one origin fetch.",
+        why: "In aggregate the system serves ~800 bytes for every byte it produces, so the design question is cache strategy and egress rather than application throughput. Nothing between the player and the object store holds per-viewer session state, which is precisely what makes this tier a dumb cache. Misses are not independent — a fast-rising video has thousands of edges wanting the same segment within the same second — so without the shield's coalescing the origin would see a correlated burst rather than the 5% average the capacity plan assumed.",
         numbers: [
           "~83 Tbps average, ~250 Tbps peak",
           "segments max-age=31536000 immutable",
           "manifests max-age=60",
+          "shield holds origin to ~4 Tbps at 95% offload, ~45PB/day",
         ],
         breaks:
-          "Long segment TTLs are load-bearing for the cost model and directly oppose immediate takedown: a cached segment URL stays fetchable across tens of thousands of edges and third-party ISP-embedded appliances for minutes at best after the manifest has already stopped serving.",
+          "Long segment TTLs are load-bearing for the cost model and directly oppose immediate takedown: a cached segment URL stays fetchable across tens of thousands of edges and third-party ISP-embedded appliances for minutes at best after the manifest has already stopped serving. The shield also concentrates the miss path, so its own outage does not degrade gracefully: every edge falls through to origin at once exactly when demand spikes.",
         choice: {
           pick: "Pull-through by default, push only the predicted-hot slice",
           instead: "Pre-position the catalogue to edges and ISP-embedded appliances ahead of demand.",
@@ -457,18 +388,19 @@ export const YOUTUBE: Diagram = {
       label: "Metadata store",
       sub: "videos, video_rungs",
       kind: "database",
-      col: 3,
-      row: 1,
+      col: 2,
+      row: 0,
       detail: {
-        what: "Sharded by video_id: title, duration, and three separate state fields for upload, publish and quality tier, plus one row per completed rung.",
-        why: "Uploaded, published and escalated are independent events, and conflating them into one status is the classic mistake here: it tells creators a video is ready when it is not, and gives the manifest generator a partial-rung case it cannot represent.",
+        what: "Sharded by video_id: title, duration, and three separate state fields for upload, publish and quality tier, plus one row per completed rung. A thin read hop in front of it, the watch API, is what a player actually calls: given a video id it returns title, duration and the manifest URL, or a takedown if publish_state is tombstoned — the one uncached hop on the read path.",
+        why: "Uploaded, published and escalated are independent events, and conflating them into one status is the classic mistake here: it tells creators a video is ready when it is not, and gives the manifest generator a partial-rung case it cannot represent. Gating playback at that read hop rather than at the CDN is what makes a takedown effective within seconds even though the segments behind it stay cached and fetchable; it is sized against page views rather than segment requests, three orders of magnitude smaller than the delivery path it fronts. Gating there rather than signing every segment URL is deliberate: signed URLs would destroy the ~95% edge offload the whole cost model rests on, so takedown speed is bought at the metadata read, not at the segment fetch.",
         numbers: [
           "3.6M new video rows/day",
           "a rung row exists only once the rung is complete",
           "read once per watch page, never per segment",
+          "watch API: one call per watch, ~1B watch-hours/day behind it",
         ],
         breaks:
-          "It is the fast half of a takedown. Manifest hydration reads publish_state, so a tombstone stops new playback within seconds while cached segment URLs stay fetchable until they are purged or evicted.",
+          "It is the fast half of a takedown. Manifest hydration reads publish_state, so a tombstone stops new playback within seconds while cached segment URLs stay fetchable until they are purged or evicted. That read hop stops players, not bytes — a segment already cached at an edge stays fetchable by anyone holding the URL until eviction or purge.",
         choice: {
           pick: "Three state fields plus a wide-column video_rungs table",
           instead: "A single status enum on the video row covering the whole lifecycle.",
@@ -480,30 +412,12 @@ export const YOUTUBE: Diagram = {
       },
     },
     {
-      id: "rights-db",
-      label: "Rights catalogue",
-      sub: "reference fingerprints",
-      kind: "database",
-      col: 3,
-      row: 4,
-      detail: {
-        what: "The reference set rights holders register: fingerprints of protected audio and video, with the policy attached to each — block, monetise, or track.",
-        why: "It is the only durable dependency of the check branch and it is written by a completely different population from the rest of the system. A match is not the end of the decision either: most matches resolve to a policy rather than a takedown, which is why the row carries the policy and not just the identity.",
-        numbers: [
-          "queried once per upload, 3.6M/day",
-          "nearest-neighbour lookup, not an equality match",
-        ],
-        breaks:
-          "Its coverage bounds everything downstream: content nobody has registered cannot be matched, so the gate's recall is a property of this table rather than of the matcher.",
-      },
-    },
-    {
       id: "viewer",
       label: "Viewer player",
       sub: "ABR, picks its own rung",
       kind: "client",
       col: 3,
-      row: 8,
+      row: 2,
       detail: {
         what: "The player: fetches a manifest, estimates bandwidth from its own download timings, and requests the next six-second segment at whichever rung it chooses.",
         why: "Bandwidth changes during playback and the server cannot observe it, so the decision belongs to the only party holding the measurement. A Wi-Fi to cellular handover becomes a quality drop rather than a stall.",
@@ -524,66 +438,14 @@ export const YOUTUBE: Diagram = {
         },
       },
     },
-    {
-      id: "playback-api",
-      label: "Watch API",
-      sub: "manifest hydration, tombstone",
-      kind: "service",
-      col: 4,
-      row: 7,
-      detail: {
-        what: "The one uncached hop on the read path: given a video id it returns title, duration and the manifest URL, or a takedown response if publish_state says tombstoned.",
-        why: "Playback is gated here rather than at the CDN, which is what makes a takedown effective within seconds even though the segments behind it stay cached and fetchable. It is sized against page views rather than segment requests, so it is three orders of magnitude smaller than the delivery path it fronts.",
-        numbers: [
-          "one call per watch, not per segment",
-          "~1B watch-hours/day behind it",
-          "manifests carry max-age=60 once handed out",
-        ],
-        breaks:
-          "It stops players, not bytes. A segment URL already cached at an edge stays fetchable by anyone holding it until eviction or an explicit purge, so takedown is fast here and best effort everywhere below.",
-        choice: {
-          pick: "Tombstone at manifest hydration, long TTLs below it",
-          instead: "Short-lived signed URLs on every segment so a takedown is immediate end to end.",
-          decider:
-            "The cache hit rate the cost model rests on. Signing makes the segment URL unstable, and unstable URLs destroy the ~95% offload that turns 900PB/day of egress into 45PB of origin. Signing is worth it only where the requirement is contractual.",
-          flips:
-            "Premium or paid content, where entitlement is per-viewer anyway and there is no shared cache to protect.",
-        },
-      },
-    },
-    {
-      id: "counters",
-      label: "View velocity counters",
-      sub: "Redis, 1h sliding window",
-      kind: "cache",
-      col: 4,
-      row: 9,
-      detail: {
-        what: "Per-video counters over a sliding window of views in the last hour, held in memory, alongside the channel priors the controller reads with them.",
-        why: "This is the only signal that says what a video is worth, and it arrives hours after the encoding decision it should have informed. It is a cache rather than a store because the whole cost model needs it cheap and roughly right rather than exact — a lost window costs one escalation decision, not a video.",
-        numbers: ["~1B watch-hours/day feeding it", "window of the last hour", "read by a threshold job, not per view"],
-        breaks:
-          "Counter drift moves the escalation rate off its 5% target in either direction, and the fleet size is silently wrong until the bill arrives, which is why escalation rate and GPU-hours per upload are alarmed rather than reviewed.",
-        choice: {
-          pick: "Approximate in-memory sliding-window counters",
-          instead: "Exact aggregation of the watch-event stream in the analytics warehouse.",
-          decider:
-            "What the consumer needs. The threshold is a control loop tuned so ~5% of uploads cross it, so being a few percent wrong on a count changes nothing; being an hour late changes the decision entirely. Warehouse aggregation is accurate and arrives after the window it describes has closed.",
-          flips:
-            "Anything billed or reported from the same number, where an approximate count is not defensible and the latency is acceptable.",
-        },
-      },
-    },
   ],
   edges: [
     {
       id: "e1",
       from: "creator",
       to: "upload-api",
+      tier: "control",
       label: "init: presigned parts",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "POST /upload/init returning an upload_id, a part size and a list of presigned part URLs.",
         why: "It is drawn as a control path because it is the only part of the upload the application tier participates in. Everything after it is the client talking to storage directly, which is what keeps this tier stateless at 83 upload starts a second.",
@@ -594,12 +456,10 @@ export const YOUTUBE: Diagram = {
     },
     {
       id: "e2",
+      to: "encoded-store",
+      tier: "hot",
       from: "creator",
-      to: "source-store",
       label: "5MB parts, direct PUT",
-      animated: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "The video bytes themselves, written part by part straight into object storage and acknowledged individually.",
         why: "This is the arrow that must not pass through a server. Part-level acknowledgement is what turns a failure at part 47 into a resume at 47 rather than at zero, and it keeps 25k concurrent uploads off the application fleet.",
@@ -612,10 +472,8 @@ export const YOUTUBE: Diagram = {
       id: "e3",
       from: "upload-api",
       to: "metadata",
+      tier: "control",
       label: "video row created",
-      dashed: true,
-      fromSide: "right",
-      toSide: "top",
       detail: {
         what: "Creating the video row with upload_state set and publish_state unset.",
         why: "The row has to exist before the bytes finish so the creator has something to poll, and so the pipeline has somewhere to record readiness transitions when the completion event fires.",
@@ -625,11 +483,10 @@ export const YOUTUBE: Diagram = {
     },
     {
       id: "e4",
-      from: "source-store",
       to: "orchestrator",
+      tier: "hot",
+      from: "encoded-store",
       label: "completion event",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The bucket completion event for the assembled source object, which starts a transcode workflow.",
         why: "Durability of the source is the trigger, not the client's claim to have finished. Starting from the object means a retry weeks later reads exactly the same bytes and the job is safe to replay.",
@@ -642,10 +499,8 @@ export const YOUTUBE: Diagram = {
       id: "e5",
       from: "orchestrator",
       to: "splitter",
+      tier: "hot",
       label: "probe, then split",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "The first two nodes of the graph: reject a broken container, then re-cut the timeline at forced closed GOPs and record the byte offsets.",
         why: "Rejecting here rather than after the fan-out is the cheapest possible failure: a broken container costs one probe instead of 240 scheduled jobs that all fail the same way.",
@@ -655,12 +510,11 @@ export const YOUTUBE: Diagram = {
     },
     {
       id: "e6",
-      from: "source-store",
       to: "encoders",
+      tier: "data",
+      from: "encoded-store",
       label: "ranged read per job",
       offset: 40,
-      fromSide: "bottom",
-      toSide: "left",
       detail: {
         what: "Each encode worker pulls exactly one contiguous byte range of the source, the range its split step recorded.",
         why: "This is the arrow that decides wall clock on short videos. 240 ranged reads and 240 writes dominate a floor pass whose actual GPU work is under two minutes, and passing byte offsets is what stops every worker seeking through a 2.5GB object.",
@@ -673,9 +527,8 @@ export const YOUTUBE: Diagram = {
       id: "e7",
       from: "splitter",
       to: "work-queue",
+      tier: "hot",
       label: "240 jobs, byte offsets",
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "One job per segment per rung, each carrying the byte range and the target rung, published onto the floor lane.",
         why: "The fan-out is the whole point of the split: a 12-minute video becomes 120 segments across 2 rungs, and each of those is independently retryable rather than the video being retryable.",
@@ -688,10 +541,8 @@ export const YOUTUBE: Diagram = {
       id: "e8",
       from: "work-queue",
       to: "encoders",
+      tier: "hot",
       label: "one segment per worker",
-      animated: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "Workers pull jobs and are free to die: the job returns to the queue and the retry writes the same bytes to the same path.",
         why: "Idempotency is what makes at-least-once delivery safe here. The output path is a pure function of source hash, rung, encoder build and index, so a duplicate delivery overwrites itself byte for byte.",
@@ -704,9 +555,8 @@ export const YOUTUBE: Diagram = {
       id: "e9",
       from: "encoders",
       to: "packager",
+      tier: "hot",
       label: "fMP4 segments",
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "Completed per-rung segments handed to packaging once the orchestrator has verified the count and summed duration.",
         why: "Packaging is cheap and encoding is not, so the split lets a rung be published the moment its own segments exist rather than waiting on the rest of the ladder.",
@@ -718,10 +568,8 @@ export const YOUTUBE: Diagram = {
       id: "e10",
       from: "packager",
       to: "encoded-store",
+      tier: "hot",
       label: "segments + 2 manifests",
-      animated: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "Writing fragmented MP4 segments to content-addressed paths and promoting the HLS and DASH manifests atomically.",
         why: "Segments go down first and the manifest last, because a manifest that references a segment which is not there yet hands every player a 404 mid-playback and most players stall instead of stepping down.",
@@ -734,10 +582,8 @@ export const YOUTUBE: Diagram = {
       id: "e11",
       from: "orchestrator",
       to: "classifiers",
+      tier: "control",
       label: "check branch, in parallel",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "A parallel branch of the same workflow, started at the same time as the split and joined before publication.",
         why: "It runs alongside rather than after because it is cheap and the encode is not, so gating on it costs nothing in wall clock. Publication waits on both branches, not on either one alone.",
@@ -751,8 +597,6 @@ export const YOUTUBE: Diagram = {
       from: "classifiers",
       to: "fingerprint",
       label: "one decode, reused",
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "The decoded frames and audio the classifier pass already produced, handed to fingerprinting rather than decoded a second time.",
         why: "Decoding is the expensive part of both checks, and doing it once is what keeps the entire platform's gate at ~30 GPUs. It is also why these are stages of one service rather than two services that would each pull the source.",
@@ -765,8 +609,6 @@ export const YOUTUBE: Diagram = {
       from: "classifiers",
       to: "verdict",
       label: "safety score",
-      fromSide: "left",
-      toSide: "left",
       offset: 40,
       detail: {
         what: "A score per policy class rather than a boolean, carried straight to the gate.",
@@ -781,8 +623,6 @@ export const YOUTUBE: Diagram = {
       from: "fingerprint",
       to: "verdict",
       label: "match id or none",
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "The matched reference asset and its policy, or nothing.",
         why: "Most matches are not takedowns. The policy attached to the reference decides between block, monetise and track, so the gate is applying somebody else's rule rather than making a judgement.",
@@ -791,29 +631,11 @@ export const YOUTUBE: Diagram = {
       },
     },
     {
-      id: "e15",
-      from: "fingerprint",
-      to: "rights-db",
-      label: "nearest-neighbour lookup",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "A similarity query against the registered reference fingerprints, not an equality lookup.",
-        why: "Every real infringing re-upload has been through at least one transcode, so the descriptors never match bit for bit. The query has to tolerate re-encoding, cropping, mirroring and pitch-shifting individually.",
-        numbers: ["3.6M queries/day", "one per upload, in seconds"],
-        breaks:
-          "Combinations of those transforms defeat it, so the miss rate is highest exactly where somebody is trying, and the queue that catches the rest is ordered by predicted reach.",
-      },
-    },
-    {
       id: "e16",
       from: "verdict",
       to: "metadata",
+      tier: "control",
       label: "verdict gates publish",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "An append-only verdict row per check, and the flip of publish_state when both branches come back green.",
         why: "Verdicts are appended rather than overwritten because a takedown has to be able to show what was known at the time the video was allowed through.",
@@ -825,10 +647,8 @@ export const YOUTUBE: Diagram = {
       id: "e17",
       from: "orchestrator",
       to: "metadata",
+      tier: "control",
       label: "readiness + rung rows",
-      dashed: true,
-      fromSide: "right",
-      toSide: "bottom",
       detail: {
         what: "Writing a video_rungs row per completed rung and moving the video through uploaded, floor-published and escalated.",
         why: "The rung row exists only once every segment of that rung is durable, so the manifest generator reads a table with no partial state in it and needs no special case.",
@@ -841,10 +661,8 @@ export const YOUTUBE: Diagram = {
       id: "e18",
       from: "packager",
       to: "cdn",
+      tier: "data",
       label: "pre-warm hot slice",
-      dashed: true,
-      fromSide: "right",
-      toSide: "top",
       detail: {
         what: "A push of the floor rung to major points of presence, fired for channels above a subscriber threshold, for scheduled premieres, and by the escalation controller when a video crosses the velocity threshold in its first minutes.",
         why: "For a known audience with a known start time, one planned fill beats any reactive mechanism, because the traffic arrives faster than a cache fills.",
@@ -854,11 +672,10 @@ export const YOUTUBE: Diagram = {
     },
     {
       id: "e19",
+      to: "cdn",
+      tier: "data",
       from: "encoded-store",
-      to: "shield",
       label: "origin fetch on miss",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The origin read that fills the shield, one per object no matter how many edges asked for it simultaneously.",
         why: "This is the only path by which viewer traffic reaches storage at all, and it exists to be rare: at 95% offload it carries 5% of 900PB/day.",
@@ -868,27 +685,11 @@ export const YOUTUBE: Diagram = {
       },
     },
     {
-      id: "e20",
-      from: "shield",
-      to: "cdn",
-      label: "one fill per object",
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "The coalesced fill going back out to whichever edges are waiting on that object.",
-        why: "Thousands of edges missing the same segment in the same second is the normal shape of a rising video, and collapsing them into one fetch is the difference between an origin sized for the average and one sized for the burst.",
-        breaks:
-          "The coalescing window is finite, so a stampede spread across slightly different segment indices still fans in.",
-      },
-    },
-    {
       id: "e21",
       from: "cdn",
       to: "viewer",
+      tier: "hot",
       label: "segments, ~95% at edge",
-      animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The manifest and then a stream of six-second segments, served from the nearest edge at whatever rung the player asked for.",
         why: "This is where essentially all the bytes in the system go. Segments are immutable at content-addressed URLs so they cache for a year; the manifest is the mutable exception and carries 60 seconds.",
@@ -899,12 +700,10 @@ export const YOUTUBE: Diagram = {
     },
     {
       id: "e22",
+      to: "metadata",
+      tier: "control",
       from: "viewer",
-      to: "playback-api",
       label: "GET /watch/{id}",
-      dashed: true,
-      fromSide: "right",
-      toSide: "bottom",
       detail: {
         what: "The page-level read before a single byte of video is fetched: title, duration, publish_state and the manifest URL.",
         why: "Playback is gated here rather than at the CDN, which is what makes a tombstone effective within seconds even though the segments behind it stay cached and fetchable.",
@@ -913,67 +712,17 @@ export const YOUTUBE: Diagram = {
       },
     },
     {
-      id: "e23",
-      from: "playback-api",
-      to: "metadata",
-      label: "publish_state + rungs",
-      dashed: true,
-      fromSide: "top",
-      toSide: "right",
-      detail: {
-        what: "One point read per watch: the video row and its completed rungs, which together decide whether a manifest URL is returned at all.",
-        why: "Hydrating the manifest from the rung table rather than from bucket contents is what lets an escalated rung appear the moment it is durable, and a tombstone disappear the moment it is written.",
-        numbers: ["one read per watch, not per segment"],
-        breaks:
-          "A stale read here serves a manifest for a video that was tombstoned seconds ago, so this read is deliberately not cached.",
-      },
-    },
-    {
       id: "e24",
+      to: "orchestrator",
+      tier: "control",
       from: "viewer",
-      to: "counters",
       label: "watch events",
-      dashed: true,
-      fromSide: "bottom",
-      toSide: "left",
       detail: {
         what: "Watch events feeding the per-video sliding-window counters, the same stream the recommendation system consumes for its own purposes.",
         why: "This is the only signal that tells you what a video is worth, and it arrives hours after the encoding decision it should have informed. The whole cost model rests on this arrow being cheap and roughly right rather than exact.",
         numbers: ["~1B watch-hours/day", "sliding window of the last hour"],
         breaks:
           "It must never sit on the playback path: an outage here costs escalation decisions, and blocking playback on it would trade a 99.99% SLO for a best-effort one.",
-      },
-    },
-    {
-      id: "e25",
-      from: "counters",
-      to: "escalation",
-      label: "1h window + channel prior",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "The threshold job reading the window per candidate video, together with the channel's median first-day views.",
-        why: "The prior is what buys back part of the reactive gap: a channel with a million subscribers gets the full ladder at ingest because its expected value is known before the file arrives.",
-        numbers: ["threshold tuned so ~5% of uploads cross it"],
-        breaks:
-          "A first-time uploader has no prior at all, so for exactly the case where the reactive gap hurts most there is nothing to read.",
-      },
-    },
-    {
-      id: "e26",
-      from: "escalation",
-      to: "orchestrator",
-      label: "re-enqueue upper rungs",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "A second pass through the same workflow for 1080p, 4K, per-title ladder analysis and AV1, with split, thumbnails and notify skipped.",
-        why: "Re-entering the existing graph rather than running a separate pipeline is what makes encoder-build pinning matter: a rung half-encoded on one build and half on another gives quality discontinuities nobody finds until a viewer complains.",
-        numbers: ["~5% of uploads", "the remaining 6.15 Mbps of ladder, 2.8x source"],
-        breaks:
-          "This work rides the preemptible lane and is shed first under an upload spike, because late upper rungs are invisible to nearly everyone while an unplayable video is a support ticket.",
       },
     },
   ],

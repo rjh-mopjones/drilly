@@ -63,11 +63,11 @@ export const ECOMMERCE: Diagram = {
     },
     {
       id: "catalog",
-      label: "Catalogue + search origin",
-      sub: "document store, OpenSearch via CDC",
       kind: "database",
-      col: 1,
-      row: 1,
+      sub: "doc store, OpenSearch via CDC",
+      label: "Catalogue + search",
+      col: 2,
+      row: 0,
       detail: {
         what: "One ~4KB document per sku_id in a partitioned document store, with a denormalised ~1.5KB search doc per SKU in OpenSearch fed by change data capture.",
         why: "It only ever sees CDN misses, so it is sized for correctness and freshness rather than for throughput. CDC rather than a nightly batch is what keeps the index trailing the catalogue by seconds, which is the difference between a search result being wrong and being stale.",
@@ -86,11 +86,11 @@ export const ECOMMERCE: Diagram = {
     },
     {
       id: "gateway",
-      label: "API gateway + waiting room",
       sub: "signed admission tokens",
       kind: "service",
-      col: 0,
-      row: 1,
+      label: "Gateway + waiting room",
+      col: 1,
+      row: 0,
       detail: {
         what: "The single shared edge for both columns, carrying the waiting room that issues signed admission tokens during a drop and the graded load-shedding ladder.",
         why: "Admission control is only useful before work has been admitted, so it sits here rather than in front of inventory. It is also the only thing the read and write paths share, which is what stops a saturated counter from touching browse.",
@@ -112,8 +112,8 @@ export const ECOMMERCE: Diagram = {
       label: "Cart service",
       sub: "KV keyed by cart_id, ~1KB",
       kind: "service",
-      col: 0,
-      row: 2,
+      col: 1,
+      row: 1,
       detail: {
         what: "A durable server-side cart in a KV store. Guests get a cart_id cookie and the cart itself lives on the server, with a defined merge rule on login.",
         why: "A cart line is explicitly not a reservation, only a price snapshot for display. That is what keeps ~100 add-to-carts a second off the inventory counters entirely and lets the reserve happen once, at checkout entry, where the shopper has actually committed.",
@@ -133,10 +133,10 @@ export const ECOMMERCE: Diagram = {
     {
       id: "saga",
       label: "Checkout saga",
-      sub: "durable workflow, compensating undo",
       kind: "service",
-      col: 0,
-      row: 3,
+      sub: "durable workflow, compensating",
+      col: 1,
+      row: 2,
       detail: {
         what: "The orchestrator for one checkout: read cart, take holds, re-price, write the order and its idempotency key in one transaction, call payment, confirm the holds, emit the fulfilment event.",
         why: "The steps span services that cannot share a transaction, so each commits independently and each has a compensating undo. Orchestrated rather than choreographed so there is exactly one place to answer where order 12345 is stuck.",
@@ -156,10 +156,10 @@ export const ECOMMERCE: Diagram = {
     {
       id: "pricing",
       label: "Pricing + promotions",
-      sub: "rules engine, authoritative at checkout",
       kind: "service",
-      col: 1,
-      row: 3,
+      sub: "rules engine, authoritative",
+      col: 0,
+      row: 1,
       detail: {
         what: "A rules evaluator over (sku, market, customer segment, cart contents) that produces the quoted_total the shopper is asked to accept.",
         why: "The product page physically cannot hold the authoritative number, because a buy-three-get-one promotion depends on the rest of the cart and tax depends on an address. The page shows a cached opinion and this is the fact.",
@@ -177,35 +177,12 @@ export const ECOMMERCE: Diagram = {
       },
     },
     {
-      id: "classifier",
-      label: "Heat classifier",
-      sub: "rolling 10s reserve rate, hysteretic",
-      kind: "service",
-      col: 0,
-      row: 4,
-      detail: {
-        what: "A per-SKU reserve-rate tracker running on the inventory nodes themselves, writing the lane as a field on the counter record so lane and count are read in one lookup.",
-        why: "The classifier is the design and the lanes are its consequences. It runs next to the counters because a separate service adds a network hop to the reserve path and a second thing that can be stale.",
-        numbers: ["10-second rolling window", "promote on 1 window, demote after ~5 minutes", "scheduled drops pre-classified as hot hours ahead"],
-        breaks:
-          "It is reactive, so an unannounced viral spike runs in the cold lane for its first few seconds. It fails safely, since a losing conditional update affects zero rows, but those are exactly the seconds you wanted to sell in.",
-        choice: {
-          pick: "Reactive rolling-window classifier with asymmetric hysteresis",
-          instead: "Put every SKU on the queue lane and delete the classifier entirely.",
-          decider:
-            "Partition budget against latency for the uncontended case. A stream partition per SKU is 200M partitions and no broker runs that, while multiplexing 1,000 SKUs per partition reintroduces the head-of-line blocking the lane exists to remove. The queue also turns a 3ms synchronous reserve into a ticket with a p99 near 250ms for the 99.99% of reserves with no contention to resolve.",
-          flips:
-            "Catalogues under roughly 10,000 active SKUs, or a drops-only business where an asynchronous reserve is the normal experience. A label releasing 40 SKUs a week should queue everything and never build this.",
-        },
-      },
-    },
-    {
       id: "cold",
       label: "Cold lane",
       sub: "one conditional UPDATE, ~3ms",
       kind: "service",
-      col: 0,
-      row: 5,
+      col: 2,
+      row: 2,
       parent: "lanes-group",
       detail: {
         what: "A single statement: UPDATE inventory SET available = available - :q WHERE sku = :s AND available >= :q, with the caller reading the affected row count rather than the data.",
@@ -228,8 +205,8 @@ export const ECOMMERCE: Diagram = {
       label: "Warm lane",
       sub: "N = 32 buckets, hash(cart_id)",
       kind: "service",
-      col: 0,
-      row: 6,
+      col: 2,
+      row: 3,
       parent: "lanes-group",
       detail: {
         what: "Stock split across 32 bucket rows, with each caller picking hash(cart_id) % N, probing the next bucket on an empty one and stealing from the fullest on a second failure.",
@@ -252,8 +229,8 @@ export const ECOMMERCE: Diagram = {
       label: "Hot lane",
       sub: "per-SKU log, one consumer",
       kind: "queue",
-      col: 0,
-      row: 7,
+      col: 2,
+      row: 4,
       parent: "lanes-group",
       detail: {
         what: "Reserve attempts appended to a per-SKU stream partition and applied in arrival order by exactly one consumer against an in-memory counter, answered asynchronously over SSE.",
@@ -273,17 +250,22 @@ export const ECOMMERCE: Diagram = {
     },
     {
       id: "holds",
-      label: "Inventory counters + holds",
       sub: "in-memory, native TTL",
       kind: "database",
-      col: 1,
-      row: 7,
+      label: "Counters + holds",
+      col: 3,
+      row: 3,
       detail: {
-        what: "The counters themselves plus every hold record: hold_id, sku, qty, cart_id, expires_at and state, with a 15-minute TTL at checkout entry and 10 minutes on a drop.",
-        why: "Whichever lane granted it, a reserve produces exactly one artefact, so nothing about the lane leaks past this point and a single checkout saga can serve all three. A hold is a reservation, not a sale; only confirm makes it final.",
-        numbers: ["600M rows, ~40GB, fits in memory", "7.2M live holds at sale peak, ~600MB", "counter persisted every 50ms with its offset"],
+        what: "The counters themselves plus every hold record: hold_id, sku, qty, cart_id, expires_at and state, with a 15-minute TTL at checkout entry and 10 minutes on a drop. A per-SKU heat classifier runs on these same nodes, tracking a rolling 10-second reserve rate and writing the lane (cold, warm or hot) as a field on the counter record, so lane and count are always read in one lookup.",
+        why: "Whichever lane granted it, a reserve produces exactly one artefact, so nothing about the lane leaks past this point and a single checkout saga can serve all three. A hold is a reservation, not a sale; only confirm makes it final. The classifier lives here rather than as a separate service because a network hop on the hot path would add latency and a second thing that can be stale about the SKU that matters most.",
+        numbers: [
+          "600M rows, ~40GB, fits in memory",
+          "7.2M live holds at sale peak, ~600MB",
+          "counter persisted every 50ms with its offset",
+          "10s rolling window, promote in 1 window, demote after ~5 min",
+        ],
         breaks:
-          "Millions of holds expire in the same minute after a sale, and a sweeper that falls behind makes real stock invisible for minutes. Expiry runs on native TTL with keyspace events, with the sweeper as a reconciling backstop only.",
+          "Millions of holds expire in the same minute after a sale, and a sweeper that falls behind makes real stock invisible for minutes. Expiry runs on native TTL with keyspace events, with the sweeper as a reconciling backstop only. The classifier is also reactive, so an unannounced viral spike runs in the cold lane for its first few seconds; it fails safely since a losing conditional update affects zero rows, but those are exactly the seconds you wanted to sell in.",
         choice: {
           pick: "In-memory store with native TTL and keyspace-expiry events",
           instead: "A holds table with an expires_at column and a polling sweeper.",
@@ -299,8 +281,8 @@ export const ECOMMERCE: Diagram = {
       label: "Order store",
       sub: "sharded by hash(order_id)",
       kind: "database",
-      col: 1,
-      row: 5,
+      col: 0,
+      row: 3,
       detail: {
         what: "The order rows themselves, with the Idempotency-Key written under a unique index in the same transaction as the order.",
         why: "Same-transaction dedupe is the whole point: a double-tapped Buy makes the second insert violate the constraint, so the original order is returned rather than a second charge being attempted. The key is generated once per checkout session and stored with the cart.",
@@ -320,9 +302,9 @@ export const ECOMMERCE: Diagram = {
     {
       id: "payment",
       label: "Payment service",
-      sub: "auth, capture and ledger, see #23",
       kind: "external",
-      col: 1,
+      sub: "auth, capture, ledger, see #23",
+      col: 0,
       row: 4,
       detail: {
         what: "The downstream that authorises and captures the charge. Out of scope here: question 23 owns the ambiguous-timeout problem and the double-entry ledger.",
@@ -338,6 +320,7 @@ export const ECOMMERCE: Diagram = {
       id: "e1",
       from: "cdn",
       to: "gateway",
+      tier: "data",
       label: "origin miss, ~5%",
       detail: {
         what: "The small fraction of product page and fragment requests that the POP cannot answer, travelling on to the origin.",
@@ -351,8 +334,8 @@ export const ECOMMERCE: Diagram = {
       id: "e2",
       from: "gateway",
       to: "catalog",
+      tier: "data",
       label: "PDP + search render",
-      animated: true,
       detail: {
         what: "A miss being served: the document read by sku_id and rendered, or a search query fanned into the index.",
         why: "The origin is the only place that holds the truth about what a product is, and it is deliberately reached rarely. Search is a separate path from the PDP because BM25 plus reranking has nothing in common with a key lookup.",
@@ -365,6 +348,7 @@ export const ECOMMERCE: Diagram = {
       id: "e3",
       from: "gateway",
       to: "cart",
+      tier: "hot",
       label: "POST /cart/items",
       detail: {
         what: "An add-to-cart write reaching the cart service, carrying a cart_id cookie for a guest or a resolved user_id for a signed-in shopper.",
@@ -378,6 +362,7 @@ export const ECOMMERCE: Diagram = {
       id: "e4",
       from: "cart",
       to: "saga",
+      tier: "hot",
       label: "POST /checkout/session",
       detail: {
         what: "The cart read that opens a checkout, roughly 1KB of lines handed to the orchestrator.",
@@ -391,6 +376,7 @@ export const ECOMMERCE: Diagram = {
       id: "e5",
       from: "saga",
       to: "pricing",
+      tier: "hot",
       label: "authoritative re-quote",
       detail: {
         what: "Every line and every promotion re-evaluated against current rules, returning quoted_total and a changes[] array explaining each delta.",
@@ -401,23 +387,10 @@ export const ECOMMERCE: Diagram = {
       },
     },
     {
-      id: "e6",
-      from: "saga",
-      to: "classifier",
-      label: "reserve(sku, qty)",
-      animated: true,
-      detail: {
-        what: "The reserve call, which first resolves the SKU's lane from the counter record before any decrement is attempted.",
-        why: "The lane is read in the same lookup as the count because a separate classifier service would add a network hop to the hot path and a second thing that can be stale about the SKU that matters most.",
-        numbers: ["lane resolved from a rolling 10s rate", "one lookup for lane and count"],
-        breaks:
-          "For the first few seconds of an unannounced spike this resolves to the wrong lane, and the burst runs as conditional updates against one row until the window catches up.",
-      },
-    },
-    {
       id: "e7",
-      from: "classifier",
       to: "cold",
+      tier: "hot",
+      from: "saga",
       label: "cold: under 50/s",
       detail: {
         what: "Routing effectively the entire catalogue to a single conditional decrement.",
@@ -429,8 +402,9 @@ export const ECOMMERCE: Diagram = {
     },
     {
       id: "e8",
-      from: "classifier",
       to: "warm",
+      tier: "hot",
+      from: "saga",
       label: "warm: 50 to 1,000/s",
       detail: {
         what: "Routing a busy but not stampeded SKU to 32 bucket rows selected by hash(cart_id) % N.",
@@ -442,10 +416,10 @@ export const ECOMMERCE: Diagram = {
     },
     {
       id: "e9",
-      from: "classifier",
       to: "hot",
+      tier: "hot",
+      from: "saga",
       label: "hot: 8k/s on one SKU",
-      animated: true,
       detail: {
         what: "Routing a doorbuster into its own stream partition, either reactively above 1,000 reserves/s or pre-classified hours before a scheduled drop.",
         why: "Scheduled sales bypass the reactive path entirely, which keeps the classifier's lag off the case that matters most. The lane exists so a hot SKU cannot borrow capacity from cold ones.",
@@ -458,9 +432,8 @@ export const ECOMMERCE: Diagram = {
       id: "e10",
       from: "cold",
       to: "holds",
+      tier: "data",
       label: "conditional update, 3ms",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The decrement and its hold row written together, returning a hold_id with a 15-minute TTL.",
         why: "Writing both in one transaction is what makes the reserve safe to retry. Split them and a crash between the two either leaks stock or oversells, and neither is visible without a reconciler.",
@@ -473,9 +446,8 @@ export const ECOMMERCE: Diagram = {
       id: "e11",
       from: "warm",
       to: "holds",
+      tier: "data",
       label: "bucket grant to a hold",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A successful bucket decrement, after any next-bucket probe or steal-from-fullest, materialised as the same hold record the other lanes produce.",
         why: "The hold is the lane-independent artefact. Once it exists, the checkout saga has no idea which mechanism granted it, which is precisely what lets one saga serve all three lanes.",
@@ -488,8 +460,8 @@ export const ECOMMERCE: Diagram = {
       id: "e12",
       from: "warm",
       to: "hot",
+      tier: "control",
       label: "merge when under 2N left",
-      dashed: true,
       detail: {
         what: "A coordinator taking a brief exclusive window across all 32 rows, summing them into one, and promoting the SKU to the queue lane.",
         why: "The bucket endgame produces undersells, and an undersell costs about 1.7x an oversell. Collapsing the buckets before the tail of the stock is stranded is the whole reason the threshold exists.",
@@ -502,9 +474,8 @@ export const ECOMMERCE: Diagram = {
       id: "e13",
       from: "hot",
       to: "holds",
+      tier: "data",
       label: "granted, answered by SSE",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The single consumer decrementing the in-memory counter and emitting a grant carrying a hold_id, delivered to the waiting client over SSE.",
         why: "The hold_id is what makes replay safe. After a consumer failover, decrements applied in memory but not persisted are re-applied and grants re-emitted, and only a keyed hold store turns that duplicate into an overwrite instead of a second reservation.",
@@ -517,6 +488,7 @@ export const ECOMMERCE: Diagram = {
       id: "e14",
       from: "saga",
       to: "orders",
+      tier: "hot",
       label: "order + Idempotency-Key",
       detail: {
         what: "The PENDING order row and its idempotency key inserted in a single transaction under a unique index.",
@@ -530,6 +502,7 @@ export const ECOMMERCE: Diagram = {
       id: "e15",
       from: "saga",
       to: "payment",
+      tier: "hot",
       label: "capture, see #23",
       detail: {
         what: "The charge step, called with the hold already taken and the order row already durable.",
@@ -543,8 +516,8 @@ export const ECOMMERCE: Diagram = {
       id: "e16",
       from: "saga",
       to: "holds",
+      tier: "control",
       label: "confirm(hold_id)",
-      dashed: true,
       offset: 60,
       detail: {
         what: "Turning holds into allocations after payment succeeds. This is the only step that makes a sale final.",
@@ -558,10 +531,8 @@ export const ECOMMERCE: Diagram = {
       id: "e17",
       from: "holds",
       to: "hot",
+      tier: "control",
       label: "TTL expiry returns stock",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "An expired or released hold adding its quantity back, which on a hot SKU means incrementing the consumer's in-memory counter.",
         why: "An abandoned unit has to go back in front of the queue rather than being lost. During a drop the backlog is still draining, so a returned unit is sellable within milliseconds instead of at the next reconciliation.",
@@ -574,8 +545,8 @@ export const ECOMMERCE: Diagram = {
       id: "e18",
       from: "pricing",
       to: "cdn",
+      tier: "control",
       label: "price fragment, 15s TTL",
-      dashed: true,
       detail: {
         what: "A display-only projection of the rules store pushed into edge KV: price, stock band and promo badge, keyed by (sku_id, market).",
         why: "Drawn as a control path because it carries an opinion rather than a fact. The projection exists so a product page can show a number without a round trip to a rules engine that is busy being authoritative for checkout.",

@@ -49,8 +49,8 @@ export const TRENDING_TOPICS: Diagram = {
     {
       id: "ingest",
       label: "Ingest + normalise",
-      sub: "lowercase, strip, fold confusables",
       kind: "service",
+      sub: "lowercase, strip confusables",
       col: 0,
       row: 0,
       detail: {
@@ -72,10 +72,10 @@ export const TRENDING_TOPICS: Diagram = {
     {
       id: "stream",
       label: "Event stream",
-      sub: "Kafka, partitioned by hash(key), 24h",
       kind: "queue",
-      col: 0,
-      row: 1,
+      sub: "Kafka, hash(key), 24h",
+      col: 1,
+      row: 0,
       detail: {
         what: "A durable, replayable log carrying {key, user_id, ts, geo} at 1M events/s, partitioned so that every occurrence of one key lands on one shard.",
         why: "Key-hash partitioning is not there for the counts, which merge correctly under any partitioning because a cell address depends on the key and not on which worker incremented it. It is there for candidate discovery: a shard can only nominate a key it has seen enough of to believe is heavy.",
@@ -95,10 +95,10 @@ export const TRENDING_TOPICS: Diagram = {
     {
       id: "archive",
       label: "Raw archive",
-      sub: "Parquet on object store, replay + audit",
       kind: "database",
-      col: 1,
-      row: 1,
+      sub: "Parquet, replay + audit",
+      col: 2,
+      row: 0,
       detail: {
         what: "Every raw event and every published list, written as Parquet partitioned by day.",
         why: "It is the only ground truth anywhere in the system. A key that appeared four minutes ago has no reconciliation target except the stream itself, so replay after a lost minute, review of a suppression decision, and any exact recount all start here.",
@@ -116,47 +116,23 @@ export const TRENDING_TOPICS: Diagram = {
       },
     },
     {
-      id: "dedupe",
-      label: "De-dup Bloom",
-      sub: "rotating 5-min generations, per shard",
-      kind: "database",
-      col: 1,
-      row: 2,
-      parent: "counting-tier",
-      detail: {
-        what: "A rotating Bloom filter over (user_id, key) tuples for the current 5-minute generation, tested and set before any counter moves.",
-        why: "Raw volume has to mean distinct participants or one account with a loop is a trend. Capping each account at one count per key per window is the cheapest bot resistance available and it runs on the hot path for the price of a few memory probes.",
-        numbers: ["300M tuples per 5-min generation", "1% FPR -> 9.6 bits/element -> ~360MB", "x2 rotating generations ~720MB, ~11MB/shard"],
-        breaks:
-          "It deletes real events. At 1% false positives roughly 1% of genuine pairs never reach a counter, concentrated late in a generation when the filter is fullest, so the sketch's clean 'never under-counts' guarantee holds over de-duplicated events rather than over reality.",
-        choice: {
-          pick: "Rotating Bloom at a 1% false-positive rate, sized for 2x peak",
-          instead: "Exact per-user sets, or the same filter tuned to 0.1%.",
-          decider:
-            "300M (user, key) tuples per generation. Exact sets at that count are unaffordable, and dropping to 0.1% costs 50% more memory to reduce a bias nobody can measure, because there is no ground truth for how many de-duplications were wrong. Rotate a generation early when fill crosses 80%.",
-          flips:
-            "Per-tenant or low-rate deployments where a generation holds a few million tuples and an exact set fits, removing the undercount entirely.",
-        },
-      },
-    },
-    {
       id: "sketch-worker",
-      label: "Sketch workers x 64",
-      sub: "Count-Min d=7 · w=32,768 · ~917KB",
       kind: "service",
-      col: 0,
-      row: 2,
+      sub: "Count-Min d=7 w=32,768",
+      label: "Sketch workers (x64)",
+      col: 1,
+      row: 1,
       parent: "counting-tier",
       detail: {
-        what: "Each worker consumes its partitions, hashes every key once per row, increments those 7 counters, and reads the minimum back as the running estimate.",
-        why: "The dimensions are derived, not chosen: w sets the size of the error at e/w, d sets the probability the bound holds at e^-d. Taking the minimum rather than the mean is what keeps the error one-sided, because every row is contaminated upward and the minimum is the least-collided sample rather than an average of the noise.",
+        what: "Each worker tests and sets (user_id, key) against a rotating 5-minute Bloom generation before anything else runs, then hashes the surviving key once per row, increments those 7 counters, and reads the minimum back as the running estimate.",
+        why: "The dedup gate sits ahead of the counters so raw volume means distinct participants rather than distinct events, which is the cheapest bot resistance available for the price of a few memory probes. The sketch dimensions are then derived, not chosen: w sets the size of the error at e/w, d sets the probability the bound holds at e^-d. Taking the minimum rather than the mean is what keeps the error one-sided, because every row is contaminated upward and the minimum is the least-collided sample rather than an average of the noise.",
         numbers: [
           "7 writes, ~50ns per event; ~15.6k events/s/shard, ~110k counter writes/s",
           "epsilon = 8.3e-5, delta = 0.001, so epsilon*N ~ 4,980 on a 60M-event minute",
-          "3 rows of 1M would give delta = e^-3, one estimate in 20 outside the bound entirely",
+          "dedup: 300M tuples/generation, 1% FPR, ~11MB/shard across 2 rotating generations",
         ],
         breaks:
-          "Over-promotion near the cutoff. Relative error at rank 50 is ~6.1% on a minute window and ~7.9% on a day, enough to reshuffle ranks 45 to 55 between refreshes, which reads to a user as a broken product unless hysteresis holds the boundary.",
+          "Over-promotion near the cutoff. Relative error at rank 50 is ~6.1% on a minute window and ~7.9% on a day, enough to reshuffle ranks 45 to 55 between refreshes, which reads to a user as a broken product unless hysteresis holds the boundary. The dedup gate also deletes real events: at 1% false positives roughly 1% of genuine pairs never reach a counter, so everything downstream is an upper bound on a lossy sample rather than on reality.",
         choice: {
           pick: "Count-Min sketch, plain increments, d = 7 and w = 32,768",
           instead: "Space-Saving over a Stream-Summary, or Count-Min with conservative update.",
@@ -172,8 +148,8 @@ export const TRENDING_TOPICS: Diagram = {
       label: "Per-shard top-500 heap",
       sub: "the only place key strings live",
       kind: "database",
-      col: 1,
-      row: 3,
+      col: 2,
+      row: 1,
       parent: "counting-tier",
       detail: {
         what: "A bounded min-heap of (key, current estimate) per shard, capped at 10x K, offered every key the worker processes.",
@@ -194,10 +170,10 @@ export const TRENDING_TOPICS: Diagram = {
     {
       id: "abuse",
       label: "Abuse scorer",
-      sub: "ASN · account age · graph density",
       kind: "service",
-      col: 1,
-      row: 4,
+      sub: "ASN, account age, graph",
+      col: 0,
+      row: 3,
       detail: {
         what: "An async consumer scoring concentration signals per candidate key and emitting soft demotion flags rather than deletions.",
         why: "Anything publicly ranked is a target, and per-(user, key) de-duplication has already priced out the single scripted account. What is left is many accounts acting together, which only concentration signals across network, account age and follow graph can see at all.",
@@ -217,10 +193,10 @@ export const TRENDING_TOPICS: Diagram = {
     {
       id: "merger",
       label: "Merger",
-      sub: "cell-wise sum · re-estimate candidates",
       kind: "service",
-      col: 0,
-      row: 4,
+      sub: "cell-sum, re-estimate",
+      col: 2,
+      row: 2,
       detail: {
         what: "Once a minute it sums the 64 shard tiles cell by cell, pushes the result into the ring, unions the 64 heaps and re-estimates every candidate against the merged window sketch.",
         why: "Linear mergeability is the crux and this is where it is spent: sketch(A) + sketch(B) = sketch(A union B) exactly, cell by cell, with no approximation introduced by the merge itself. Sliding windows, shard-then-merge and cross-region aggregation are all consequences of that single property.",
@@ -244,10 +220,10 @@ export const TRENDING_TOPICS: Diagram = {
     {
       id: "ring",
       label: "Sketch ring",
-      sub: "60 minute tiles + 24 hour tiles per geo",
       kind: "database",
-      col: 1,
-      row: 5,
+      sub: "minute + hour tiles/geo",
+      col: 3,
+      row: 2,
       detail: {
         what: "The per-geo window state: add the newest minute tile to the running window sketch, subtract the tile that fell off the tail.",
         why: "Three named windows come out of one structure because sketches subtract as exactly as they add. You are only ever removing increments you previously added, so no cell can go negative and no expiry pass has to reason about which key contributed what.",
@@ -271,10 +247,10 @@ export const TRENDING_TOPICS: Diagram = {
     {
       id: "scorer",
       label: "Trend scorer",
-      sub: "z vs baseline · floor · prior · damper",
       kind: "service",
-      col: 0,
-      row: 5,
+      sub: "z vs baseline, floor, damper",
+      col: 2,
+      row: 3,
       detail: {
         what: "Joins the surviving top 500 candidates against their baselines and ranks by z = (r_short - mu) / max(sigma, sigma_floor).",
         why: "Trending means rate of change, not volume. Rank by raw count and the same famous terms win every day, because a term that is always enormous is background rather than news, which is the entire difference between this and a leaderboard.",
@@ -300,8 +276,8 @@ export const TRENDING_TOPICS: Diagram = {
       label: "Baseline store",
       sub: "Redis/KV, EWMA rate + variance",
       kind: "database",
-      col: 1,
-      row: 6,
+      col: 3,
+      row: 3,
       detail: {
         what: "Per key, an EWMA of its rate, an EWMA of its variance, and a 1,440-slot minute-of-day profile for the top keys.",
         why: "This is the only thing in the system that converts 'high' into 'unusually high'. Without it the ranking has no notion of normal, and no amount of counting accuracy tells you whether 10,500 a minute is a story or a Tuesday.",
@@ -323,8 +299,8 @@ export const TRENDING_TOPICS: Diagram = {
       label: "Top-K cache",
       sub: "Redis, trending:{geo}:{window}",
       kind: "database",
-      col: 0,
-      row: 6,
+      col: 2,
+      row: 4,
       detail: {
         what: "The materialised answer: 50 entries plus an as_of timestamp per (geo, window), rewritten every 5 seconds.",
         why: "The expensive work has to happen once a minute for everyone rather than once per request. If the trending panel computed anything at all it would immediately be the most expensive query in the product, and it is on the first screen of every session.",
@@ -346,8 +322,8 @@ export const TRENDING_TOPICS: Diagram = {
       label: "Trending API",
       sub: "GET /trending?window=&geo=",
       kind: "service",
-      col: 0,
-      row: 7,
+      col: 3,
+      row: 4,
       detail: {
         what: "The read tier: one GET against the cache key, plus a per-key drill-down that returns count_est alongside its error_bound.",
         why: "The read path deliberately touches no sketch, so sizing it is a cache problem rather than a streaming problem. The geo fallback chain is resolved at write time too, so a sparse metro never returns an empty panel and the API stays a lookup.",
@@ -370,8 +346,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e1",
       from: "ingest",
       to: "stream",
+      tier: "hot",
       label: "normalised key, geo",
-      animated: true,
       detail: {
         what: "Normalised events appended to the log as {key, user_id, ts, geo}, keyed for partitioning on the normalised string.",
         why: "Normalisation has to precede the append because the partition assignment is computed from the key here. Get the order wrong and one logical term is split across shards before anything has a chance to count it.",
@@ -384,8 +360,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e2",
       from: "stream",
       to: "sketch-worker",
+      tier: "hot",
       label: "partition by hash(key)",
-      animated: true,
       detail: {
         what: "The hot path: each worker consuming the partitions it owns, ~15.6k events/s per shard.",
         why: "One key on one shard is what makes a local estimate complete, which is what makes a heap nomination mean anything. The counts would merge correctly under any partitioning; the nominations would not.",
@@ -398,10 +374,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e3",
       from: "stream",
       to: "archive",
+      tier: "control",
       label: "raw events, replay + audit",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A parallel consumer landing every raw event as Parquet, partitioned by day and hour.",
         why: "It is the only durable record beyond the 24h retention, and the 24h window is exactly the longest one served, so there is no margin. Replaying a lost minute into a catch-up worker also happens from here.",
@@ -414,10 +388,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e4",
       from: "stream",
       to: "abuse",
+      tier: "control",
       label: "user, ASN, graph signals",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 100,
       detail: {
         what: "An independent consumer reading the same events for concentration signals: network origin, account age, follow-graph density.",
@@ -428,27 +400,11 @@ export const TRENDING_TOPICS: Diagram = {
       },
     },
     {
-      id: "e5",
-      from: "sketch-worker",
-      to: "dedupe",
-      label: "(user, key) test_and_set",
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "The first thing that happens to an event: a test-and-set of the (user_id, key) tuple against the current 5-minute generation.",
-        why: "It sits ahead of the counters so a repeat never reaches them, which is what makes published volume mean distinct participants rather than distinct events.",
-        numbers: ["300M tuples per generation", "1% FPR, ~11MB per shard"],
-        breaks:
-          "This edge deletes traffic. Roughly 1% of genuine pairs are rejected as duplicates, so everything downstream is an upper bound on a lossy sample rather than on reality, and the two errors do not compose into a bound.",
-      },
-    },
-    {
       id: "e6",
       from: "sketch-worker",
       to: "heap",
+      tier: "hot",
       label: "offer(key, est)",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "After incrementing, the worker probes the same 7 cells, takes the minimum, and offers (key, estimate) to its bounded heap.",
         why: "This is the only place a key string is retained anywhere in the counting tier. The estimate offered alongside it is already the sketch's answer, so the heap is ordering by the same quantity the merger will later re-derive.",
@@ -461,8 +417,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e7",
       from: "sketch-worker",
       to: "merger",
+      tier: "hot",
       label: "sealed 917KB tile, 60s",
-      animated: true,
       detail: {
         what: "At the minute boundary the worker seals its grid, ships ~917KB, and starts a fresh one.",
         why: "Shipping counters rather than events is the compression that makes the whole topology affordable: 64 shards produce 59MB a minute instead of the tens of gigabytes of raw traffic behind it. The same trick carries a region's counts cross-region at ~8GB/day against ~2.1TB/day.",
@@ -475,9 +431,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e8",
       from: "heap",
       to: "merger",
+      tier: "data",
       label: "500 key strings/shard",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Each shard's 500 candidate strings shipped alongside its sealed tile and unioned into ~32,000 candidates.",
         why: "The merger needs strings it cannot get from the grid. This arrow carries only candidates, never rankings, because the ordering they arrive with is per-shard and about to be thrown away.",
@@ -490,9 +445,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e9",
       from: "merger",
       to: "ring",
+      tier: "data",
       label: "push tile, subtract tail",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The merged minute tile added into the running window sketch cell by cell, and the tile from 60 minutes ago subtracted out.",
         why: "This is what a sliding window costs when the structure is linear: two passes over 229,376 cells, no per-key bookkeeping, no decision about which key expired. It works only because addition is exact and subtraction removes increments you previously added.",
@@ -505,8 +459,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e10",
       from: "merger",
       to: "scorer",
+      tier: "hot",
       label: "~32k re-estimated",
-      animated: true,
       detail: {
         what: "Every candidate re-estimated against the merged window sketch, sorted, truncated to the top 500, and handed on for scoring.",
         why: "Re-estimation is the step that makes a lossy candidate set safe. The candidates may be missing keys no shard nominated, but the counts used to order them are now global rather than per-shard.",
@@ -519,10 +473,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e11",
       from: "abuse",
       to: "scorer",
+      tier: "control",
       label: "soft demote flags",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Suppression flags applied as a score multiplier at ranking time rather than as a filter at ingest.",
         why: "Demoting at the last possible moment keeps the counting tier free of policy, keeps every decision reversible, and means a wrongly suppressed key is still sitting in the candidate set when a human overrides it.",
@@ -535,9 +487,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e12",
       from: "scorer",
       to: "baselines",
+      tier: "data",
       label: "top 500 baseline join",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "500 pipelined KV gets pulling each surviving candidate's EWMA rate, variance and minute-of-day profile.",
         why: "The join happens after truncation on purpose. Scoring all ~32k candidates would be ~100k gets/s fleet-wide for keys that were never going to make the cut.",
@@ -550,8 +501,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e13",
       from: "scorer",
       to: "cache",
+      tier: "hot",
       label: "top 50 + as_of, every 5s",
-      animated: true,
       detail: {
         what: "The finished list written as a small JSON blob per (geo, window), with the geo fallback chain resolved so every key is populated.",
         why: "This is the boundary between the streaming system and the product. Everything upstream is per-minute batch work; everything downstream is a key-value lookup, and the two are sized completely independently.",
@@ -564,8 +515,8 @@ export const TRENDING_TOPICS: Diagram = {
       id: "e14",
       from: "cache",
       to: "api",
+      tier: "hot",
       label: "single GET, ~2ms p99",
-      animated: true,
       detail: {
         what: "The entire read path: one key-value lookup returning a precomputed list plus its as_of timestamp.",
         why: "The panel is on the first screen of every session, so the read has to be the cheapest thing in the system. Anything computed per request would make trending the most expensive query in the product by an order of magnitude.",

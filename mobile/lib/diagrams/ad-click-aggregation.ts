@@ -43,14 +43,20 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       label: "Flink aggregator",
       sub: "one job: dedup, window, sink",
       kind: "serviceGroup",
-      col: 1,
+      col: 0,
       row: 3,
       detail: {
-        what: "One Flink job. The three stages inside it are chained operators in a single dataflow sharing one keyed state backend and one checkpoint barrier, not three services with topics between them.",
-        why: "keyBy(ad_id) once, then dedup, window and sink all run on the same key on the same task, so the dedup lookup is a local state read and the window aggregate never leaves the node. The chaining is also what makes the exactly-once story work: operator state and Kafka offsets sit under one barrier and are therefore checkpointed together.",
-        numbers: ["parallelism 10, sized on the dedup budget", "115k events/s average, 500k peak", "one checkpoint barrier across all three stages"],
+        what: "One Flink job. The three stages inside it are chained operators in a single dataflow sharing one keyed state backend and one checkpoint barrier, not three services with topics between them. State — window aggregates, HLL sketches and the dedup operator's TTL'd click_id sets — lives in RocksDB on the task's own local NVMe, not shared or replicated; incremental deltas of that state plus the Kafka offsets that produced them are written atomically to an S3 checkpoint store with a cross-region replica.",
+        why: "keyBy(ad_id) once, then dedup, window and sink all run on the same key on the same task, so the dedup lookup is a local state read and the window aggregate never leaves the node. The chaining is also what makes the exactly-once story work: operator state and Kafka offsets sit under one barrier and are therefore checkpointed together. Local RocksDB state is deliberately losable — the log plus the last checkpoint rebuild it — and the state-and-offsets atomicity in the checkpoint is what lets the sink get away with no transaction at all.",
+        numbers: [
+          "parallelism 10, sized on the dedup budget",
+          "115k events/s average, 500k peak",
+          "one checkpoint barrier across all three stages",
+          "RocksDB: 7.2GB dedup entries fleet-wide, <1GB per task",
+          "checkpoints: incremental deltas only; two consecutive failures pages",
+        ],
         breaks:
-          "Because it is one deployment, a hot ad that saturates the window operator backpressures dedup and the source read of that partition too. You cannot scale one stage without the others, and the global watermark is the minimum across partitions, so one lagging task freezes window emission for every other ad.",
+          "Because it is one deployment, a hot ad that saturates the window operator backpressures dedup and the source read of that partition too. You cannot scale one stage without the others, and the global watermark is the minimum across partitions, so one lagging task freezes window emission for every other ad. Losing a task's local RocksDB loses it; recovery replays from the last checkpoint, and repeated checkpoint failures on a hot task mean each restart replays from further back, so the symptom is dashboard lag rather than an obvious storage error.",
         choice: {
           pick: "One chained Flink job, all three operators in the same task slot",
           instead: "A service per stage with a topic between each, so each scales and deploys on its own.",
@@ -66,9 +72,9 @@ export const AD_CLICK_AGGREGATION: Diagram = {
     {
       id: "client",
       label: "Ad clicks",
-      sub: "browser / mobile SDK, stamps click_id",
+      sub: "browser / mobile SDK",
       kind: "client",
-      col: 1,
+      col: 0,
       row: 0,
       detail: {
         what: "The browser or mobile SDK that fires the click and generates the click_id it reuses verbatim on every retry.",
@@ -91,7 +97,7 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       label: "Click API",
       sub: "stateless, layer-1 blocks inline",
       kind: "service",
-      col: 1,
+      col: 0,
       row: 1,
       detail: {
         what: "The stateless ingest tier: validate the event, apply the deterministic fraud blocklists, append to the log, return 204.",
@@ -112,9 +118,9 @@ export const AD_CLICK_AGGREGATION: Diagram = {
     {
       id: "kafka",
       label: "Kafka topic",
-      sub: "partitioned by ad_id, 7d retention",
+      sub: "partitioned by ad_id, 7d",
       kind: "queue",
-      col: 1,
+      col: 0,
       row: 2,
       detail: {
         what: "The durable, ordered, replayable log every click lands in before anything computes on it. It is the source of truth; every aggregate is derived and disposable.",
@@ -139,7 +145,7 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       label: "Dedup by click_id",
       sub: "keyed state, 10-minute TTL",
       kind: "process",
-      col: 1,
+      col: 0,
       row: 3,
       parent: "stream-group",
       detail: {
@@ -161,10 +167,10 @@ export const AD_CLICK_AGGREGATION: Diagram = {
     {
       id: "window",
       label: "1-min tumbling window",
-      sub: "event time, 5-min allowed lateness",
+      sub: "event time, 5-min lateness",
       kind: "process",
-      col: 1,
-      row: 5,
+      col: 0,
+      row: 3,
       parent: "stream-group",
       detail: {
         what: "Buckets each surviving event into a one-minute event-time window per ad and emits count plus an HLL sketch when the watermark passes the window end, re-emitting if a late event reopens it.",
@@ -187,8 +193,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       label: "Absolute-upsert sink",
       sub: "writes run_id 0, no transaction",
       kind: "process",
-      col: 1,
-      row: 6,
+      col: 0,
+      row: 3,
       parent: "stream-group",
       detail: {
         what: "Writes each closed window as an absolute value under (ad_id, ts_minute, run_id 0), including the re-emission when a late event reopens a window.",
@@ -208,67 +214,26 @@ export const AD_CLICK_AGGREGATION: Diagram = {
     },
 
     // --- stream-side state --------------------------------------------------
-    {
-      id: "rocksdb",
-      label: "RocksDB state backend",
-      sub: "local NVMe, task-owned",
-      kind: "cache",
-      col: 0,
-      row: 3,
-      detail: {
-        what: "Window aggregates, per-key dedup sets and HLL sketches on the task's own local NVMe. Not shared, not replicated, and not a system of record.",
-        why: "State across millions of keys plus 10 minutes of click_ids does not fit on heap, and an external store would add a network round trip at 500k events/s for a check that is already node-local. It is deliberately losable: the log plus the last checkpoint rebuild it, which is exactly why the source of truth is the log and not this.",
-        numbers: ["300M ids at 24B = 7.2GB fleet-wide", "under 1GB per task at parallelism 10", "HLL ~2KB per key"],
-        breaks:
-          "Losing the node loses it, and the recovery cost is the distance back to the last good checkpoint. The operational symptom is dashboard lag while the task replays, not an obvious storage error, so it is usually diagnosed from the wrong end.",
-        choice: {
-          pick: "RocksDB on local NVMe",
-          instead: "Heap state, or an external store such as Redis holding the dedup set.",
-          decider:
-            "State size against per-event cost. 500k/s x 600s = 300M click_ids at 24B is 7.2GB across the fleet before window state and sketches, well past comfortable heap; an external set would add a round trip per event for a lookup the ad_id partitioning already made local.",
-          flips:
-            "Small key spaces that fit in heap, where RocksDB's serialisation cost on every state access is pure overhead.",
-        },
-      },
-    },
-    {
-      id: "checkpoints",
-      label: "Checkpoint store",
-      sub: "S3, state + offsets atomic",
-      kind: "blob",
-      col: 0,
-      row: 5,
-      detail: {
-        what: "Incremental snapshots of operator state written atomically together with the Kafka offsets that produced it, to object storage, with a cross-region replica.",
-        why: "State and offsets must be written together or recovery is inconsistent: offsets ahead of state loses events, state ahead of offsets replays them. That atomicity is what lets the sink get away with no transaction, so this is a load-bearing part of the exactly-once claim rather than a backup.",
-        numbers: ["incremental deltas only, not full snapshots", "two consecutive failures pages", "manual savepoint before any risky deploy"],
-        breaks:
-          "Repeated failures on a hot task mean each restart replays from further back, so the symptom is a growing catch-up burst rather than an error. It is also the only clean rollback point: without a savepoint, backing out a bad deploy means replaying from whatever checkpoint happened to land.",
-        choice: {
-          pick: "Incremental checkpoints to object storage, replicated cross-region",
-          instead: "Full snapshots, or checkpoints kept on local disk beside the state.",
-          decider:
-            "Snapshot size against checkpoint interval. Full snapshots of multi-gigabyte per-task state cannot complete often enough to keep restart replay short, and local checkpoints die with the node that held the state they were protecting. Deltas keep the interval short, which is what bounds how far a restart replays.",
-          flips:
-            "Small state where a full snapshot is fast enough and incremental checkpointing's compaction and file-count overhead is not worth managing.",
-        },
-      },
-    },
 
     // --- fraud branch -------------------------------------------------------
     {
       id: "fraud",
       label: "Fraud scoring consumer",
-      sub: "async layers 2-4, flags not blocks",
+      sub: "async layers 2-4, flags",
       kind: "service",
-      col: 2,
-      row: 1,
+      col: 1,
+      row: 2,
       detail: {
-        what: "A parallel consumer group off the same topic running per-IP and per-device velocity limits, behavioural signals and a model score, then writing a verdict keyed by click_id. Layer one, the deterministic blocklists, is not here — it runs inline in the Click API.",
-        why: "Fraud is flagged, not blocked, because the error costs are asymmetric: a false positive denies an advertiser a genuine customer they never learn about, while a false negative costs one click the recompute refunds. Blocking makes the expensive error the silent one. Reading the log again rather than chaining onto the aggregator also means a model rollback or a scoring backlog cannot stall window emission.",
-        numbers: ["verdict within 1 to 5s of the click", ">10 clicks/min from one IP on one ad", "flagged but unrefunded is 1-3% of gross"],
+        what: "A parallel consumer group off the same topic running per-IP and per-device velocity limits, behavioural signals and a model score, then writing a verdict keyed by click_id into the durable fraud_flags store: (click_id, layer, score, verdict_ts), one row per flagged click. Layer one, the deterministic blocklists, is not here — it runs inline in the Click API.",
+        why: "Fraud is flagged, not blocked, because the error costs are asymmetric: a false positive denies an advertiser a genuine customer they never learn about, while a false negative costs one click the recompute refunds. Blocking makes the expensive error the silent one. Reading the log again rather than chaining onto the aggregator also means a model rollback or a scoring backlog cannot stall window emission. The verdict is persisted rather than kept transient because the recompute joins it a day later and a dispute can arrive a month after that — held only in the scoring consumer, it would be gone by the time either needed it.",
+        numbers: [
+          "verdict within 1 to 5s of the click",
+          ">10 clicks/min from one IP on one ad",
+          "flagged but unrefunded is 1-3% of gross",
+          "verdict store retained across the 31-day dispute window",
+        ],
         breaks:
-          "Reported revenue is systematically overstated by the flagged-but-not-yet-refunded amount, so finance carries a reserve against it and the gross number on the dashboard is never the number that gets collected.",
+          "Reported revenue is systematically overstated by the flagged-but-not-yet-refunded amount, so finance carries a reserve against it and the gross number on the dashboard is never the number that gets collected. fraud_flag_rate has to be monitored per layer per advertiser rather than in aggregate, because a model that drifts moves the deduction with no code change and in the network total looks exactly like a fraud wave.",
         choice: {
           pick: "Async scoring off the same topic, verdict applied in the recompute",
           instead: "Blocking suspicious clicks at ingest so they never enter the aggregate.",
@@ -279,38 +244,15 @@ export const AD_CLICK_AGGREGATION: Diagram = {
         },
       },
     },
-    {
-      id: "fraud-flags",
-      label: "fraud_flags store",
-      sub: "(click_id, layer, score, verdict_ts)",
-      kind: "database",
-      col: 3,
-      row: 1,
-      detail: {
-        what: "The durable verdict record: one row per flagged click carrying which layer fired, the reason, the score and when the verdict settled.",
-        why: "The recompute joins verdicts that settled days after the click, so a verdict has to outlive both the window it belonged to and the scoring run that produced it. Held only in the scoring consumer, it is gone by the time the invoice is computed, and this is the second of the two things a replay of the raw log cannot express.",
-        numbers: ["1-3% of gross flagged and later refunded", "verdict lands 1 to 5s after the click, joined at T+1", "retained across the 31-day dispute window"],
-        breaks:
-          "fraud_flag_rate has to be monitored per layer per advertiser rather than in aggregate: a model that drifts moves the deduction with no code change, and in the network total that looks exactly like a fraud wave.",
-        choice: {
-          pick: "Persist the verdict keyed by click_id",
-          instead: "Re-score the day's clicks inside the recompute and keep no verdict store.",
-          decider:
-            "Reproducibility of an invoice. A re-score at T+1 runs today's model over yesterday's clicks, so the same day recomputed twice can produce two different fraud deductions and no dispute is answerable. Storing the verdict makes the deduction a dated fact rather than a function of whatever model is deployed when you ask.",
-          flips:
-            "Purely deterministic rules with no model, where the verdict is a pure function of the event and re-deriving it costs less than storing 1-3% of 10B events a day.",
-        },
-      },
-    },
 
     // --- correction path ----------------------------------------------------
     {
       id: "archive",
       label: "S3 Parquet archive",
-      sub: "immutable, partitioned by dt/hour",
+      sub: "immutable, by dt/hour",
       kind: "blob",
-      col: 2,
-      row: 2,
+      col: 1,
+      row: 1,
       parent: "corr-zone",
       detail: {
         what: "Every raw event written once as compressed columnar files partitioned by date and hour, immutable and retained for years.",
@@ -333,8 +275,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       label: "late-clicks side topic",
       sub: "beyond 5-min allowed lateness",
       kind: "queue",
-      col: 2,
-      row: 4,
+      col: 1,
+      row: 3,
       parent: "corr-zone",
       detail: {
         what: "The side output carrying events that arrive after their window's allowed lateness has expired, consumed by the recompute rather than dropped by the stream.",
@@ -357,8 +299,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       label: "Nightly recompute",
       sub: "Spark, exact dedup, run_id 2",
       kind: "service",
-      col: 3,
-      row: 6,
+      col: 2,
+      row: 2,
       parent: "corr-zone",
       detail: {
         what: "A Spark job over three inputs — the day's archive, the previous day's tail and the late topic — that deduplicates the whole day exactly, joins settled fraud verdicts, and emits an absolute value for every key it touches. Hourly passes write run_id 1 for freshness; the full-day pass after midnight writes run_id 2, which is the run billing reads.",
@@ -379,10 +321,10 @@ export const AD_CLICK_AGGREGATION: Diagram = {
     {
       id: "billing",
       label: "Billing system",
-      sub: "T+1 invoicing, reads run_id 2 only",
+      sub: "T+1 invoicing, run_id 2 only",
       kind: "service",
-      col: 3,
-      row: 7,
+      col: 2,
+      row: 3,
       parent: "corr-zone",
       detail: {
         what: "The invoicing system, which reads recomputed rows only and never the streaming ones, and which owns the billing_period state the recompute checks before writing.",
@@ -408,7 +350,7 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       sub: "PK (ad_id, ts_minute, run_id)",
       kind: "database",
       col: 0,
-      row: 7,
+      row: 4,
       detail: {
         what: "The served columnar store where both branches meet: one row per (ad_id, ts_minute) per run, holding count, HLL sketch, fraud_count, run_id and computed_at, with the read path taking the highest run_id per key.",
         why: "Taking max(run_id) makes the correction invisible to the reader — the same query returns the streaming number today and the recomputed one tomorrow with no client change. The streaming row is never deleted, because the difference between run 0 and run 2 is the drift metric and overwriting in place destroys the evidence.",
@@ -428,10 +370,10 @@ export const AD_CLICK_AGGREGATION: Diagram = {
     {
       id: "dashboards",
       label: "Advertiser dashboards",
-      sub: "under 1 min freshness, published bands",
+      sub: "under 1 min, published bands",
       kind: "client",
-      col: 0,
-      row: 8,
+      col: 1,
+      row: 4,
       detail: {
         what: "Roughly 1M advertisers reading their own ads out of agg_minute in a browser, plus top-N served from the daily rollup.",
         why: "Dashboards read the stream and not the recompute, because a number that is 3% low for one minute and within 0.5% an hour later is worth far more to someone optimising a campaign than a number that is exact 26 hours after the fact.",
@@ -453,8 +395,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       label: "Drift monitor",
       sub: "run 0 vs run 2, per ad decile",
       kind: "service",
-      col: 0,
-      row: 9,
+      col: 2,
+      row: 4,
       detail: {
         what: "A job that diffs the streaming run against the recomputed run key by key and publishes the distribution of the difference rather than its total.",
         why: "Two implementations of one piece of arithmetic will drift, and this architecture detects drift rather than preventing it. Publishing the difference is what turns an advertiser saying 'your number is 0.3% low' from an escalation into a band somebody already agreed to.",
@@ -477,6 +419,7 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e1",
       from: "client",
       to: "click-api",
+      tier: "hot",
       label: "click_id stamped by client",
       detail: {
         what: "The click event itself: click_id, ad_id, user_id, event_ts, ip and user agent, retried with the same click_id on failure.",
@@ -490,8 +433,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e2",
       from: "click-api",
       to: "kafka",
+      tier: "hot",
       label: "append, key = ad_id",
-      animated: true,
       detail: {
         what: "The validated click appended to the partition that owns its ad_id, acknowledged before the API returns 204.",
         why: "Nothing computes on a click until it is durable. Writing to the log first is what makes every downstream number recomputable, and it decouples ingest availability from the availability of any aggregation engine.",
@@ -504,8 +447,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e3",
       from: "kafka",
       to: "dedup",
+      tier: "hot",
       label: "keyBy ad_id, no shuffle",
-      animated: true,
       detail: {
         what: "The hot path: every event streaming into the job's first operator, already partitioned by the key it will be grouped on.",
         why: "Because the log is keyed by ad_id, the consumer's grouping is free. No shuffle, no repartition, and both copies of a retried click reach the same task, which is what allows dedup to be a local state lookup rather than a distributed one.",
@@ -518,9 +461,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e4",
       from: "kafka",
       to: "fraud",
+      tier: "data",
       label: "parallel consumer group",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A second consumer group reading the same events for velocity, behavioural and model-based fraud scoring.",
         why: "Fraud detection is off the critical path deliberately. Reading the log again rather than chaining onto the aggregator means a model rollback or a scoring backlog cannot stall window emission or click ingestion.",
@@ -533,30 +475,14 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e5",
       from: "kafka",
       to: "archive",
+      tier: "data",
       label: "raw events, Parquet",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A sink writing the raw events, unaggregated, to compressed columnar files partitioned by date and hour.",
         why: "This is the branch that makes the correction path possible at all. The archive has to outlive the log, because the dispute window is a billing month and the log is sized at 7 days for replay and recovery, not for restatement.",
         numbers: ["1TB/day after ~5x compression", "7-day log against 7-year archive"],
         breaks:
           "If this sink silently falls behind or skips a partition, the gap is invisible until a recompute months later produces a total that is quietly low.",
-      },
-    },
-    {
-      id: "e6",
-      from: "fraud",
-      to: "fraud-flags",
-      label: "verdict keyed by click_id",
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "One row per flagged click: which layer fired, the reason, the score and the settle time.",
-        why: "The verdict has to become a dated fact rather than a transient signal, because the thing that consumes it runs a day later and a dispute about it can arrive a month later.",
-        numbers: ["1-3% of gross flagged", "written 1 to 5s after the click"],
-        breaks:
-          "A backlog here delays verdicts past the nightly join, so those clicks stay billable for another day and the correction lands in the following period's adjustment rather than the invoice.",
       },
     },
     {
@@ -588,43 +514,11 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       },
     },
     {
-      id: "e9",
-      from: "window",
-      to: "rocksdb",
-      label: "window + dedup state",
-      dashed: true,
-      fromSide: "left",
-      toSide: "right",
-      detail: {
-        what: "Open window aggregates, HLL sketches and the dedup operator's TTL'd click_id sets, all held in the one keyed state backend the chained operators share.",
-        why: "Sharing one backend is what makes dedup and windowing a single recoverable unit. Two state stores would mean two recovery points, and a restart could restore a window whose dedup set had already forgotten the ids that fed it.",
-        numbers: ["<1GB per task at parallelism 10", "7.2GB of dedup entries fleet-wide"],
-        breaks:
-          "Uncontrolled growth is the failure here, not corruption: without the 10-minute TTL on dedup entries the set grows without bound and the task OOMs long before the window state does.",
-      },
-    },
-    {
-      id: "e10",
-      from: "rocksdb",
-      to: "checkpoints",
-      label: "incremental, with offsets",
-      dashed: true,
-      detail: {
-        what: "Changed RocksDB files plus the Kafka offsets that produced them, written as one atomic checkpoint to object storage.",
-        why: "State and offsets must land together or recovery is inconsistent: offsets ahead of state loses events, state ahead of offsets replays them. Atomicity here is exactly what makes the absolute-write sink sufficient for exactly-once.",
-        numbers: ["deltas only, not full snapshots", "two consecutive failures pages"],
-        breaks:
-          "Checkpoints failing repeatedly means each restart replays from further back, so the operational symptom is a growing catch-up burst rather than an obvious storage error.",
-      },
-    },
-    {
       id: "e11",
       from: "window",
       to: "late-topic",
+      tier: "control",
       label: "past 5-min lateness",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Events whose event time falls outside their window's allowed lateness, routed to a side output instead of being discarded.",
         why: "Dropping them is theft in one direction, and holding every window open long enough to catch a 22-minute mobile tail is unaffordable state. The side output is what lets the stream stay bounded while the tail is still counted somewhere.",
@@ -637,10 +531,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e12",
       from: "sink",
       to: "clickhouse",
+      tier: "hot",
       label: "absolute upsert, run_id 0",
-      animated: true,
-      fromSide: "left",
-      toSide: "top",
       detail: {
         what: "Each closed window written as an absolute value under (ad_id, ts_minute, run_id 0), including re-emissions when a late event reopens the window.",
         why: "Writing the total rather than a delta is the difference between exactly-once and nearly-once. A replay after a checkpoint restore writes the same value twice and changes nothing, so the sink needs no transaction and a re-emitted correction needs no retraction protocol.",
@@ -653,8 +545,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e13",
       from: "clickhouse",
       to: "dashboards",
+      tier: "hot",
       label: "agg_minute reads",
-      animated: true,
       detail: {
         what: "Advertiser dashboard queries against the highest run_id per key, plus top-N served from the daily rollup.",
         why: "The read path taking max(run_id) is what makes the correction invisible to the reader: the same query returns the streaming number today and the recomputed one tomorrow with no client change.",
@@ -667,10 +559,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e14",
       from: "clickhouse",
       to: "drift",
+      tier: "control",
       label: "run 0 vs run 2",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 60,
       detail: {
         what: "A key-by-key diff of the streaming rows against the recomputed rows for the same day, read out of the same table.",
@@ -684,9 +574,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e15",
       from: "archive",
       to: "spark",
+      tier: "data",
       label: "whole day, exact dedup",
-      fromSide: "right",
-      toSide: "top",
       detail: {
         what: "The full day of raw Parquet re-read from scratch so the aggregation is recomputed rather than adjusted.",
         why: "Recomputing from raw is what makes a three-week-old aggregation bug fixable: the corrected logic runs over the same immutable input and produces a new run, so nothing has to be patched or reversed in place.",
@@ -699,9 +588,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e16",
       from: "late-topic",
       to: "spark",
+      tier: "data",
       label: "late tail",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The very-late events consumed as one of the recompute's three inputs, alongside the day's archive and the previous day's tail.",
         why: "This is where the events the stream could not place finally get counted into the right minute, which is the reason the side output exists rather than a dead-letter queue nobody reads.",
@@ -712,12 +600,10 @@ export const AD_CLICK_AGGREGATION: Diagram = {
     },
     {
       id: "e17",
-      from: "fraud-flags",
       to: "spark",
+      tier: "data",
+      from: "fraud",
       label: "settled verdicts",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 80,
       detail: {
         what: "Fraud verdicts joined into the recompute by click_id so flagged clicks are removed from billable totals.",
@@ -731,9 +617,8 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e18",
       from: "spark",
       to: "clickhouse",
+      tier: "hot",
       label: "overwrite, run_id 2",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Absolute values written under a higher run_id for every key the recompute touched, leaving the streaming rows in place.",
         why: "Writing a new run rather than mutating the old one keeps the read path simple (take max run_id), makes the recompute itself replayable, and preserves the difference that the drift monitor and any dispute both depend on.",
@@ -746,6 +631,7 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       id: "e19",
       from: "spark",
       to: "billing",
+      tier: "hot",
       label: "billable totals, T+1",
       detail: {
         what: "The recomputed, deduplicated, fraud-adjusted totals handed to invoicing, which reads nothing else.",
