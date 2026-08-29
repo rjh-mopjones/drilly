@@ -33,14 +33,14 @@ export const YOUTUBE: Diagram = {
       {
         text: "The asymmetry that falls out of escalation is that segments are immutable and manifests are not. Segment URLs are keyed by source hash, rung, encoder build and index and carry a year with immutable; manifests are rewritten when a rung lands and carry max-age=60, which bounds how long an edge keeps telling viewers the video tops out at 720p.",
         lights: ["cdn", "e21"],
-      },
+      }
     ],
     crux:
       "You have to commit the expensive work before the information that would justify it exists. Half of uploads never reach 100 views and the top 1% take 80% of watch time, but you learn which is which hours after the encode decision was made, so escalation is reactive by construction and the fastest-rising videos are served at the floor rung during exactly the hour their audience is largest.",
     numbers: [
       "500 hours uploaded per minute, 8.3 source-hours per second",
       "~1,200 GPUs and 1.15PB/day against ~3,600 and 2.9PB for the full ladder",
-      "~83 Tbps average egress, ~800 bytes served per byte produced",
+      "~83 Tbps average egress, ~800 bytes served per byte produced"
     ],
   },
   nodes: [
@@ -58,7 +58,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "~2.5GB for a 20-minute upload",
           "~25k concurrent uploads at peak",
-          "mean in-flight duration ~5 min",
+          "mean in-flight duration ~5 min"
         ],
         breaks:
           "If resumable state is lost mid-file the client restarts from zero, which shows up as an offset-mismatch rate and a pile of abandoned multipart sessions billed until a lifecycle rule aborts them.",
@@ -77,7 +77,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "source: ~720TB/day, retained permanently",
           "encoded: 1.15PB/day, ~2.6PB/day with erasure coding, ~950PB/year",
-          "archive tiers 10x to 20x below standard",
+          "archive tiers 10x to 20x below standard"
         ],
         breaks:
           "Cross-region source replication is the dominant DR cost line at 720TB/day, and it is the one thing that cannot be regenerated if you get it wrong. On the encoded side, below a low access threshold the right move is deletion rather than demotion, so a reawakened long-tail video needs a re-encode taking minutes; keeping the 360p rung of everything warm forever removes that from the user-visible path.",
@@ -130,7 +130,7 @@ export const YOUTUBE: Diagram = {
           "under 60s upload-to-playable at p50",
           "3.6M workflows started per day",
           "escalation threshold tuned so ~5% of uploads cross it, stops paying above ~30%",
-          "escalation is one-way, ~1B watch-hours/day feed the view counter",
+          "escalation is one-way, ~1B watch-hours/day feed the view counter"
         ],
         breaks:
           "Publishing a manifest before every segment of a rung exists hands players a mid-playback 404, and most players stall rather than stepping down a rung, so segment count and summed duration are verified unconditionally before promotion. Counter drift moves the escalation rate off its 5% target in either direction, silently changing fleet cost until the bill arrives, which is why escalation rate and GPU-hours per upload are alarmed rather than reviewed.",
@@ -154,7 +154,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "240 jobs for a 12-minute floor pass",
           "under 60s upload-to-playable at p50",
-          "escalation can re-enter the same graph 1 or more weeks later",
+          "escalation can re-enter the same graph 1 or more weeks later"
         ],
         breaks:
           "The box is long-running, so worker loss mid-graph is normal rather than exceptional and every node in it has to be safe to re-run. Job output paths are pure functions of input plus encoder build, which is what makes a retry overwrite itself byte for byte.",
@@ -174,7 +174,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "120 segments for a 12-minute video",
           "keyframe timestamps identical across all 2 floor rungs",
-          "one pass over the source, CPU-bound",
+          "one pass over the source, CPU-bound"
         ],
         breaks:
           "Both of its failures are quiet. Cut on the wrong frame and segments do not concatenate cleanly, so the player shows a flash of macroblocks at every boundary. Cut 360p and 720p on different presentation timestamps and a player cannot switch rung mid-stream without a visible stall.",
@@ -202,7 +202,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "~900M segment jobs/day at the floor",
           "peak upload rate ~2x the daily mean",
-          "queue drains in minutes, SLO is under 60 seconds",
+          "queue drains in minutes, SLO is under 60 seconds"
         ],
         breaks:
           "Queue depth and oldest-job age are the creator-visible SLO in disguise. If the two lanes share priority, an escalation burst on yesterday's viral videos delays today's uploads becoming playable at all.",
@@ -230,7 +230,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "~15x realtime for one 1080p rung",
           "7.3 GPU-min/source-hour full ladder vs 2.2 at the floor",
-          "at most 0.4 GPU-seconds per 720p segment",
+          "at most 0.4 GPU-seconds per 720p segment"
         ],
         breaks:
           "Below a few minutes of source the job is bound by object-store round trips rather than GPU — 240 ranged reads and 240 writes — so adding workers makes it slower; under ~60s of source the video is encoded whole on one worker.",
@@ -258,7 +258,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "a 6s 720p segment is ~1.9MB",
           "manifests ~5KB",
-          "~900M new objects/day at the floor",
+          "~900M new objects/day at the floor"
         ],
         breaks:
           "It writes the mutable half of the system. A manifest rewritten before its segments are durable surfaces as a mid-playback 404, and players stall rather than stepping down a rung, so segments go down first and the manifest is promoted atomically last.",
@@ -287,7 +287,7 @@ export const YOUTUBE: Diagram = {
           "verdict within a few seconds, both of 2 branches must be green",
           "~0.7 GPU-seconds/video, ~30 GPUs platform-wide",
           "3.6M videos/day",
-          "rights catalogue queried once per upload, nearest-neighbour not equality",
+          "rights catalogue queried once per upload, nearest-neighbour not equality"
         ],
         breaks:
           "It owns the exposure window, and that window can never be driven to zero at 3.6M uploads a day. The honest metric is exposure-hours before takedown rather than an incident count, and the target is a number somebody has to sign off on. Coverage gaps in the rights catalogue are invisible the same way: nothing signals that a piece of content was simply never registered.",
@@ -338,7 +338,7 @@ export const YOUTUBE: Diagram = {
         why: "It shares a decode with the classifier pass because decoding is the expensive part and both stages want the same frames. Rights matching has to survive re-encoding, so an exact hash is useless here: the lookup is a nearest-neighbour search over perceptual descriptors.",
         numbers: [
           "shares 1 decode with the classifier pass",
-          "returns a match id or nothing, in under 5 seconds",
+          "returns a match id or nothing, in under 5 seconds"
         ],
         breaks:
           "It loses an arms race. Robust fingerprints handle re-encoding, cropping, mirroring, time-shifting and pitch-shifting individually and lose to combinations, so low-reach infringement is largely uncaught and the reachable position is to make evasion expensive rather than impossible.",
@@ -366,7 +366,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "3.6M videos/day",
           "1% false positives is ~36k creators/day delayed",
-          "human review at 5 min/video would need ~37,500 reviewers",
+          "human review at 5 min/video would need ~37,500 reviewers"
         ],
         breaks:
           "Everything slower than seconds runs after the video is live, so the residual risk is real and is spent deliberately: the human queue is ordered by predicted reach rather than by arrival, and tombstoning is available at any point afterwards.",
@@ -394,7 +394,7 @@ export const YOUTUBE: Diagram = {
           "~83 Tbps average, ~250 Tbps peak",
           "segments max-age=31536000 immutable",
           "manifests max-age=60",
-          "shield holds origin to ~4 Tbps at 95% offload, ~45PB/day",
+          "shield holds origin to ~4 Tbps at 95% offload, ~45PB/day"
         ],
         breaks:
           "Long segment TTLs are load-bearing for the cost model and directly oppose immediate takedown: a cached segment URL stays fetchable across tens of thousands of edges and third-party ISP-embedded appliances for minutes at best after the manifest has already stopped serving. The shield also concentrates the miss path, so its own outage does not degrade gracefully: every edge falls through to origin at once exactly when demand spikes.",
@@ -421,9 +421,8 @@ export const YOUTUBE: Diagram = {
         why: "Uploaded, published and escalated are independent events, and conflating them into one status is the classic mistake here: it tells creators a video is ready when it is not, and gives the manifest generator a partial-rung case it cannot represent. Gating playback at that read hop rather than at the CDN is what makes a takedown effective within seconds even though the segments behind it stay cached and fetchable; it is sized against page views rather than segment requests, three orders of magnitude smaller than the delivery path it fronts. Gating there rather than signing every segment URL is deliberate: signed URLs would destroy the ~95% edge offload the whole cost model rests on, so takedown speed is bought at the metadata read, not at the segment fetch.",
         numbers: [
           "3.6M new video rows/day",
-          "a rung row exists only once the rung is complete",
           "read once per watch page, never per segment",
-          "watch API: one call per watch, ~1B watch-hours/day behind it",
+          "watch API: one call per watch, ~1B watch-hours/day behind it"
         ],
         breaks:
           "It is the fast half of a takedown. Manifest hydration reads publish_state, so a tombstone stops new playback within seconds while cached segment URLs stay fetchable until they are purged or evicted. That read hop stops players, not bytes — a segment already cached at an edge stays fetchable by anyone holding the URL until eviction or purge.",
@@ -450,7 +449,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "time-to-first-frame under 500ms at p95",
           "rebuffer under 0.5% of watch time",
-          "6s segments",
+          "6s segments"
         ],
         breaks:
           "A player mid-playback will not see an escalated rung until it refreshes the manifest, and most refresh only on a seek or a stall, so a quality upgrade lands on the next viewer rather than the current one.",
@@ -463,7 +462,7 @@ export const YOUTUBE: Diagram = {
             "Very short clips, where the whole file lands before the first adaptation decision would have fired and progressive download is simpler and faster.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -753,6 +752,6 @@ export const YOUTUBE: Diagram = {
         breaks:
           "It must never sit on the playback path: an outage here costs escalation decisions, and blocking playback on it would trade a 99.99% SLO for a best-effort one.",
       },
-    },
+    }
   ],
 };

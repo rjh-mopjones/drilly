@@ -277,7 +277,6 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "The per-instrument consumers, each draining its own cursor in batches and applying events for its instruments strictly in sequence order.",
         why: "Shared-nothing per book is what makes the pipeline parallel without coordination: no shard needs a lock, and no shard's lag can reorder another's stream. Each also carries the per-instrument stale flag, which has to be visible in what it publishes. Lag is measured as the producer cursor minus the consumer cursor, and the hottest books get dedicated cores with NUMA-local memory.",
-        numbers: [],
         breaks:
           "A lagging shard must never propagate back to the socket drain; its ticks conflate and its order flow backpressures at the producer, but the edge keeps draining regardless.",
         choice: {
@@ -379,7 +378,6 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "Decoded venue frames moving from the drain thread into normalisation over a bounded per-stream ring.",
         why: "The ring is what decouples the socket from everything slower without letting the decoupling become unbounded, sized for burst rather than average throughput. It is bounded so that a stalled normaliser produces a defined outcome rather than growing memory until the process dies.",
-        numbers: [],
         breaks: "If the handler ever waits on a full ring instead of shedding, the block propagates to the socket and the kernel buffer starts dropping multicast packets.",
       },
     },
@@ -459,7 +457,6 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "A market-data tick diverted into the per-instrument latest-value slot when its target shard cannot keep up.",
         why: "This is the overwrite half of the rule. Ticks are state you replace, so the correct response to a lagging consumer is to bin the stale intermediates and keep the freshest, not to queue deeper. The conflation rate per instrument is the metric that tracks it, and it rises under load by design.",
-        numbers: [],
         breaks: "A conflation rate that spikes is the early warning that a shard is falling behind, and it is the only signal you get before the ring depth alarm fires.",
       },
     },
@@ -498,7 +495,6 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "The accumulate half of the rule: order flow that cannot be absorbed causes the producer to be slowed or the client to be rejected explicitly, never silently dropped.",
         why: "An order is state that accumulates, so the sender has to learn that it did not make it. An explicit reject is a visible failure a client can handle; a silent drop is a trade that both sides believe happened differently. The nack rate alerts on any sustained non-zero value.",
-        numbers: [],
         breaks: "Backpressure penalises everyone sharing that producer connection, which is why the quota lives per participant at the gateway rather than as one global valve.",
       },
     },

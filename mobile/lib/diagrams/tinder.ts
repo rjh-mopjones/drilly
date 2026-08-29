@@ -33,14 +33,14 @@ export const TINDER: Diagram = {
       {
         text: "Exposure is a product constraint rather than an optimisation. A profile everyone wants sits in millions of feeds and hands its owner an inbox they cannot meaningfully answer, so the Exposure + diversify stage applies a decaying multiplier once a profile passes roughly ten times its local mean impressions.",
         lights: ["exposure", "e6", "e7"],
-      },
+      }
     ],
     crux:
       "A profile everyone wants is a write hotspot on the reverse index and a feed monopoly at the same time, and both come from one fact: the scarce resource is attention on the other side of the market, not compute. Capping it costs relevance in exactly the thin markets that need help most.",
     numbers: [
       "1.6B swipes/day: 20k/s steady, 60k/s peak",
       "funnel 10k to 3k to 1.5k to 20, p99 under 300ms",
-      "~750M right-swipes/day, 4% mutual, ~30M matches/day",
+      "~750M right-swipes/day, 4% mutual, ~30M matches/day"
     ],
   },
   nodes: [
@@ -69,7 +69,7 @@ export const TINDER: Diagram = {
         numbers: [
           "20 cards per page, 32 swipes/user/day",
           "~350k concurrent sessions, ~1M at peak",
-          "~925 feed requests/s against 20k swipes/s",
+          "~925 feed requests/s against 20k swipes/s"
         ],
         breaks:
           "A swipe retried after a reconnect must not create a second row, so the client sends an idempotent key of (swiper_id, target_id) and a replay is a no-op rather than a duplicate.",
@@ -89,7 +89,7 @@ export const TINDER: Diagram = {
         numbers: [
           "~925 req/s average, ~2.8k/s peak",
           "geo 10 to 30ms, exclusion 10 to 30ms",
-          "300ms p99 for the whole request",
+          "300ms p99 for the whole request"
         ],
         breaks:
           "Stage 3 selectivity decays monotonically for a user who stays in one place, so a funnel that looks healthy on day one returns a thin page by month two and nothing in the swipe path notices. Track candidates surviving exclusion and widen at ~200, not at zero.",
@@ -117,7 +117,7 @@ export const TINDER: Diagram = {
         numbers: [
           "1,500 inner products over 128 dims = 192k MACs",
           "100 to 150ms, half the 300ms budget",
-          "a joint model would be 4.2M invocations/s",
+          "a joint model would be 4.2M invocations/s"
         ],
         breaks:
           "Model server failure loses personalisation entirely, so it circuit-breaks to a cached per-geo ordering by recency and popularity. A worse feed beats no feed, and this is the only tier where that trade is acceptable.",
@@ -145,7 +145,7 @@ export const TINDER: Diagram = {
         numbers: [
           "mean profile is shown 32 times/day",
           "redistribution starts near 320/day, 10x local mean",
-          "50k/day hard cap is 1,500x the mean",
+          "50k/day hard cap is 1,500x the mean"
         ],
         breaks:
           "Boost sells the exposure this budget removes, and popular profiles are both the best customers and the ones the budget exists to restrain. Making Boost reallocate the remaining budget rather than add to it is defensible, weaker than the marketing, and something engineering can only frame.",
@@ -172,7 +172,7 @@ export const TINDER: Diagram = {
         numbers: [
           "GEORADIUS 10km returns ~10k ids",
           "10 to 30ms of a 300ms budget",
-          "widen by doubling to a 500km cap",
+          "widen by doubling to a 500km cap"
         ],
         breaks:
           "Geo skew: a fixed radius floods a dense city and empties a rural county. A shard primary failing is worse, because it returns an empty region rather than an error, so the client degrades to a popularity-ordered default feed instead of showing nothing.",
@@ -199,7 +199,7 @@ export const TINDER: Diagram = {
         numbers: [
           "128 floats plus metadata ~1KB per profile",
           "50M profiles ~50GB, refreshed nightly",
-          "profile-edit re-embed lands within 5 minutes",
+          "profile-edit re-embed lands within 5 minutes"
         ],
         breaks:
           "A nightly refresh misses intra-day changes: a new bio, new photos, a jump in activity. Without an incremental re-embed on profile-edit events the ranker is confidently scoring people who no longer look like their vector.",
@@ -226,7 +226,7 @@ export const TINDER: Diagram = {
         numbers: [
           "9.6 bits/element at 1% false positive",
           "42KB for a three-year user, 600KB at a 500k ceiling",
-          "~80GB hot cache at 1M sessions, against ~530GB exact",
+          "~80GB hot cache at 1M sessions, against ~530GB exact"
         ],
         breaks:
           "A Bloom filter has no delete short of a counting variant at 4x the space, so paid rewind has no home here: you keep an exact overlay of the last ~50 swipes in front of it and tombstone the swipe row. That is the easy half of undo, and once the overlay exists the case for not simply holding the exact set gets thin.",
@@ -253,7 +253,7 @@ export const TINDER: Diagram = {
         numbers: [
           "20k/s steady, 60k/s peak",
           "p99 under 200ms including the reciprocity read",
-          "~750M right-swipes/day, 46% of all swipes",
+          "~750M right-swipes/day, 46% of all swipes"
         ],
         breaks:
           "Silently dropping the reciprocity check under load is a mutual right-swipe that never becomes a match, which violates the only guarantee the product makes. Queue it with backpressure instead, and the user finds out months later when a friend says they swiped right.",
@@ -280,7 +280,7 @@ export const TINDER: Diagram = {
         numbers: [
           "80B per row, ~130GB/day raw, ~390GB replicated",
           "12-month hot retention ~47TB raw",
-          "1.6B swipes/day",
+          "1.6B swipes/day"
         ],
         breaks:
           "Retention is the quiet decision. Bound the exclusion window at 12 months, because a profile passed on a year ago is effectively a new candidate and an unbounded log is what makes the exclusion filter grow forever.",
@@ -307,7 +307,7 @@ export const TINDER: Diagram = {
         numbers: [
           "one row read per right-swipe",
           "sub-shards a hot target up to 16 ways by hash(swiper_id)",
-          "alert above 1,000 right-swipes/min on one target",
+          "alert above 1,000 right-swipes/min on one target"
         ],
         breaks:
           "A celebrity taking 50k right-swipes in an hour turns one row into a write hotspot at thousands per second, while the swiper-partitioned primary copy stays perfectly balanced and every dashboard looks fine.",
@@ -333,8 +333,7 @@ export const TINDER: Diagram = {
         why: "Two people can right-swipe each other within milliseconds, and naive per-user writes produce two match rows and two divergent inboxes. Canonicalising the key makes both writers target the same row, so the database's own uniqueness constraint does the coordination instead of a lock on the hot path.",
         numbers: [
           "4% of right-swipes are mutual",
-          "~30M matches/day, against a public figure near 26M",
-          "the 2nd simultaneous writer becomes a no-op",
+          "~30M matches/day, against a public figure near 26M"
         ],
         breaks:
           "Undo is one-way past this point. If the swipe created a match the other party may already have been notified, so revoking it is a distributed rollback across match state, push delivery and a chat channel. Most products simply refuse to rewind a swipe that matched, which is a product rule doing the work of a distributed transaction.",
@@ -361,7 +360,7 @@ export const TINDER: Diagram = {
         numbers: [
           "100B per row, 30M/day ~3GB/day",
           "~1.1TB/year",
-          "2 swipe timestamps carried inline",
+          "2 swipe timestamps carried inline"
         ],
         breaks:
           "The uniqueness violation on this table is the detection signal for the simultaneous-swipe race, so suppressing the error hides the exact bug the constraint exists to catch.",
@@ -374,7 +373,7 @@ export const TINDER: Diagram = {
             "When the inbox read overwhelmingly dominates and its latency is the product, where the per-user copy stops being a projection and becomes the primary, with a reconciliation job accepting the risk.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -589,6 +588,6 @@ export const TINDER: Diagram = {
         breaks:
           "A notification that fires before the insert commits can tell a user about a match that a rollback then erases, which is why this arrow starts after e14, never in parallel with it.",
       },
-    },
+    }
   ],
 };

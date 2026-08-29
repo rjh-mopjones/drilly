@@ -33,14 +33,14 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       {
         text: "Tracking runs alongside all of it. Every state transition is persisted against the notif_id so a worker restart resumes from durable state rather than inferring it from queue position, and terminal states arrive minutes later by webhook. Every number the status store can report is an acceptance rate wearing a delivery label.",
         lights: ["status-store", "e16", "e19"],
-      },
+      }
     ],
     crux:
       "A notification is user-visible and cannot be recalled, and the final hop belongs to somebody else. So the honest design is at-least-once with a dedup key at every hop you own, never exactly-once, and the restraint that decides whether the product works has to sit above the queues rather than in the delivery tier.",
     numbers: [
       "10M accepted requests/day = ~120/s avg, ~220/s daytime",
       "15M push targets; a broadcast smeared to 4,200/s under a ~10k/s ceiling",
-      "4 attempts at 30s, 5min and 1h, then dead-lettered",
+      "4 attempts at 30s, 5min and 1h, then dead-lettered"
     ],
   },
   nodes: [
@@ -57,7 +57,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~10M accepted requests/day, ~120/s average",
           "~220/s daytime, 80% of traffic in a 10-hour window",
-          "1 idempotency_key required per request, never defaulted",
+          "1 idempotency_key required per request, never defaulted"
         ],
         breaks:
           "A segment-wide broadcast accepted synchronously puts 15M messages on the queues in seconds, which is why segment targets are rejected at the front and routed to the batch path instead.",
@@ -86,7 +86,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~10M accepted requests/day, ~220/s daytime peak",
           "idempotency cache 24h TTL, ~1.2 GB resident",
-          "1 idempotency_key required per request, never defaulted",
+          "1 idempotency_key required per request, never defaulted"
         ],
         breaks:
           "Read-then-write loses the race between two parallel retries: both miss the cache and both create a notification. The check has to be a conditional insert, and the loser has to wait for the winner's notif_id.",
@@ -106,7 +106,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "5 per user per hour at normal priority",
           "average user 0.6 notifications/day, p99 user above 40",
-          "above ~20% bypass traffic the gate has stopped working",
+          "above ~20% bypass traffic the gate has stopped working"
         ],
         breaks:
           "Bypass inflation. Every team believes its notification is transactional, so unless the bypass list is centrally owned and audited it grows until the cap protects nobody.",
@@ -135,7 +135,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~1.5 registered push tokens per user, ~15M push targets",
           "fan-out ~1.6 messages per accepted request",
-          "a full-base broadcast is 15M rows, 1.5x a normal day",
+          "a full-base broadcast is 15M rows, 1.5x a normal day"
         ],
         breaks:
           "The gate ran on the logical send, before this expansion, so the cap counts logical notifications rather than the interruptions a user with two devices and two channels actually feels.",
@@ -154,7 +154,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "one row per fanned-out message, ~1.6 per accepted request",
           "0 rows marked published before the broker acknowledges",
-          "reaped once a day, not left to accumulate",
+          "reaped once a day, not left to accumulate"
         ],
         breaks:
           "Nothing reaps published rows and the table grows without bound behind a workload that never reads it; and because rows are claimed in batches, ordering across a user's channels is not preserved here and must not be relied on downstream.",
@@ -181,7 +181,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~190 rows/s average, ~350/s at daytime peak, ~4,400/s during a broadcast",
           "2 first-class metrics: publisher lag and outbox depth",
-          "re-publish on an unacknowledged write, hence at-least-once",
+          "re-publish on an unacknowledged write, hence at-least-once"
         ],
         breaks:
           "A stalled publisher presents as an empty queue and idle workers while rows pile up in a table nobody graphs, so outbox depth and publisher lag have to be alerted on directly rather than inferred from queue depth. Every queue-based signal reports this failure as healthy.",
@@ -208,7 +208,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "idempotency cache ~1.2 GB at 24h TTL",
           "rate-limiter state ~500 MB across 10M users",
-          "prefs 1-minute TTL, pub/sub invalidation on write",
+          "prefs 1-minute TTL, pub/sub invalidation on write"
         ],
         breaks:
           "The dedup write has to be a conditional insert rather than a read followed by a write, or two retries arriving in parallel both miss the cache and both create a notification.",
@@ -232,7 +232,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         why: "Providers fail independently and publish different ceilings, so the only thing that keeps a bad hour on push from becoming a product-wide outage is that email and SMS never share its queue. Isolation here is what turns a system-wide outage into a channel outage.",
         numbers: [
           "push ~10k/s, SES ~10k/s, SMS ~200/s",
-          "4 attempts on push and email, 1 on SMS",
+          "4 attempts on push and email, 1 on SMS"
         ],
         breaks:
           "Operational sprawl: one notification system is really several channel systems behind a shared front door, each with its own credentials, its own sending reputation and its own way of telling you it is unhappy.",
@@ -260,7 +260,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~4,200/s during a 60-minute broadcast smear",
           "~2 KB per message: template_id, params, routing keys",
-          "7-day retention, ~300 GB used, 500 GB provisioned",
+          "7-day retention, ~300 GB used, 500 GB provisioned"
         ],
         breaks:
           "A 30-minute APNs outage fills this topic while the others drain normally, and the risk is the recovery: without jitter, every message queued during the outage retries in the same instant and re-throttles the provider you were waiting for.",
@@ -288,8 +288,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         why: "Email is the channel that keeps working while push is throttled, and that is only true because it has its own backlog. It is also the fallback path for high-priority traffic when push fails, so it must have spare headroom precisely when the push topic does not.",
         numbers: [
           "SES ~10k/s with a warm sending reputation",
-          "daytime steady ~440 KB/s across all channel topics",
-          "0 broadcast carve-out, unlike SMS's transactional-only lane",
+          "daytime steady ~440 KB/s across all channel topics"
         ],
         breaks:
           "Cross-channel fallback doubles a user's notification count unless the fallback consumes the same rate-limit budget, so an outage turns into an over-notification incident.",
@@ -317,7 +316,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~200 msg/s per account, carrier-throttled",
           "15M / 200 per second = 20.8 hours for a full-base send",
-          "~$0.0075 per message",
+          "~$0.0075 per message"
         ],
         breaks:
           "Anything that routes bulk traffic here silently converts a marketing send into a day-long backlog sitting in front of the one-time codes that actually need this channel.",
@@ -345,7 +344,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~1k msg/s per HTTP/2 connection x ~10 connections = ~10k/s",
           "4 attempts at 30s, 5min and 1h",
-          "FCM batch endpoint takes up to 500 tokens per call",
+          "FCM batch endpoint takes up to 500 tokens per call"
         ],
         breaks:
           "The worker can die between the provider returning 200 and the sent:{notif_id} key being written, so this hop narrows the duplicate window to a few milliseconds around a crash rather than closing it.",
@@ -373,7 +372,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "SES ~10k/s with a warm reputation",
           "a second integration is roughly 4 engineer-weeks",
-          "~3% of live traffic permanently routed to the standby",
+          "~3% of live traffic permanently routed to the standby"
         ],
         breaks:
           "An account-level send pause from a bounce rate you caused follows the sender, not the provider, so a second integration buys nothing against the failure that actually happens most often.",
@@ -402,7 +401,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "1 attempt here, versus 4 on push and email",
           "~200 msg/s per account, carrier-throttled",
-          "terminal state arrives by webhook 2 to 10 minutes later",
+          "terminal state arrives by webhook 2 to 10 minutes later"
         ],
         breaks:
           "Retrying a 5xx from the provider may deliver twice, since the accept is not the delivery and there is nothing on that hop to tell you which it was.",
@@ -429,7 +428,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "push ~10k/s, SES ~10k/s, SMS ~200/s",
           "4 providers integrated: APNs, FCM, SES, Twilio",
-          "each provider publishes 99.9% availability, 8.8 hours a year",
+          "each provider publishes 99.9% availability, 8.8 hours a year"
         ],
         breaks:
           "The device may be off for two days and the notification expires silently, or the user may have muted the app at OS level, which is indistinguishable from a successful delivery from where we stand.",
@@ -448,7 +447,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "~1 KB per record: 10 GB/day logical, 30 GB/day at RF 3",
           "7 days hot, then columnar archive at ~730 GB/yr",
-          "up to 4 attempt writes per message",
+          "up to 4 attempt writes per message"
         ],
         breaks:
           "Write-heavy and read almost never, so attempt writes have to be batched per worker poll rather than one round trip per attempt, or the store costs more than the sending does.",
@@ -461,7 +460,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
             "Volumes low enough that the status table fits beside preferences, where one database is less to operate and you get real queries for freshness analysis for free.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -697,6 +696,6 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         breaks:
           "It still says nothing about display. A confirmation means the message reached an inbox or a handset, not that a human saw it, so acceptance rate and open rate have to be published as two numbers rather than multiplied into one.",
       },
-    },
+    }
   ],
 };

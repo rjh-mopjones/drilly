@@ -88,7 +88,6 @@ export const MATCHING_ENGINE: Diagram = {
       detail: {
         what: "The fork at the top of the worker loop: convert the price to an integer tick, then send a new order to the matching loop and a cancel straight to the slot table.",
         why: "The two paths have almost nothing in common. A new order arrives carrying its price so it knows exactly which level it belongs to; a cancel arrives carrying only an id and has to find a node that could be anywhere in any level. Separating them here is what lets the cancel path be one load rather than a search. Prices are integer ticks, never floats, and a replace is a cancel followed by an insert, which loses the order's time priority.",
-        numbers: [],
         breaks:
           "A floating-point price is the single most common correctness bug in a first implementation: it makes replay diverge on a different CPU or compiler, and divergence in a matching engine is a regulatory incident.",
         choice: {
@@ -335,7 +334,6 @@ export const MATCHING_ENGINE: Diagram = {
       detail: {
         what: "Ordered events being taken off the ring one at a time by the single thread that owns this instrument's book.",
         why: "This arrow carries the whole safety argument. Nothing below it synchronises on anything, and that is only sound because events are stamped with a gap-free sequence number and routed by hash(instrumentId) to the same fixed worker every time, so a book has exactly one writer for the life of the process.",
-        numbers: [],
         breaks:
           "A sequence gap or duplicate means the total order is broken, and matching past it would produce output nobody can reproduce. The correct response is to halt ingest, not to skip the gap.",
       },
@@ -532,7 +530,6 @@ export const MATCHING_ENGINE: Diagram = {
       detail: {
         what: "The post-apply check: assert the book is not crossed and quantity is conserved, and feed the same event to a shadow reference matcher.",
         why: "This class of bug does not crash anything. It leaves a slightly wrong book that keeps trading, so the only way to catch it in time is to check the invariants on the same event that broke them rather than in a nightly job. The shadow model runs on the identical input so its answer is directly comparable.",
-        numbers: [],
         breaks:
           "A failed invariant is a correctness incident, not a retryable error. The response is to halt the instrument, snapshot, and replay against the reference model, which is deliberately more disruptive than continuing.",
       },

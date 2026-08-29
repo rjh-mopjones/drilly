@@ -33,14 +33,14 @@ export const ONLINE_AUCTION: Diagram = {
       {
         text: "The read path is a different shape entirely. Fifty watchers per bidder hold a WebSocket, receive a coalesced snapshot at most four times a second, and render the countdown client-side from a server-supplied end_ts. The bus delivers once per gateway node rather than per connection, so a 15,000-watcher item costs it 48 deliveries.",
         lights: ["bus", "ws-gateway", "watchers", "e9", "e10", "e11"],
-      },
+      }
     ],
     crux:
       "A published deadline is not an instant. If each API node decides whether a bid was in time by comparing its local clock to end_ts, a node drifted by 40ms accepts what an adjacent node rejects, and one of those two users has a legal claim on the item. Acceptance has to stop being a comparison and become a position: a CLOSE event ordered into the item's own stream, or a fenced conditional write where the store's serialisation order is the order.",
     numbers: [
       "~10M live auctions, ~485 closes/s at Sunday peak",
       "~40 bids/s on one row, a ~5,000x per-key spike",
-      "1 to 10ms NTP skew against bids milliseconds apart",
+      "1 to 10ms NTP skew against bids milliseconds apart"
     ],
   },
   nodes: [
@@ -139,7 +139,7 @@ export const ONLINE_AUCTION: Diagram = {
         numbers: [
           "~3ms serial per resolution",
           "retries bounded at 3",
-          "two history rows per accepted bid",
+          "two history rows per accepted bid"
         ],
         breaks:
           "A retry that silently raises the user's maximum. If their max no longer clears the new minimum the answer is OUTBID, because auto-raising spends money they did not authorise and that is a regulatory conversation rather than a bug report.",
@@ -166,7 +166,7 @@ export const ONLINE_AUCTION: Diagram = {
         numbers: [
           "<= 4 ticks/s per auction",
           "~85k msgs/s baseline, ~17MB/s",
-          "coalescing cuts a hot item 10x",
+          "coalescing cuts a hot item 10x"
         ],
         breaks:
           "A bus partition leaves watchers with a frozen price under a running countdown, which looks alive. Clients need a staleness heartbeat and a 2s poll fallback, and the UI must say reconnecting rather than render a stale number as live.",
@@ -193,7 +193,7 @@ export const ONLINE_AUCTION: Diagram = {
         numbers: [
           "~5M concurrent connections at peak",
           "~10KB per connection, ~50GB across the tier",
-          "~40M subscriptions, ~8 per connection",
+          "~40M subscriptions, ~8 per connection"
         ],
         breaks:
           "Losing a node drops ~150k connections that all reconnect together. Reconnect needs a jittered 0 to 30s spread and a snapshot fetch rather than a stream replay, or the herd lands on the API tier during an endgame.",
@@ -220,7 +220,7 @@ export const ONLINE_AUCTION: Diagram = {
         numbers: [
           "485 closes/s x ~50 recipients = ~24k notifications/s",
           "48h payment window before a strike",
-          "win-to-capture SLO > 97%",
+          "win-to-capture SLO > 97%"
         ],
         breaks:
           "Second-chance offers are an abuse vector. A seller with a colluding account can win, not pay, then second-chance the real underbidder at their revealed maximum, so the platform initiates the offer, never the seller, and the price is capped at the underbidder's stored max.",
@@ -247,7 +247,7 @@ export const ONLINE_AUCTION: Diagram = {
         numbers: [
           "~3.3M closes/day, ~39/s average",
           "~485/s in the Sunday evening window, ~12x",
-          "overdue-closes alert past 5s",
+          "overdue-closes alert past 5s"
         ],
         breaks:
           "A stalled shard lets auctions blow past end_ts and keep taking bids, which is a legal problem rather than a latency one. An independent sweeper scans state='OPEN' AND end_ts < now - 5s, and the close is idempotent under WHERE state='OPEN' so a double fire is harmless.",
@@ -297,7 +297,7 @@ export const ONLINE_AUCTION: Diagram = {
         numbers: [
           "~1KB per row, ~10GB live working set",
           "zero-rows-affected SLO < 0.1%",
-          "closed archive ~11TB at RF=3 over 3 years",
+          "closed archive ~11TB at RF=3 over 3 years"
         ],
         breaks:
           "Read-modify-write in application code. alice and bob both read 100, both compute 105, the second write silently erases the first, and one of them has already been told they are leading.",
@@ -324,7 +324,7 @@ export const ONLINE_AUCTION: Diagram = {
         numbers: [
           "~120B per bid record",
           "~130M rows/day, ~16GB raw, ~47GB at RF=3",
-          "~50TB for 3-year retention",
+          "~50TB for 3-year retention"
         ],
         breaks:
           "Replay only repairs the accounting. Cancelling a shill ring's bids and recomputing the honest price recovers the delta and the final-value fee, but the buyer already paid and every other bidder valued their own bids against a price signal that was a lie.",
@@ -352,7 +352,7 @@ export const ONLINE_AUCTION: Diagram = {
         breaks:
           "A socket that has been silently dead for 90 seconds shows a frozen price under a ticking countdown, the worst possible failure because it looks alive. Two missed keepalives must flip the UI to reconnecting and fall back to polling.",
       },
-    },
+    }
   ],
   edges: [
     {
@@ -535,10 +535,10 @@ export const ONLINE_AUCTION: Diagram = {
       detail: {
         what: "GET /auctions/{id} serving current_price, bid_count, min_next_bid, end_ts and the masked high bidder from a replica.",
         why: "min_next_bid is derived from the displayed price, so this read is what every client bids against. It is also the degraded path: when the bus is partitioned, watchers poll this at 2s rather than sit on a frozen socket.",
-        numbers: ["poll fallback every 2s", "0 responses ever include high_max"],
+        numbers: ["poll fallback every 2s"],
         breaks:
           "It must never leak high_max or an outbid delta. A bidder who can read how far they lost by can binary-search the leader's ceiling within one increment in four bids.",
       },
-    },
+    }
   ],
 };

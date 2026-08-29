@@ -33,7 +33,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       {
         text: "Enforce it in the storage layer rather than requesting it of clients, because the guarantee is only as strong as the least disciplined writer: one nightly batch job or one operator applying a manual fix bypasses a client-side fence with no signal anywhere. And accept that some resources cannot be fenced at all, at which point the lock is advisory and you should say so.",
         lights: ["fence-check", "resource"],
-      },
+      }
     ],
     crux:
       "A holder cannot verify it still holds the lock at the instant of its write, because any check it performs can be followed by another pause before the write lands. The only party that sees both writes is the resource, so the resource is the only place safety can live. Everything the lock service does is contention control wearing the word safety.",
@@ -41,7 +41,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       "20s lease against a 35s GC pause",
       "1k correctness vs 9k best-effort acquires/s",
       "etcd acquire 1 to 10ms, Redis sub-1ms",
-      "peak 20k consensus writes/s, 68% of ceiling",
+      "peak 20k consensus writes/s, 68% of ceiling"
     ],
   },
   nodes: [
@@ -184,7 +184,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "A number returned with every grant that strictly increases across successive grants, taken from the position of that grant in the consensus log.",
         why: "It is the one thing the lock service produces that the resource can check. It has to come from something that already has a single agreed order, and a renewal deliberately does not mint a new one, or an in-flight write from the correct holder would be rejected by your own fence.",
-        numbers: ["1 strictly increasing value per key", "no 2nd system needed, increases globally for free", "0 new tokens minted on renewal"],
+        numbers: ["1 strictly increasing value per key", "0 new tokens minted on renewal"],
         breaks:
           "A token minted anywhere other than the log. A separate counter service is a second consensus problem, and a counter that resets or lags on failover fences out the wrong writer.",
         choice: {
@@ -265,7 +265,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
             "A store with native conditional writes on a version or ETag, where the existing concurrency primitive already is the counter and a second column adds nothing.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -319,7 +319,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "Worker B's acquire while A still holds the key, which returns null rather than blocking.",
         why: "Returning null and letting the caller decide keeps the lock service out of the caller's scheduling. A blocking acquire hides queue depth inside the service, where you cannot see which key is pathological.",
-        numbers: ["0 blocking; null means held, come back later", "1 wait-queue depth metric tracked per key"],
+        numbers: [ "1 wait-queue depth metric tracked per key"],
         breaks:
           "Redis SETNX has no queue at all, so everyone polls and an arbitrary poller wins, leaving wait times unbounded for the unlucky.",
       },
@@ -347,7 +347,6 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "The revision at which the lock key was created being read back out as the token for this grant.",
         why: "Nothing is computed here, which is the point. The number already exists as a consequence of committing to the log, so its monotonicity is inherited rather than implemented and there is no counter to get wrong on failover.",
-        numbers: ["0 extra computation: etcd uses mod_revision", "0 extra computation: ZooKeeper uses czxid"],
         breaks:
           "Systems without a shared log cannot supply this edge at all, which is exactly why a resource-side fence cannot be retrofitted onto Redlock.",
       },
@@ -444,6 +443,6 @@ export const DISTRIBUTED_LOCK: Diagram = {
         breaks:
           "The cost of fencing is organisational rather than computational: this predicate is trivial, and the difficulty is getting every writer to the row to carry a token at all.",
       },
-    },
+    }
   ],
 };

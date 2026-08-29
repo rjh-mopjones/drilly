@@ -33,14 +33,14 @@ export const EMAIL_SERVICE: Diagram = {
       {
         text: "Outbound never blocks on a stranger's infrastructure. A send is durable in a replicated queue before the UI says Sent, a worker does the MX lookup and opens SMTP, and failure means growing backoff for up to 72 hours and then a bounce into the sender's own inbox, never a silent drop. Sending addresses are tiered by account reputation so a compromised account burns a quarantine pool rather than the addresses everyone else sends from.",
         lights: ["outbound-queue", "sending-workers", "mailbox-api", "e-send", "e-lease", "e-defer", "e-bounce"],
-      },
+      }
     ],
     crux:
       "The protocol gives you one bit and no take-backs. A 5xx on legitimate mail is permanent and invisible to the recipient, so only signals running near 1e-6 false positives may produce one. A spam model runs near 1e-3, and at 100B accepted messages a day that is 1e8 legitimate messages destroyed daily, against roughly $45k/month to store the junk instead. That asymmetry, not storage, is what shapes the whole system.",
     numbers: [
       "100B accepted/day, 1.16M/s average",
       "50KB logical vs ~10KB stored per message",
-      "index is an eighth of the bytes and 3x the bill",
+      "index is an eighth of the bytes and 3x the bill"
     ],
   },
   nodes: [
@@ -73,7 +73,7 @@ export const EMAIL_SERVICE: Diagram = {
           "~30% of arrivals disposed of here",
           "~70% get a 250 and an asynchronous verdict",
           "IP reputation: one memory read at 6.6M transactions/s peak",
-          "SPF/DKIM/DMARC cache: TTL-bounded from sender DNS, one lookup set per message",
+          "SPF/DKIM/DMARC cache: TTL-bounded from sender DNS, one lookup set per message"
         ],
         breaks:
           "Backpressure cascades: when the storage tier slows, every MX starts deferring at once and the whole internet's retry timers converge on our recovery window. A stale reputation entry keeps refusing a rehabilitated netblock silently, and if the sending domain's own DNS is unreachable DMARC cannot be evaluated, so the safe default is to accept and their outage becomes our spam problem.",
@@ -274,7 +274,7 @@ export const EMAIL_SERVICE: Diagram = {
         numbers: [
           "1.16M events/s average",
           "three independent consumer offsets",
-          "push notifier fires on accept, before the label exists, ~1s median",
+          "push notifier fires on accept, before the label exists, ~1s median"
         ],
         breaks:
           "A consumer falling behind is invisible from the ingest side: mail is still being accepted and stored, so the only symptom is that new messages sit unsorted, unsearchable or unannounced for longer. Because the push consumer runs ahead of classification, a message about to be foldered as spam can still buzz a phone, which is why it carries a message id and never content.",
@@ -326,7 +326,7 @@ export const EMAIL_SERVICE: Diagram = {
         numbers: [
           "list and search under 500ms p95",
           "never more than 100 rows per page",
-          "cache: 5% of users active/hour x 100 rows x 250B = ~1.25TB, 0.0025% of the 50PB corpus",
+          "cache: 5% of users active/hour x 100 rows x 250B = ~1.25TB, 0.0025% of the 50PB corpus"
         ],
         breaks:
           "IMAP and POP carry per-folder UID sequences and flag state, which constrain how freely a mailbox may be re-sharded underneath a live client session. The cache holds exactly the fields the classifier rewrites, so a retro-relabel that does not invalidate leaves a spam campaign sitting in the inbox on every device that already listed it.",
@@ -350,7 +350,7 @@ export const EMAIL_SERVICE: Diagram = {
       detail: {
         what: "The devices a person is holding: the web client, the mobile apps and third-party IMAP or POP clients, plus the push channel they receive on.",
         why: "It is a client rather than an external because this is the side of the trust boundary where we know who is calling. Every request carries an authenticated user_id, which is what makes single-partition routing and cross-user isolation possible at all, and it is the exact opposite of the inbound SMTP side where nothing about the caller is known.",
-        numbers: ["10B sends/day, ~10 per user", "0 other FP signals exist besides 'not spam' clicks"],
+        numbers: ["10B sends/day, ~10 per user"],
         breaks:
           "A POP client that downloads and deletes, or an IMAP client holding UID sequences, pins mailbox layout decisions we would otherwise be free to change. The push signal carries a message id rather than content, so a client that assumed otherwise would show a phishing subject line on a lock screen a second before the classifier foldered it.",
       },
@@ -394,7 +394,7 @@ export const EMAIL_SERVICE: Diagram = {
           "three pools: established, new, quarantine",
           "per-account limits catch 10x the 7-day baseline",
           "new addresses warmed at ~1,000/day, doubling weekly",
-          "4xx from the recipient means retry, 5xx means bounce",
+          "4xx from the recipient means retry, 5xx means bounce"
         ],
         breaks:
           "One compromised account on a shared address gets that address listed, and every other user sending from it starts bouncing before anyone notices the compromise. A cold address emitting a million messages looks exactly like a botnet to the recipient, which is why new addresses are warmed rather than sent at full volume immediately.",
@@ -407,7 +407,7 @@ export const EMAIL_SERVICE: Diagram = {
             "Low outbound volume from a single address, where you have one IP, one reputation, and tiering is a pool structure with nothing to put in it.",
         },
       },
-    },
+    }
   ],
   edges: [
     // --- inbound, and the three refusals ---------------------------------
@@ -711,6 +711,6 @@ export const EMAIL_SERVICE: Diagram = {
         numbers: ["99.9% delivered or bounced within 72h"],
         breaks: "Generating bounces to unauthenticated third parties is backscatter and gets you listed, which is why inbound refuses at RCPT TO rather than accepting and bouncing.",
       },
-    },
+    }
   ],
 };

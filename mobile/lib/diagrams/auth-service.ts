@@ -33,7 +33,7 @@ export const AUTH_SERVICE: Diagram = {
       {
         text: "The residual left over is the actual SLO. Revocation lands in under a second when the pub/sub feed is healthy and degrades to the 10 minute access-token TTL when it is not, and the feed fails open, so the guarantee lapses silently and only a per-verifier lag gauge notices.",
         lights: ["revocation-feed", "resource-services", "e14"],
-      },
+      }
     ],
     crux:
       "Revocation is what breaks the elegant stateless story. The token is the authority and nothing consults you again until it expires, so every fix reintroduces exactly the shared, network-visible state that statelessness existed to remove. There is no clean escape, only a deliberate position on the spectrum and an honest number for the staleness it leaves.",
@@ -41,7 +41,7 @@ export const AUTH_SERVICE: Diagram = {
       "~500k verifications/s against ~5k logins/s, a 100x ratio",
       "argon2id 75ms and 64MB per hash, ~375 cores at peak",
       "~350 live denylist entries, ~14KB, pushed not polled",
-      "Ed25519 verify ~40µs, ~20 cores across the whole fleet",
+      "Ed25519 verify ~40µs, ~20 cores across the whole fleet"
     ],
   },
   nodes: [
@@ -86,7 +86,7 @@ export const AUTH_SERVICE: Diagram = {
           "~5k logins/s peak",
           "~170ms p50, ~500ms p99 machine time",
           "~300k unredeemed codes in flight",
-          "~300M audit events/day, ~75GB/day raw, 90d hot",
+          "~300M audit events/day, ~75GB/day raw, 90d hot"
         ],
         breaks:
           "Naive per-account lockout turns into its own denial of service: five failures and an hour freeze lets an attacker lock any user out for the cost of six requests a minute. The audit trail is also only eventually consistent with the decisions it records, so a gap is invisible without a monotonic per-user sequence number.",
@@ -331,7 +331,7 @@ export const AUTH_SERVICE: Diagram = {
             "When permission genuinely lives in a graph: document sharing, folder inheritance, org hierarchies. It is the right answer there rather than a luxury, but it brings a denormalised reverse index, a consistency token so a user who just shared does not see a stale denial, and an operational surface roughly the size of this auth service.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -515,7 +515,7 @@ export const AUTH_SERVICE: Diagram = {
       detail: {
         what: "Each verifier pulling the key set on a jittered 5 minute schedule and holding it in process.",
         why: "It is a pull rather than a push because keys change every 90 days and staleness is harmless: a retired key's tokens have already expired. The verifier never asks about a specific token, only for the keys.",
-        numbers: ["refreshed every 5 minutes", "0 hard TTL, only stale-while-revalidate"],
+        numbers: ["refreshed every 5 minutes"],
         breaks:
           "This path fails closed. A verifier that cannot resolve a kid rejects every request, which is why the cache serves stale indefinitely and a bootstrap set ships in the image.",
       },
@@ -547,6 +547,6 @@ export const AUTH_SERVICE: Diagram = {
         breaks:
           "Bounded staleness is fine for reading a dashboard and not fine for a wire transfer. High-consequence boundaries need a synchronous check that does not inherit the feed's fail-open default, and sorting actions between the two paths is done by hand.",
       },
-    },
+    }
   ],
 };

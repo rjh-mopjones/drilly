@@ -37,7 +37,7 @@ export const BOOKING_PLATFORM: Diagram = {
       {
         text: "CDC closes the loop back to discovery: Debezium to Kafka to an indexer, ~120 calendar mutations a second average and ~1,200 at peak, refreshing the availability summary within 60 seconds. That lag is the entire availability-lost budget, and at 0.1 bookings per listing per day it costs almost nothing.",
         lights: ["cdc", "search-index", "e9", "e10"],
-      },
+      }
     ],
     crux:
       "The inventory is not ours. Search has to filter and rank over 10M calendars owned by third parties who change them out of band, so an exact index would mean reading calendar rows for millions of listings per query and a fresher one buys nothing measurable. Discovery is therefore a suggestion, the commit is the only truth, and for 5 to 60 minutes at a time even the commit is wrong because a host sold the night somewhere else.",
@@ -45,7 +45,7 @@ export const BOOKING_PLATFORM: Diagram = {
       "100M searches/day vs 1M bookings/day",
       "~12k search QPS peak vs ~120 commits/s",
       "60s CDC freshness, ~120 calendar events/s",
-      "0.1 bookings per listing per day",
+      "0.1 bookings per listing per day"
     ],
   },
   nodes: [
@@ -307,7 +307,7 @@ export const BOOKING_PLATFORM: Diagram = {
             "Being a distribution channel over inventory you do not own, with tens of suppliers under contractual SLAs, where a synchronous check against one well-run API is feasible and being wrong is the supplier's liability.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -459,7 +459,6 @@ export const BOOKING_PLATFORM: Diagram = {
       detail: {
         what: "Writing partner-reported nights as blocked, and explicitly refusing to release any night carrying one of our confirmed bookings.",
         why: "The asymmetry is the entire safety property of this path. Trusting a partner to say a night is free means a stale feed can resell a night we have already sold; trusting them to say it is taken costs at most some lost inventory.",
-        numbers: ["0 booked nights ever released"],
         breaks:
           "The conflict still happened, so the resolution has to raise a host-facing alert, and a host's channel-conflict rate becomes a ranking signal rather than something only the support desk sees.",
       },
@@ -519,6 +518,6 @@ export const BOOKING_PLATFORM: Diagram = {
         breaks:
           "The outstanding hold blocks instant-book attempts on those nights for the full window, which is correct and is also the main complaint hosts have about the mode.",
       },
-    },
+    }
   ],
 };

@@ -33,7 +33,7 @@ export const RIDE_HAILING: Diagram = {
       {
         text: "After the match the trip is a state machine whose every transition is a compare-and-swap gated on the prior status, so a client retry cannot drag a completed trip backwards. Payment hangs off completion asynchronously under an idempotency key, because a declined card must never stop a driver taking their next ride.",
         lights: ["trip-fsm", "trips", "payment-saga", "e12", "e14"],
-      },
+      }
     ],
     crux:
       "A driver is scarce inventory that moves, declines and disappears, so assigning one is an exclusive allocation rather than a search result. Every hard property here falls out of that: the hold taken before the offer goes out, the expiry that returns it without a sweeper, the cascade to the next nominee, and the second claim on the request itself.",
@@ -41,7 +41,7 @@ export const RIDE_HAILING: Diagram = {
       "250k location pings/s at a 4 s cadence",
       "~50 nominees from a 2 km radius",
       "15 s lease, walk capped at 5 attempts",
-      "~2,900 conditional writes/s globally",
+      "~2,900 conditional writes/s globally"
     ],
   },
   nodes: [
@@ -168,7 +168,7 @@ export const RIDE_HAILING: Diagram = {
       detail: {
         what: "The state machine moving a trip forward through REQUESTED, MATCHED, DRIVER_ENROUTE, ARRIVED, ON_TRIP, COMPLETED and PAID.",
         why: "It is also the second half of exclusivity. The request is itself a claimable resource, so when two drivers accept within milliseconds exactly one wins the trip row and the loser is released and shown an expired offer, which is what it looked like from their side anyway.",
-        numbers: ["accept returns 409 already_matched on the losing side", "6 transitions on a normal trip", "NO_DRIVERS: 1 terminal state, not an error"],
+        numbers: ["accept returns 409 already_matched on the losing side", "6 transitions on a normal trip"],
         breaks:
           "Ordering the two accept writes the other way round commits a driver to a trip somebody else owns, and recovering means un-assigning a car that has already started moving.",
         choice: {
@@ -318,7 +318,7 @@ export const RIDE_HAILING: Diagram = {
             "Regulated markets that require a synchronously replicated copy outside the serving region, where the added latency is not a choice you get to make.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -534,6 +534,6 @@ export const RIDE_HAILING: Diagram = {
         breaks:
           "If the newest write for a cell ages past 2 minutes the price is stale, which is the alarm rather than a silent reset to 1.0x.",
       },
-    },
+    }
   ],
 };

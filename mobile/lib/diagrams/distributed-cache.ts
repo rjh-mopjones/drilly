@@ -33,14 +33,14 @@ export const DISTRIBUTED_CACHE: Diagram = {
       {
         text: "Say plainly that a cache is not a database: it may lose every value at any moment and the system must still be correct. Then say the uncomfortable half, which is that an origin sized for 100k QPS against 5M reads/s cannot survive a cold pool, so availability really does depend on the cache being warm and rate-limited fill is a degradation, not a fix.",
         lights: ["origin", "loader"],
-      },
+      }
     ],
     crux:
       "Two things have to be true at once. The cache may lose any value at any moment with no correctness consequence, and it may not serve a wrong value for an unbounded time. Hold only the first and the cache is free in your head and you ship a price that changed twenty minutes ago. Hold only the second and you reach for persistence and quorum reads and rebuild a slow database that happens to live in RAM.",
     numbers: [
       "5M gets/s, so h > 98% is arithmetic",
       "60 shards x 180GB for a 10TB working set",
-      "one hot key = 16 Gbps on one NIC",
+      "one hot key = 16 Gbps on one NIC"
     ],
   },
   nodes: [
@@ -51,7 +51,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       detail: {
         what: "The cache cluster itself: 60 primary shards with one replica each, holding a 10TB working set entirely in RAM with persistence switched off.",
         why: "Everything in this box is derived state. Disaster recovery is refilling from the origin rather than restoring anything, which is what makes the tier cheap to run and what makes invalidation the only hard problem it has.",
-        numbers: ["120 processes x 256GB = ~30TB provisioned", "10TB working set, corpus is 10x larger", "0 minutes of RPO applies; nothing here is authoritative"],
+        numbers: ["120 processes x 256GB = ~30TB provisioned", "10TB working set, corpus is 10x larger"],
         breaks:
           "The tier is allowed to be empty and is not allowed to be wrong, and the second property is not enforced by anything inside this box.",
       },
@@ -310,7 +310,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
           flips: "A single service owning every write to a table, where an inline delete is one line of code and a CDC pipeline is an entire system to operate for nothing.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -509,7 +509,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       detail: {
         what: "The invalidation itself: remove the key rather than overwrite it with the new value.",
         why: "Deletes commute, so any interleaving of two of them leaves the key absent and absent is always safe. Two SETs from two writers can land in the opposite order to their commits and leave the older value resident until the TTL.",
-        numbers: ["a delete on an absent key costs 0 extra work, a no-op", "idempotent, so a 2nd or 3rd retry costs nothing extra"],
         breaks: "A delete is only as good as its fanout: it must reach the primary, every read replica, every region's pool and every process L1, and the last of those is unreachable by construction.",
       },
     },
@@ -539,6 +538,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
         numbers: ["~50B per delete, negligible on the wire", "the 300s backstop TTL remains the only real guarantee"],
         breaks: "It can only delete keys a row-level event can name, so derived keys, which are the ones users actually look at, are quietly the stalest thing in the system.",
       },
-    },
+    }
   ],
 };

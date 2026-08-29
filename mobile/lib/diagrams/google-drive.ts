@@ -33,14 +33,14 @@ export const GOOGLE_DRIVE: Diagram = {
       {
         text: "Convergence runs off the journal, an append-only log per namespace with a monotonic id. A device stores a cursor and asks for everything after it, so a sync costs O(changes) rather than O(files), which is the whole reason a 10M-file namespace is syncable at all. The pub/sub bus and the socket fleet above it only make that poll arrive sooner, which is exactly why they are allowed to lose messages.",
         lights: ["journal", "pubsub", "notify", "devices", "e14", "e15", "e16"],
-      },
+      }
     ],
     crux:
       "The system cannot read the files. It sees opaque bytes with no notion of a line or a paragraph, so there is no merge function, so two devices that edited the same file offline genuinely cannot be reconciled. The design's job is to make conflicts rare and then hand the survivors to a human as a second file on disk.",
     numbers: [
       "4MB fixed chunks, SHA-256",
       "~40% dedup: 10EB raw to ~6EB distinct",
-      "~100k conflict copies/day",
+      "~100k conflict copies/day"
     ],
   },
   nodes: [
@@ -57,7 +57,7 @@ export const GOOGLE_DRIVE: Diagram = {
           "~2.5 devices per user",
           "one cursor per namespace",
           "~10k files, ~10GB per user",
-          "local index ~500B of metadata per file, persisted across restarts",
+          "local index ~500B of metadata per file, persisted across restarts"
         ],
         breaks:
           "It is the only part of the system that ever holds a whole file, so every bug here shows up as user data that silently failed to sync. Nothing server-side can see that it happened. Losing or corrupting the local index destroys the synced tree and cursor together, forcing that same full diff and risking a false 'everything deleted' read if the local tree is not fully mounted.",
@@ -134,7 +134,7 @@ export const GOOGLE_DRIVE: Diagram = {
         numbers: [
           "4MB chunks, files under 4MB stored whole",
           "1GB file = 256 chunks = 8KB of hash list",
-          "SHA-256 at 1 to 2 GB/s per core with hardware acceleration",
+          "SHA-256 at 1 to 2 GB/s per core with hardware acceleration"
         ],
         breaks:
           "Fixed offsets are catastrophic for inserts: 10 bytes added at offset 0 of a 1GB file shifts all 256 boundaries and re-uploads the whole gigabyte.",
@@ -186,7 +186,7 @@ export const GOOGLE_DRIVE: Diagram = {
         numbers: [
           "~1B entries/day at ~100B each = ~100GB/day",
           "90 days retention = ~9TB",
-          "10M-file namespaces sync in O(changes)",
+          "10M-file namespaces sync in O(changes)"
         ],
         breaks:
           "A device away longer than the retention window falls off the end and has to fall back to a full tree diff, which is minutes of work on both ends and exactly the path the journal exists to avoid.",
@@ -213,7 +213,7 @@ export const GOOGLE_DRIVE: Diagram = {
         numbers: [
           "~12k events/s steady, ~60k/s at business-hours peak",
           "fan-out x2.5 devices per user, more for shared folders",
-          "one socket held open per connected device",
+          "one socket held open per connected device"
         ],
         breaks:
           "A sync storm: one member refactoring 100 files in a folder with 50 collaborators is 5000 pushes unless they are debounced into one 'namespace advanced' message per device.",
@@ -310,7 +310,7 @@ export const GOOGLE_DRIVE: Diagram = {
         numbers: [
           "~10T file rows at ~500B = 5PB",
           "chunk lists ~1PB at 32B per hash, 3 versions",
-          "~6PB logical, ~18PB replicated",
+          "~6PB logical, ~18PB replicated"
         ],
         breaks:
           "Moves across namespace boundaries are not atomic. Dragging a folder out of a shared team folder into your private root is a copy plus a delete across two independent journals, so file ids change and version history resets.",
@@ -337,7 +337,7 @@ export const GOOGLE_DRIVE: Diagram = {
         numbers: [
           "~6EB distinct after ~40% dedup, ~11EB stored",
           "hot 3x replicated, cold Reed-Solomon 10+4 at 1.4x",
-          "~300PB hot tier, provisioned to ~500PB",
+          "~300PB hot tier, provisioned to ~500PB"
         ],
         breaks:
           "A chunk unavailable in one region stalls every file that references it, so reads have to retry against an alternate region and recache lazily.",
@@ -411,7 +411,7 @@ export const GOOGLE_DRIVE: Diagram = {
             "A corpus small enough to scan continuously, where the counters are pure complexity and reachability is always current.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -605,7 +605,6 @@ export const GOOGLE_DRIVE: Diagram = {
       detail: {
         what: "The push telling connected devices to pull the journal now rather than at their next poll.",
         why: "It exists purely to cut the gap between commit and convergence. Because it decides nothing, it is allowed to be lossy and unordered, and a dropped message costs latency rather than correctness. A disconnected device simply gets nothing and does not need to.",
-        numbers: ["0 file bytes carried, only a namespace id and a journal id"],
         breaks:
           "A device that treated this as its only signal would diverge permanently on a single dropped message, which is why the pull below is not optional.",
       },
@@ -693,6 +692,6 @@ export const GOOGLE_DRIVE: Diagram = {
         breaks:
           "Drift in the safe direction leaks storage quietly, so the metric matters as much as the repair: nobody notices orphans until the bill does.",
       },
-    },
+    }
   ],
 };

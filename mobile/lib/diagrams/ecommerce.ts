@@ -33,14 +33,14 @@ export const ECOMMERCE: Diagram = {
       {
         text: "Inventory is 600M rows and about 40GB, so it fits in memory and is never a capacity problem, only a contention one. A heat classifier that lives on the holds store measures each SKU's reserve rate over a rolling 10 seconds and routes it into one of three lanes, and that classifier is the design.",
         lights: ["holds", "lanes-group", "cold", "warm", "hot", "e7", "e8", "e9"],
-      },
+      }
     ],
     crux:
       "The last unit of a doorbuster is a single row absorbing about 8,000 reserve attempts a second. Optimistic retry livelocks, because retries stack on top of fresh arrivals and goodput falls as load rises. A row lock is correct but sustains roughly 330 decrements a second, so its wait queue grows by about 7,670 every second, pins connections and starves SKUs nobody is fighting over. The escape is to stop applying one concurrency mechanism to all 200M SKUs.",
     numbers: [
       "~1,600 page views per order",
       "~8k reserve attempts/s on one SKU row",
-      "600M inventory rows, ~40GB in memory",
+      "600M inventory rows, ~40GB in memory"
     ],
   },
   nodes: [
@@ -280,7 +280,7 @@ export const ECOMMERCE: Diagram = {
           "600M rows, ~40GB, fits in memory",
           "7.2M live holds at sale peak, ~600MB",
           "counter persisted every 50ms with its offset",
-          "10s rolling window, promote in 1 window, demote after ~5 min",
+          "10s rolling window, promote in 1 window, demote after ~5 min"
         ],
         breaks:
           "Millions of holds expire in the same minute after a sale, and a sweeper that falls behind makes real stock invisible for minutes. Expiry runs on native TTL with keyspace events, with the sweeper as a reconciling backstop only. The classifier is also reactive, so an unannounced viral spike runs in the cold lane for its first few seconds; it fails safely since a losing conditional update affects zero rows, but those are exactly the seconds you wanted to sell in.",
@@ -331,7 +331,7 @@ export const ECOMMERCE: Diagram = {
         breaks:
           "A provider throttling at 800 orders/s becomes a wall of 429s, so the step is bulkheaded with its own concurrency budget and bounded queue and spread across two providers with health-based routing.",
       },
-    },
+    }
   ],
   edges: [
     {
@@ -568,10 +568,10 @@ export const ECOMMERCE: Diagram = {
       detail: {
         what: "A display-only projection of the rules store pushed into edge KV: price, stock band and promo badge, keyed by (sku_id, market).",
         why: "It is a control path because it carries an opinion rather than a fact. The projection exists so a product page can show a number without a round trip to a rules engine that is busy being authoritative for checkout.",
-        numbers: ["15-second TTL", "0 exact counts published, only a stock band"],
+        numbers: ["15-second TTL"],
         breaks:
           "Publishing an exact remaining count here rather than a band turns the fragment into a scraping oracle for a drop and makes every stale read look like a lie.",
       },
-    },
+    }
   ],
 };

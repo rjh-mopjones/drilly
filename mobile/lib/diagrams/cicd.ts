@@ -33,14 +33,14 @@ export const CICD: Diagram = {
       {
         text: "The deploy side is a risk problem solved by going slowly and measuring. 1% of tasks take the new digest against a freshly restarted baseline on the old one, the analyser needs ~23k requests per arm to call an error-rate doubling, so the rung bakes for 10 minutes and the ladder climbs 5%, 25%, one cell, region by region to global at ~3h50m. A REGRESS verdict restores the pinned previous digest in ~45 seconds.",
         lights: ["rollout-ladder", "canary-analyser", "fleet", "deploy-controller", "e9", "e10", "e11", "e12"],
-      },
+      }
     ],
     crux:
       "Rolling back code is trivial because you still hold the artifact, pinned by digest. Rolling back state is not: a migration that dropped a column makes redeploying the previous binary a worse outage than the one you are recovering from. So schema changes expand before they contract, N and N-1 always coexist, and the behaviour change ships dark behind a flag.",
     numbers: [
       "87% cache hit rate: ~3,250 workers, not ~14,300",
       "~23k requests per arm, so a 10 minute bake at 100 req/s",
-      "rollback to the pinned previous digest in ~45s",
+      "rollback to the pinned previous digest in ~45s"
     ],
   },
   nodes: [
@@ -158,7 +158,7 @@ export const CICD: Diagram = {
           "~800ms snapshot resume",
           "~3,250 workers at peak, 4 vCPU each",
           "~10% (~330) kept pre-booted warm",
-          "15-min OIDC-exchanged creds, zero long-lived secrets on workers",
+          "15-min OIDC-exchanged creds, zero long-lived secrets on workers"
         ],
         breaks:
           "The warm pool is what the queue-wait SLO actually rests on: at a merge wave it depletes, and observed p95 wait becomes cold-boot time rather than queueing. And the credential broker's trust policy is the whole security boundary: a loose ref pattern hands scoped production access to any branch a contributor can create. Fork PRs get a credential-free pool entirely.",
@@ -333,7 +333,7 @@ export const CICD: Diagram = {
             "Changes that cannot be switched anyway: runtime upgrades, dependency bumps, schema. There the flag is a fiction and the ladder plus expand/contract is the only real protection.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -514,7 +514,7 @@ export const CICD: Diagram = {
       detail: {
         what: "The gate queries deploy records for that service and refuses the change unless the matching expand digest has finished its ladder globally.",
         why: "It is the one place the build plane depends on deploy-plane state, and it has to: whether a contract phase is safe is a question about what is actually running everywhere, not about what has been merged.",
-        numbers: ["0 contract migrations allowed before expand is global", "rename = 4 deploys over ~2 weeks"],
+        numbers: [ "rename = 4 deploys over ~2 weeks"],
         breaks:
           "If the deploy records are wrong or partially replicated the gate either blocks a safe change or, worse, waves through a contract phase while some region still runs the old reader.",
       },
@@ -545,6 +545,6 @@ export const CICD: Diagram = {
         breaks:
           "Clients must cache last-known values and default to off when the flag service is unreachable, or an outage in a read-mostly config store becomes a behaviour change everywhere at once.",
       },
-    },
+    }
   ],
 };

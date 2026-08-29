@@ -685,7 +685,6 @@ export const METRICS_MONITORING: Diagram = {
       detail: {
         what: "The compactor reading back the raw 2 hour blocks the ingesters uploaded, together with the redundant copy the second collector produced.",
         why: "Compaction reads from object storage rather than from the ingesters on purpose: the head must never be touched by a background job competing with 1M samples/s, and a block is immutable, so the merge can run whenever there is capacity. It reads only sealed blocks, never the head, and dedups on a (series, timestamp) key via the `cluster` and `replica` labels.",
-        numbers: [],
         breaks:
           "If the compactor falls behind, block count grows without bound and every long-range query pays for the fan-out across un-merged two-hour blocks.",
       },

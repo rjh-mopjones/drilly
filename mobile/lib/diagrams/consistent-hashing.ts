@@ -33,14 +33,14 @@ export const CONSISTENT_HASHING: Diagram = {
       {
         text: "The whole shape is one deliberate asymmetry: expensive on change, free on read. Two round trips of coordination per membership change buys a steady-state lookup with no coordination at all, and that only pays because membership changes ten times a day while lookups happen a million times a second per node.",
         lights: ["epoch-issuer", "ring-lib", "e9", "e11"],
-      },
+      }
     ],
     crux:
       "Membership is eventually consistent while ownership has to be single-valued. A node holding a stale ring will confidently serve from the wrong owner and nothing in the system notices, so the epoch stamped on every request is not bookkeeping, it is the only thing converting a correctness bug into a latency blip.",
     numbers: [
       "200 positions per server, spread 7.1%",
       "~100ns lookup over a 3.2MB ring",
-      "a join moves 1/(N+1), about 0.1% at N=1000",
+      "a join moves 1/(N+1), about 0.1% at N=1000"
     ],
   },
   nodes: [
@@ -130,7 +130,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "1000 servers x 200 positions = 200k entries",
           "16B per entry = 3.2MB, sits in L2 (1-4MB)",
-          "log2(200000) ~ 18 comparisons, ~100ns",
+          "log2(200000) ~ 18 comparisons, ~100ns"
         ],
         breaks:
           "The array is a cached view. A node holding a lower epoch than a request it receives must refresh before answering, or it serves from the previous owner and nothing downstream notices.",
@@ -206,7 +206,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "alert at 100x cluster-median QPS on one key",
           "per-key counters sampled over a ~5s window",
-          "1 epoch stamp per outbound request",
+          "1 epoch stamp per outbound request"
         ],
         breaks:
           "Detection lags a viral key's onset, because counters are sampled over a window of seconds, so the first few seconds of a hot key are simply served degraded.",
@@ -259,7 +259,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "30TB / 1000 nodes = 30GB per node",
           "200 arcs per node",
-          "1 epoch value carried on every inter-node RPC",
+          "1 epoch value carried on every inter-node RPC"
         ],
         breaks:
           "A node that never answers a request carrying a higher epoch than its own is correct but unavailable for that instant; one that does answer is available and wrong. The refresh-first rule picks the first, deliberately.",
@@ -287,7 +287,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "p99 spike lasts minutes on a cold node",
           "100% of buffered writes replay before promotion",
-          "flap alert above 2 down-up cycles/hour",
+          "flap alert above 2 down-up cycles/hour"
         ],
         breaks:
           "A returning node that skips this looks perfectly healthy on every liveness signal while serving reads from a cold cache with data stale by however long it was away.",
@@ -314,8 +314,7 @@ export const CONSISTENT_HASHING: Diagram = {
         why: "For the duration the arc has two plausible owners, and the ordering of the cutover is the only thing deciding whether a crash costs a partial copy or an entire range. Writes need exactly one destination; reads can afford two.",
         numbers: [
           "dual reads cover 1/(N+1), about 0.1% at N=1000",
-          "capped by 1 recipient-side concurrency limit, not bytes/stream",
-          "a distinct 2nd epoch bump marks the handoff complete",
+          "a distinct 2nd epoch bump marks the handoff complete"
         ],
         breaks:
           "Reverse the delete ordering and a crash at 90% transferred loses the arc outright; as built, the rollback is deleting a partial copy on a machine that is already dead.",
@@ -342,7 +341,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "~30GB total, ~150MB per donor",
           "200 donors x 50MB/s = 10GB/s inbound, 80Gbps",
-          "recipient NIC ~3GB/s is the real limit, ~10s transfer",
+          "recipient NIC ~3GB/s is the real limit, ~10s transfer"
         ],
         breaks:
           "Rebalance traffic competes with foreground serving on every donor at once, so a join degrades p99 across the cluster rather than on one pair of machines.",
@@ -395,7 +394,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "k=5 consecutive missed rounds at 1Hz = 5s floor",
           "~2 failures/day at 1000 nodes with ~500-day MTBF",
-          "~10 membership events/day in total",
+          "~10 membership events/day in total"
         ],
         breaks:
           "Tuned too tight it flaps, and the same arc migrates away and back; hysteresis before a returned node is promoted is what stops the oscillation.",
@@ -423,7 +422,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "3 random peers per second per node",
           "~1KB per round x 3 = 3KB/s per node",
-          "convergence ~10s at 1000 nodes",
+          "convergence ~10s at 1000 nodes"
         ],
         breaks:
           "Gossip delivers views out of order, so applying the most recent exchange rather than the highest epoch rolls ownership backwards and reintroduces the stale-owner bug from the inside.",
@@ -450,7 +449,7 @@ export const CONSISTENT_HASHING: Diagram = {
         numbers: [
           "~10 epoch increments/day",
           "two round trips of coordination per membership change",
-          "1 epoch value carried on every inter-node RPC",
+          "1 epoch value carried on every inter-node RPC"
         ],
         breaks:
           "Lose quorum and the epoch stops advancing. Steady-state lookups keep working from the last ring, but every topology change has to be refused until quorum returns.",
@@ -487,7 +486,7 @@ export const CONSISTENT_HASHING: Diagram = {
             "When you need per-change rather than per-hour granularity, where an append-only log of epoch deltas is the right structure and hourly snapshots are the wrong one.",
         },
       },
-    },
+    }
   ],
   edges: [
     {
@@ -718,6 +717,6 @@ export const CONSISTENT_HASHING: Diagram = {
         breaks:
           "Promote on a timer instead and a quiet arc gets promoted cold, which is the same p99 spike the warming state exists to avoid.",
       },
-    },
+    }
   ],
 };

@@ -29,7 +29,7 @@ export const WEB_CRAWLER: Diagram = {
       {
         text: "Storage closes the loop safely. The acknowledgement must follow the write, never the fetch, or a crash leaves a URL marked crawled with no page behind it and nothing downstream will ever notice.",
         lights: ["p-fingerprint", "object-store", "back-queues", "e20", "e22"],
-      },
+      }
     ],
     crux:
       "Politeness and throughput pull in opposite directions. You want maximum parallelism globally and strict serialisation per host, and the only way to have both is to make the host the unit of scheduling rather than the URL.",
@@ -37,7 +37,7 @@ export const WEB_CRAWLER: Diagram = {
       "~300 links extracted per page",
       "12GB Bloom vs ~240GB exact index",
       "one request per second per domain",
-      "50ms per uncached DNS lookup",
+      "50ms per uncached DNS lookup"
     ],
   },
   nodes: [
@@ -55,7 +55,7 @@ export const WEB_CRAWLER: Diagram = {
         numbers: [
           "~300 links extracted per page",
           "120k URL messages/s fleet-wide at ~200B each",
-          "~24MB/s, against ~40MB/s of page bytes",
+          "~24MB/s, against ~40MB/s of page bytes"
         ],
         breaks:
           "Partition skew: one enormous domain pins a single partition, so that shard falls behind while the rest idle.",
@@ -81,7 +81,7 @@ export const WEB_CRAWLER: Diagram = {
         numbers: [
           "~256 shards, one bucket per hash(registrable_domain)",
           "~10^8 registrable domains in rotation",
-          "~200GB of politeness + robots state fleet-wide",
+          "~200GB of politeness + robots state fleet-wide"
         ],
         breaks:
           "Mega-domains. Wikipedia, YouTube and GitHub each hold hundreds of millions of URLs, so hashing by domain drops all of it on one shard. A daily rebalance sub-shards them by hash(domain + path_prefix), and moving a domain has to move its next-fetch timestamps with it or the new owner crawls too fast.",
@@ -110,7 +110,7 @@ export const WEB_CRAWLER: Diagram = {
         numbers: [
           "rejects over 90% of discovered links",
           "~1% Bloom false-positive rate",
-          "under 10% of known URLs are ever fetched",
+          "under 10% of known URLs are ever fetched"
         ],
         breaks:
           "This is one deployable unit, so a slow robots lookup stalls dedup behind it. The stages are ordered, not independently scaled; if one needs its own fleet the split is a real refactor.",
@@ -185,7 +185,7 @@ export const WEB_CRAWLER: Diagram = {
         why: "A spider trap produces legitimately distinct URLs, so neither URL dedup nor content dedup stops the enqueueing — only the storing. The bounds that work are structural and they have to be applied before the URL takes queue space, which is why the guard lives here rather than downstream.",
         numbers: [
           "novelty rate near 100% is the trap signature",
-          "thresholds learned per domain across ~10^8 domains, never 1 global setting",
+          "thresholds learned per domain across ~10^8 domains, never 1 global setting"
         ],
         breaks:
           "This fights the discovery budget directly: an aggressive novelty ceiling also suppresses genuinely prolific sites, so the ceiling has to be learned per domain rather than set once.",
@@ -262,7 +262,7 @@ export const WEB_CRAWLER: Diagram = {
         why: "robots.txt is a per-host round trip you must not repeat per URL, and the same record carries the crawl delay the back queues schedule against and the retry state that has to belong to the host rather than the URL. Keeping them in one place is what makes a backoff decision one decision per host instead of a race between workers.",
         numbers: [
           "~2KB per domain × ~10^8 domains ≈ 200GB",
-          "hot ~10^7 domains ≈ 50GB in memory",
+          "hot ~10^7 domains ≈ 50GB in memory"
         ],
         breaks:
           "A stale cache keeps you crawling paths a site has since disallowed, which is the specific failure that gets a crawler blocked.",
@@ -316,7 +316,7 @@ export const WEB_CRAWLER: Diagram = {
         numbers: [
           "B ≈ 3 × fetcher threads",
           "one request per second per domain",
-          "60s lease against a 10s fetch timeout",
+          "60s lease against a 10s fetch timeout"
         ],
         breaks:
           "Priority is approximate by construction. A top-band URL behind 40,000 queued URLs on its own host at 1 req/s waits over eleven hours whatever its score says; the frontier orders host admission, not URLs.",
@@ -344,7 +344,7 @@ export const WEB_CRAWLER: Diagram = {
         numbers: [
           "thousands of concurrent sockets per node",
           "10s per-fetch timeout, 60s lease",
-          "~400 pages/s steady, ~2k/s peak",
+          "~400 pages/s steady, ~2k/s peak"
         ],
         breaks:
           "A slow domain answering in 30s ties up a worker slot for 30s and starves fast domains. The per-fetch timeout and a per-domain in-flight quota of 1 are what bound it.",
@@ -508,7 +508,7 @@ export const WEB_CRAWLER: Diagram = {
         numbers: [
           "1-3 CPU-seconds and 2-5MB per render",
           "~1ms and 100KB for a plain fetch",
-          "rendering everything at 400 pages/s ≈ 800 cores",
+          "rendering everything at 400 pages/s ≈ 800 cores"
         ],
         breaks:
           "Escalating too eagerly turns an 800-core bill into the crawl's dominant cost. The verdict is cached per domain so the second pass is not paid twice.",
@@ -567,7 +567,7 @@ export const WEB_CRAWLER: Diagram = {
             "Below roughly 100M URLs. Postgres is simpler to operate and gives you real queries for freshness analysis, which is worth more than headroom you are not using yet.",
         },
       },
-    },
+    }
   ],
 
   edges: [
@@ -876,10 +876,10 @@ export const WEB_CRAWLER: Diagram = {
       detail: {
         what: "The acknowledgement back to the frontier, sent strictly after the storage write completes.",
         why: "This edge is the whole crash-safety story and it is drawn because its ordering is the design. Ack after the write means a crash anywhere before it simply lets the lease expire and the URL become visible again; ack after the fetch means a crash leaves a URL marked crawled with no page behind it.",
-        numbers: ["ack sent 1 step after the write, never before", "60s lease window"],
+        numbers: [ "60s lease window"],
         breaks:
           "Nothing downstream ever notices an ack-before-write bug, because the seen index agrees the work is finished. The only detection is a sampled audit of the archive against the seen set.",
       },
-    },
+    }
   ],
 };
