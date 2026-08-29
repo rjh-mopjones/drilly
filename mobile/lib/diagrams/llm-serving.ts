@@ -216,8 +216,8 @@ export const LLM_SERVING: Diagram = {
       label: "Preemption",
       sub: "newest low-pri, recompute",
       kind: "service",
-      col: 2,
-      row: 4,
+      col: 3,
+      row: 3,
       detail: {
         what: "The safety valve for optimistic admission: when free blocks hit zero mid-step, evict a victim and recompute its prefill when it is readmitted.",
         why: "Output length is unknown at admission, so the scheduler commits memory for a job whose size it learns only when the job ends. Reserving max_tokens is safe and catastrophic, so the pool runs hot and preemption becomes a routine control path rather than an error path.",
@@ -379,6 +379,7 @@ export const LLM_SERVING: Diagram = {
       id: "e7",
       from: "registry",
       to: "prefill",
+      toSide: "bottom",
       tier: "control",
       label: "load 140GB shards",
       detail: {
@@ -508,6 +509,7 @@ export const LLM_SERVING: Diagram = {
       id: "e16",
       from: "preempt",
       to: "scheduler",
+      toSide: "top",
       tier: "control",
       label: "readmit, recompute 43ms",
       detail: {

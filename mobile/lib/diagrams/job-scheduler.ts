@@ -113,8 +113,8 @@ export const JOB_SCHEDULER: Diagram = {
       label: "Coordination lease",
       sub: "15-30s TTL, standby takeover",
       kind: "database",
-      col: 1,
-      row: 1,
+      col: 2,
+      row: 0,
       detail: {
         what: "The lease deciding which scheduler replica ticks a shard, with standbys that take over inside one tick interval.",
         why: "It exists to stop N schedulers doing the same work, not to make the work correct. The unique constraint on the calendar tuple already guarantees one run record whatever the leadership situation, so nothing else in the design is allowed to depend on this lease being right.",
@@ -137,7 +137,7 @@ export const JOB_SCHEDULER: Diagram = {
       sub: "unique on (job_id, scheduled_at)",
       kind: "database",
       col: 1,
-      row: 2,
+      row: 1,
       detail: {
         what: "One row per attempt: run_id, status, attempt, start, end, worker and error snippet, with run identity unique on (job_id, scheduled_at).",
         why: "That tuple is the entire exactly-once story for the decision. scheduled_at is the occurrence computed from the cron expression, never now() at the moment of firing, so identity survives a retried tick, a leader change, a clock 400ms fast and an envelope redelivered four minutes later.",
@@ -160,7 +160,7 @@ export const JOB_SCHEDULER: Diagram = {
       sub: "partitioned log, 24h retention",
       kind: "queue",
       col: 0,
-      row: 3,
+      row: 2,
       detail: {
         what: "The hand-off between scheduler and workers, carrying a ~1KB envelope per run record.",
         why: "It decouples scheduling throughput from execution throughput and absorbs the top-of-hour burst. If every worker is down at 02:00 the run records sit here and drain when workers recover, rather than the fire being lost.",
@@ -182,8 +182,8 @@ export const JOB_SCHEDULER: Diagram = {
       label: "Publish sweeper",
       sub: "QUEUED > 60s, republish",
       kind: "service",
-      col: 1,
-      row: 3,
+      col: 2,
+      row: 1,
       detail: {
         what: "A scan for run rows still in QUEUED after 60 seconds with no recorded publish receipt, which it republishes to the queue.",
         why: "Choosing a broker introduced a second durable system that can disagree with the first, and this is the component that reconciles them. It is the honest cost of that decision, drawn rather than hidden.",
@@ -205,8 +205,8 @@ export const JOB_SCHEDULER: Diagram = {
       label: "Worker pool",
       sub: "pull, lease, execute, heartbeat",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 1,
+      row: 2,
       parent: "execution",
       detail: {
         what: "Stateless processes that pull a run record, take the lease, execute, heartbeat, and compare-and-set a terminal status.",
@@ -229,8 +229,8 @@ export const JOB_SCHEDULER: Diagram = {
       label: "Lease store",
       sub: "Redis SETNX, 90s TTL",
       kind: "database",
-      col: 1,
-      row: 4,
+      col: 3,
+      row: 2,
       parent: "execution",
       detail: {
         what: "lease:{job_id}:{scheduled_at} mapped to a worker_id with a TTL, renewed by a heartbeat every 30 seconds.",
@@ -253,8 +253,8 @@ export const JOB_SCHEDULER: Diagram = {
       label: "External systems",
       sub: "warehouse, object store, APIs",
       kind: "external",
-      col: 1,
-      row: 5,
+      col: 2,
+      row: 2,
       parent: "execution",
       detail: {
         what: "Whatever the job actually mutates: a data warehouse, object storage, an email API, a counterparty endpoint.",
@@ -269,8 +269,8 @@ export const JOB_SCHEDULER: Diagram = {
       label: "Dead letter + alerting",
       sub: "bounded retries, page once",
       kind: "queue",
-      col: 0,
-      row: 6,
+      col: 1,
+      row: 3,
       detail: {
         what: "Where a run lands once its retry budget is exhausted, and the one place on-call is paged from.",
         why: "Retries have to be bounded or a wedged job blocks its entire DAG. Dependents are marked SKIPPED with a parent_failed reason rather than queued indefinitely, so a broken parent produces one alert instead of one per dependent.",
@@ -292,8 +292,8 @@ export const JOB_SCHEDULER: Diagram = {
       label: "Missing-run watchdog",
       sub: "declared cadence, grace window",
       kind: "service",
-      col: 1,
-      row: 6,
+      col: 3,
+      row: 0,
       detail: {
         what: "A separate check that every job with a declared expected cadence actually produced a run inside its grace window.",
         why: "It is the only thing in the design that can detect absence. Every other signal is derived from work that happened, and a run that never fired is work that did not, so it has to be inferred from an independent model of what should have occurred.",
@@ -317,8 +317,6 @@ export const JOB_SCHEDULER: Diagram = {
       from: "registration",
       to: "jobs-db",
       label: "definition + stable jitter",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A new or updated definition written to the jobs store, with its first next_run_at and its jitter offset already computed.",
         why: "The offset is fixed at registration rather than at fire time so it is stable: the same job always lands at the same place in the window, which keeps the schedule predictable across restarts and leader changes.",
@@ -332,8 +330,6 @@ export const JOB_SCHEDULER: Diagram = {
       from: "scheduler",
       to: "jobs-db",
       label: "due scan + tick txn",
-      fromSide: "right",
-      toSide: "bottom",
       detail: {
         what: "The tick: read due rows, then per job one transaction that inserts the run row ON CONFLICT DO NOTHING and advances next_run_at guarded on its previous value.",
         why: "Both writes or neither. The guard on the old value is what makes two concurrent leaders safe: the loser's update matches zero rows and its insert conflicts, so it knows it did nothing rather than assuming it won.",
@@ -348,8 +344,6 @@ export const JOB_SCHEDULER: Diagram = {
       to: "coordination",
       label: "leader lease, 15-30s TTL",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Acquiring and renewing the per-shard leadership lease, and watching the key so a standby takes over promptly.",
         why: "Drawn as a control path because nothing correctness-bearing travels on it. Its only job is keeping the number of ticking schedulers at one, which is a cost decision rather than a safety one.",
@@ -363,8 +357,6 @@ export const JOB_SCHEDULER: Diagram = {
       from: "scheduler",
       to: "runs-db",
       label: "run row, ON CONFLICT",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The materialised run record: (job_id, scheduled_at, run_id, attempt=1, status=QUEUED), under a unique constraint.",
         why: "This row is the artifact everything else attaches to. Once it exists, every component downstream can ask whether two things are the same fire and get the same answer, which is what makes retries, leases and audit tractable.",
@@ -406,8 +398,6 @@ export const JOB_SCHEDULER: Diagram = {
       from: "workers",
       to: "lease",
       label: "SETNX + 30s heartbeat",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "An atomic set-if-not-exists on lease:{job_id}:{scheduled_at} with a TTL, then a heartbeat every 30 seconds to extend it.",
         why: "One atomic claim per occurrence keeps two workers off the same run in the common case, and the TTL is what makes a dead worker's run reclaimable rather than stuck behind a process that will never return.",
@@ -422,8 +412,6 @@ export const JOB_SCHEDULER: Diagram = {
       to: "target",
       label: "side effect + idem key",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The actual work: writing to the warehouse, dropping a file, calling an API, carrying an idempotency key derived from (job_id, scheduled_at).",
         why: "This is the arrow that makes exactly-once impossible, and the key is the only defence. Keying on the tuple rather than the attempt is what makes a stalled worker and its replacement collide in the ledger instead of both taking effect.",
@@ -437,8 +425,6 @@ export const JOB_SCHEDULER: Diagram = {
       from: "workers",
       to: "runs-db",
       label: "CAS terminal status",
-      fromSide: "right",
-      toSide: "bottom",
       detail: {
         what: "The terminal status written as a compare-and-set on (run_id, attempt) rather than a blind update.",
         why: "It keeps history coherent when two workers both believe they own the run: the stalled one's late SUCCEEDED is rejected. The compare-and-set protects the record, and only the job's own ledger protects reality.",
@@ -453,8 +439,6 @@ export const JOB_SCHEDULER: Diagram = {
       to: "sweeper",
       label: "QUEUED > 60s",
       dashed: true,
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "A scan for run rows still in QUEUED after 60 seconds with no recorded publish receipt.",
         why: "It reconciles the two durable systems the queue introduced. Nothing else in the design can notice that a committed decision never became a message, because the run row on its own looks perfectly healthy.",
@@ -469,8 +453,6 @@ export const JOB_SCHEDULER: Diagram = {
       to: "queue",
       label: "republish lost runs",
       dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Republishing the envelope for a committed run that never reached the queue.",
         why: "It makes delivery at-least-once by construction rather than by hope: a broker outage stops nothing permanently, because the rows are already committed and get republished when the broker returns.",
@@ -484,8 +466,6 @@ export const JOB_SCHEDULER: Diagram = {
       from: "workers",
       to: "queue",
       label: "retry, attempt+1",
-      fromSide: "left",
-      toSide: "left",
       offset: 90,
       detail: {
         what: "A failed run going back onto the queue with attempt+1 and an exponential backoff delay.",
@@ -500,8 +480,6 @@ export const JOB_SCHEDULER: Diagram = {
       from: "workers",
       to: "dlq",
       label: "retries exhausted",
-      fromSide: "bottom",
-      toSide: "top",
       detail: {
         what: "A run past its retry budget routed to the dead letter, with dependent tasks marked SKIPPED and a parent_failed reason.",
         why: "One alert per exhausted job rather than one per attempt, and dependents fail fast instead of sitting queued behind something that is never going to succeed.",
@@ -516,8 +494,6 @@ export const JOB_SCHEDULER: Diagram = {
       to: "watchdog",
       label: "expected cadence check",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 90,
       detail: {
         what: "The watchdog comparing the runs that exist against each job's declared expected cadence and grace window.",

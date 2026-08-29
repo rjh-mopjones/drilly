@@ -1119,7 +1119,7 @@ export function placeLabels(
         const y = p[1] + (q[1] - p[1]) * t;
         // On the line, or one label-height off it: a short run between two
         // boxes has no room on the line, but plenty just above or below.
-        for (const off of [0, -(LABEL_H + 3), LABEL_H + 3]) {
+        for (const off of [0, -(LABEL_H + 3), LABEL_H + 3, -(BOX_H / 2 + LABEL_H / 2 + 6), BOX_H / 2 + LABEL_H / 2 + 6]) {
           cands.push({ p: horiz ? [x, y + off] : [x + off * 1.2, y], along: acc + len * t, seg: si, off });
         }
       }
@@ -1143,7 +1143,7 @@ export function placeLabels(
       const runLen = Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]);
       if (horiz && runLen < w && cand.off === 0) c += (w - runLen) * 0.5;
       // off the line is fine but on the line is the default
-      if (cand.off !== 0) c += 12;
+      if (cand.off !== 0) c += 12 + Math.abs(cand.off) * 0.2;
       // a label on a vertical run reads worse than beside it
       if (!horiz && cand.off === 0) c += 6;
       // prefer the middle of the route

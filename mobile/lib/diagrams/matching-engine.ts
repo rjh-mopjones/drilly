@@ -58,8 +58,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Event dispatch",
       sub: "new / cancel / replace, price to tick",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       detail: {
         what: "The fork at the top of the worker loop: convert the price to an integer tick, then send a new order to the matching loop and a cancel straight to the slot table.",
         why: "The two paths have almost nothing in common. A new order arrives carrying its price so it knows exactly which level it belongs to; a cancel arrives carrying only an id and has to find a node that could be anywhere in any level. Separating them here is what lets the cancel path be one load rather than a search.",
@@ -80,8 +80,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Matching loop",
       sub: "while crosses: fill min(qty)",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 1,
+      row: 1,
       detail: {
         what: "The inner loop: walk the opposite side from the best price, fill min(incoming, resting) against the oldest order at each level, and stop when the incoming price no longer crosses.",
         why: "This is the part everybody can write, and it is deliberately trivial: a subtraction and a comparison. The arithmetic is trivial precisely because the layout did the work, so the loop never searches, never compares prices in a tree, and never takes a lock. The trade always prints at the resting order's price, which is what makes an aggressive limit a ceiling rather than a bid.",
@@ -103,7 +103,7 @@ export const MATCHING_ENGINE: Diagram = {
       sub: "checked before the fill is emitted",
       kind: "service",
       col: 0,
-      row: 4,
+      row: 1,
       detail: {
         what: "A participant comparison between the incoming order and the specific resting order about to trade, applying cancel-newest, cancel-resting or decrement-both.",
         why: "It has to sit inside the inner loop because it compares two concrete orders, not two accounts in the abstract. Structurally the interesting part is what the policy does: it removes a resting order from the middle of a price level, which is exactly the operation the intrusive list already makes free.",
@@ -124,8 +124,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Remainder handling",
       sub: "LIMIT rests, MARKET / IOC / FOK cancels",
       kind: "service",
-      col: 0,
-      row: 5,
+      col: 1,
+      row: 2,
       detail: {
         what: "What happens to unfilled quantity when the loop stops: a limit DAY remainder rests and becomes new liquidity, everything else is cancelled.",
         why: "This is where the order types live, and they bend the loop rather than replace it. Resting is the step that closes the cycle, because today's remainder is the resting liquidity tomorrow's aggressive order fills against, which is also why the book is self-bounding rather than an unbounded queue.",
@@ -147,7 +147,7 @@ export const MATCHING_ENGINE: Diagram = {
       sub: "sequenced reports + latest-wins ticks",
       kind: "queue",
       col: 0,
-      row: 6,
+      row: 2,
       detail: {
         what: "The two output streams: sequenced execution reports to both parties, and top-of-book plus incremental updates to market data subscribers.",
         why: "They are drawn as one box leaving the book but they have opposite consistency needs. An execution report is money and must be gap-detectable and exactly ordered; a market-data tick is a display artefact where only the newest snapshot matters and an intermediate one can be dropped with no loss.",
@@ -168,8 +168,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Order id slot table",
       sub: "orders[internal_id] -> node",
       kind: "database",
-      col: 1,
-      row: 1,
+      col: 2,
+      row: 0,
       parent: "book-group",
       detail: {
         what: "A flat array sized to the per-session order cap, mapping the dense internal id the gateway assigned at admission straight to the order's node.",
@@ -191,8 +191,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Best-price pointer",
       sub: "one per side, nudges inward",
       kind: "database",
-      col: 1,
-      row: 2,
+      col: 3,
+      row: 0,
       parent: "book-group",
       detail: {
         what: "A single index per side holding the current best bid and best ask, advanced by one tick at a time when a level empties.",
@@ -214,8 +214,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Price levels, indexed by tick",
       sub: "levels[(price - band_low) / tick]",
       kind: "database",
-      col: 1,
-      row: 3,
+      col: 3,
+      row: 1,
       parent: "book-group",
       detail: {
         what: "A flat array of level headers, one per tick in the instrument's band, each header being (price_tick, total_qty, head, tail, count) padded to exactly 64 bytes.",
@@ -237,8 +237,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Intrusive FIFO per level",
       sub: "prev/next on the order record",
       kind: "database",
-      col: 1,
-      row: 4,
+      col: 2,
+      row: 1,
       parent: "book-group",
       detail: {
         what: "The queue of resting orders at one price, as a doubly linked list whose prev and next pointers live on the order record itself rather than in container nodes.",
@@ -260,8 +260,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Tree levels for the tail",
       sub: "TreeMap or skip list, per instrument",
       kind: "database",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 2,
       detail: {
         what: "The other implementation of the same interface: a sorted map keyed by price allocating only levels that actually hold orders, chosen per instrument at listing time.",
         why: "It is drawn outside the dense book because it is not a fallback you hope never fires, it is what most of the venue's 10,000 instruments actually run. The array buys the last few microseconds for symbols where microseconds are worth paying for; everything else gets correctness by construction and costs nothing when nobody trades it.",
@@ -282,8 +282,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Invariants and shadow model",
       sub: "asserted after every apply",
       kind: "service",
-      col: 1,
-      row: 6,
+      col: 2,
+      row: 2,
       detail: {
         what: "Two assertions run inline after each applied event, that the book is not crossed and that quantity is conserved across the fill, plus a slow reference matcher run in shadow on the same input.",
         why: "The failures this design can produce are not crashes, they are quietly wrong trades, and a wrong trade surfaces weeks later as a regulatory incident rather than an alert. The assertions are a handful of comparisons against a 5 to 20 microsecond budget, which makes them cheap enough to leave on in production.",
@@ -321,8 +321,6 @@ export const MATCHING_ENGINE: Diagram = {
       to: "slot-table",
       label: "cancel: ~90% of events",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A cancel or replace carrying only an order id, resolved to its node by a single array subscript.",
         why: "This is the hot path, and drawing it as the wide arrow is the point of the whole diagram. Cancels outnumber fills 10 to 20 to one, so the design spends its structure here rather than on the matching loop everybody focuses on.",
@@ -335,10 +333,8 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e3",
       from: "slot-table",
       to: "fifo",
+      tier: "data",
       label: "O(1) unlink from middle",
-      animated: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 70,
       detail: {
         what: "The node removing itself from its price level's queue using the prev and next pointers it carries.",
@@ -368,8 +364,6 @@ export const MATCHING_ENGINE: Diagram = {
       to: "best-ptr",
       label: "best opposite price",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The loop reading where the opposite side currently starts, to test whether the incoming order crosses at all.",
         why: "This is the first read of every match and the reason the pointer exists. crosses(buy, ask) is buy.price >= ask_price, one comparison against a value already in a register, so an order that does not cross costs almost nothing before it goes off to rest.",
@@ -411,8 +405,6 @@ export const MATCHING_ENGINE: Diagram = {
       from: "fifo",
       to: "stp",
       label: "incoming vs resting head",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The two concrete orders about to trade being handed to the self-trade check.",
         why: "The check needs both specific orders, not just their accounts, which is why it cannot be hoisted out of the loop or pushed up to the gateway. If it fires, the resting order is removed from the middle of the level, which the intrusive list already makes O(1).",
@@ -454,8 +446,6 @@ export const MATCHING_ENGINE: Diagram = {
       to: "fifo",
       label: "rest: append at tail",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A limit DAY remainder being appended to the tail of its own side's level, and registered in the slot table so it can later be cancelled.",
         why: "This arrow is what makes the system a book rather than a filter: the remainder becomes the liquidity the next aggressive order fills against. Appending at the tail rather than anywhere else is the whole of time priority for that order's life.",
@@ -496,8 +486,6 @@ export const MATCHING_ENGINE: Diagram = {
       from: "fifo",
       to: "outputs",
       label: "ack or TOO_LATE",
-      fromSide: "bottom",
-      toSide: "right",
       detail: {
         what: "The cancel path's own output: CANCELLED if the order was still resting, TOO_LATE if it had already filled, UNKNOWN if the id was never live.",
         why: "Nine events in ten end here rather than in a fill, so this is the reply the venue actually spends its time producing. The three-way answer matters to participants because TOO_LATE means they now hold a position they were trying to avoid.",

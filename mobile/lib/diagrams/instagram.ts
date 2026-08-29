@@ -28,18 +28,6 @@ export const INSTAGRAM: Diagram = {
   },
   nodes: [
     {
-      id: "byte-path",
-      label: "The byte path",
-      kind: "zone",
-      detail: {
-        what: "Everything a pixel touches: the raw landing bucket, the notification queue, the transcode pool, the variant store and the CDN in front of them.",
-        why: "Deciding who should see a post is a graph problem measured in microseconds per edge, and delivering the post is a bandwidth problem measured in gigabits per second. They share nothing but an identifier, so they get separate infrastructure with separate scaling curves.",
-        numbers: ["~72Gbps origin egress", "API fleet sized for ~1KB rows"],
-        breaks:
-          "The seam between the two halves: a post row exists before its bytes are servable, so every surface has to honour the status gate or followers get timeline entries pointing at 404s.",
-      },
-    },
-    {
       id: "client-upload",
       label: "Client · upload",
       sub: "4MB HEIC from the camera roll",
@@ -84,7 +72,6 @@ export const INSTAGRAM: Diagram = {
       kind: "database",
       col: 0,
       row: 1,
-      parent: "byte-path",
       detail: {
         what: "Where the pre-signed PUT lands. Holds every uploaded original and is the only source a re-encode is ever run from.",
         why: "The codec cycle turns over roughly every five years, JPEG through WebP through AVIF, and every turn is a full re-encode of the corpus. Re-encoding from an already lossy derivative compounds generational loss, visibly by the second hop, so the original is kept even though most are never read again.",
@@ -106,9 +93,8 @@ export const INSTAGRAM: Diagram = {
       label: "ObjectCreated queue",
       sub: "durable, at-least-once",
       kind: "queue",
-      col: 0,
-      row: 2,
-      parent: "byte-path",
+      col: 1,
+      row: 1,
       detail: {
         what: "The notification the object store raises when a raw upload lands, consumed by the transcode pool.",
         why: "It is the buffer that lets upload rate and transcode capacity be different numbers. A global event driving 10x the normal upload rate does not fail uploads, it grows a queue, and the queue depth is the signal that scales the pool.",
@@ -130,9 +116,8 @@ export const INSTAGRAM: Diagram = {
       label: "Transcode workers",
       sub: "4 rungs, AVIF/WebP/JPEG",
       kind: "service",
-      col: 0,
-      row: 3,
-      parent: "byte-path",
+      col: 2,
+      row: 1,
       detail: {
         what: "The autoscaling pool that decodes the source once and encodes the fixed ladder in parallel, then flips the post row to ready.",
         why: "This is where the whole design spends its compute, and it spends it off the read path deliberately. Perceptual hashing against known-bad fingerprints runs here too at ~20ms, and the ML classifier at ~200ms, both cheap against a 5 second pipeline.",
@@ -154,9 +139,8 @@ export const INSTAGRAM: Diagram = {
       label: "Variant store",
       sub: "deterministic keys, per-rung tiering",
       kind: "database",
-      col: 0,
-      row: 5,
-      parent: "byte-path",
+      col: 3,
+      row: 1,
       detail: {
         what: "The derivative set, written at deterministic keys of the form {post_id}/{rung}.{codec} so a duplicate delivery overwrites identical bytes.",
         why: "Keying per rung rather than per post is what lets a rung move storage tier or be re-encoded without invalidating its siblings. Thumbnail and small stay hot forever because profile grids read them forever; medium tiers to warm at 90 days and full resolution to archive at 30.",
@@ -178,9 +162,8 @@ export const INSTAGRAM: Diagram = {
       label: "Multi-tier CDN",
       sub: "edge, regional, then origin",
       kind: "database",
-      col: 0,
-      row: 6,
-      parent: "byte-path",
+      col: 3,
+      row: 2,
       detail: {
         what: "City-level edges backstopped by regional nodes, with the variant store as origin of last resort. Rising posts get their small and medium rungs pre-warmed to regional caches.",
         why: "The marginal viewer has to be free, otherwise a post with ten million viewers costs ten million times a post with ten. Immutable per-rung URLs with a one year max-age are what make that true, because there is nothing to revalidate.",
@@ -202,8 +185,8 @@ export const INSTAGRAM: Diagram = {
       label: "Post metadata",
       sub: "wide-column, partition by user",
       kind: "database",
-      col: 1,
-      row: 1,
+      col: 2,
+      row: 0,
       detail: {
         what: "The post row: caption, location, hashtags, the media URL set per rung, and the status field that gates visibility.",
         why: "Status is load-bearing because publishing is asynchronous. The row exists before the bytes are servable, so every surface filters on ready, and the transition is a compare-and-set so the second worker to finish is a no-op.",
@@ -225,8 +208,8 @@ export const INSTAGRAM: Diagram = {
       label: "Stories",
       sub: "native 24h row TTL",
       kind: "database",
-      col: 1,
-      row: 2,
+      col: 3,
+      row: 0,
       detail: {
         what: "A separate collection carrying the same media pipeline output, with a native 24 hour row TTL so expiry is a property of the store rather than a job.",
         why: "Ephemerality has to be enforced by something that cannot be forgotten. A sweeper job over 30M stories/day is one outage away from stories outliving their promise, whereas compaction reclaiming expired rows has no operator in the loop.",
@@ -249,7 +232,7 @@ export const INSTAGRAM: Diagram = {
       sub: "hybrid push/pull, see #8",
       kind: "service",
       col: 1,
-      row: 4,
+      row: 2,
       detail: {
         what: "The feed half, assumed rather than derived: push post ids into per-follower timeline caches, pull for high-follower accounts, merge at read.",
         why: "It is here because publishing is not finished until followers can see the post, and it is one box because question 8 owns the push-versus-pull derivation in full. What matters at this scale is that it moves 8-byte ids and never touches a pixel.",
@@ -271,8 +254,8 @@ export const INSTAGRAM: Diagram = {
       label: "Feed hydrate + counters",
       sub: "60s card cache, 100 like shards",
       kind: "service",
-      col: 1,
-      row: 6,
+      col: 2,
+      row: 2,
       detail: {
         what: "Turns post ids into cards: metadata, the URL set per rung with dimensions, and like counts summed from 100 shard keys.",
         why: "This is the correctness boundary where deletes, blocks and moderation tombstones are enforced against the source of truth, which is what lets timeline caches be treated as disposable derived state.",
@@ -294,8 +277,8 @@ export const INSTAGRAM: Diagram = {
       label: "Client · feed",
       sub: "picks the rung by viewport",
       kind: "external",
-      col: 0,
-      row: 7,
+      col: 2,
+      row: 3,
       detail: {
         what: "The viewing app. It receives JSON containing URLs and dimensions, then fetches the rung that suits its screen and its connection.",
         why: "Putting selection on the client is what turns a bandwidth problem into an addressing problem. A feed render stays at a few kilobytes of JSON while the bytes arrive from an edge cache in the viewer's city.",
@@ -320,8 +303,6 @@ export const INSTAGRAM: Diagram = {
       to: "api",
       label: "ask for a pre-signed URL",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "A metadata request returning a post_id and a scoped, time-limited PUT URL of a few hundred bytes.",
         why: "It is the only call the uploading client makes to the application tier. Everything after it is between the phone and object storage, which is what decouples API fleet size from media volume.",
@@ -389,8 +370,6 @@ export const INSTAGRAM: Diagram = {
       from: "workers",
       to: "raw-store",
       label: "fetch source bytes",
-      fromSide: "left",
-      toSide: "left",
       offset: 60,
       detail: {
         what: "The worker pulling the original out of storage to decode it once before encoding every rung.",
@@ -420,8 +399,6 @@ export const INSTAGRAM: Diagram = {
       to: "posts-db",
       label: "CAS to status=ready",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The compare-and-set that flips the row from processing to ready once every required rung exists.",
         why: "This is the publish gate. It is the only moment the post becomes visible to feeds, grids and search, and making it a CAS is what makes a duplicate worker finish as a no-op.",
@@ -487,8 +464,6 @@ export const INSTAGRAM: Diagram = {
       to: "posts-db",
       label: "hydrated card, 60s TTL",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 80,
       detail: {
         what: "Batch reads of post rows to build the cards, cached assembled for 60 seconds at the API tier.",
@@ -504,8 +479,6 @@ export const INSTAGRAM: Diagram = {
       to: "client-feed",
       label: "URLs + dimensions, ~4KB",
       animated: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The feed response: JSON carrying every rung's URL plus dimensions and counts, and no image data at all.",
         why: "Twenty posts at 300KB inlined is a 6MB response that cannot be cached per post, cannot be range-requested, cannot be progressively rendered, and puts 72Gbps of media through a fleet sized for JSON.",
@@ -520,8 +493,6 @@ export const INSTAGRAM: Diagram = {
       to: "stories",
       label: "story rows, 24h TTL",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 60,
       detail: {
         what: "A story written into its own collection rather than the posts table, carrying a native 24 hour row TTL.",
@@ -537,8 +508,6 @@ export const INSTAGRAM: Diagram = {
       to: "variant-store",
       label: "25h object lifecycle",
       dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The pairing between the 24 hour row TTL and the object store lifecycle rule that deletes the story's media at 25 hours.",
         why: "The hour of grace is deliberate: the row must never outlive its bytes, because a story row pointing at deleted media is a broken render while an orphaned object is merely a cost.",
