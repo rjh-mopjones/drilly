@@ -653,7 +653,8 @@ export default function ArchDiagram({
         elementsSelectable
       >
         <Background variant={BackgroundVariant.Dots} gap={22} size={1} color={palette.border} />
-        <Controls showInteractive={false} />
+        {/* Phones pinch; the +/- chrome and the hint only cover the picture there. */}
+        {narrow ? null : <Controls showInteractive={false} />}
       </ReactFlow>
 
       <button
@@ -699,8 +700,8 @@ export default function ArchDiagram({
           side="right"
           onClose={() => setSel(null)}
         />
-      ) : (
-        <Hint palette={palette} narrow={narrow} />
+      ) : narrow ? null : (
+        <Hint palette={palette} />
       )}
     </div>
   );
@@ -712,7 +713,7 @@ function edgeTitle(e: DiagramEdge, d: Diagram): string {
 }
 
 /** Sits to the right of the zoom controls so it never covers them. */
-function Hint({ palette: p, narrow }: { palette: Palette; narrow: boolean }) {
+function Hint({ palette: p }: { palette: Palette }) {
   return (
     <div
       style={{
@@ -726,14 +727,12 @@ function Hint({ palette: p, narrow }: { palette: Palette; narrow: boolean }) {
         border: `1px solid ${p.border}`,
         color: p.textMuted,
         fontFamily: UI_FONT,
-        fontSize: narrow ? 11.5 : 12.5,
+        fontSize: 12.5,
         lineHeight: 1.3,
         pointerEvents: "none",
       }}
     >
-      {narrow
-        ? "Tap a box or arrow. Bold arrows are the hot path."
-        : "Tap any box or arrow. Bold arrows are the hot path; hover a thin one for its label."}
+      Tap any box or arrow. Bold arrows are the hot path; hover a thin one for its label.
     </div>
   );
 }
