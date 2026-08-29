@@ -645,7 +645,7 @@ export default function ArchDiagram({
         onClick={() => setSel((c) => (c?.kind === "overview" ? null : { kind: "overview" }))}
         style={{
           position: "absolute",
-          bottom: 12,
+          top: 12,
           right: 12,
           padding: "8px 14px",
           borderRadius: 999,
@@ -685,7 +685,7 @@ export default function ArchDiagram({
           onClose={() => setSel(null)}
         />
       ) : (
-        <Hint palette={palette} />
+        <Hint palette={palette} narrow={narrow} />
       )}
     </div>
   );
@@ -696,24 +696,29 @@ function edgeTitle(e: DiagramEdge, d: Diagram): string {
   return `${name(e.from)} → ${name(e.to)}`;
 }
 
-function Hint({ palette: p }: { palette: Palette }) {
+/** Sits to the right of the zoom controls so it never covers them. */
+function Hint({ palette: p, narrow }: { palette: Palette; narrow: boolean }) {
   return (
     <div
       style={{
         position: "absolute",
-        left: 12,
-        bottom: 12,
-        padding: "8px 12px",
+        left: 62,
+        bottom: 14,
+        maxWidth: "calc(100% - 80px)",
+        padding: "6px 10px",
         borderRadius: 8,
         background: p.surface,
         border: `1px solid ${p.border}`,
         color: p.textMuted,
         fontFamily: UI_FONT,
-        fontSize: 12.5,
+        fontSize: narrow ? 11.5 : 12.5,
+        lineHeight: 1.3,
         pointerEvents: "none",
       }}
     >
-      Tap any box or arrow. Bold arrows are the hot path; hover a thin one for its label.
+      {narrow
+        ? "Tap a box or arrow. Bold arrows are the hot path."
+        : "Tap any box or arrow. Bold arrows are the hot path; hover a thin one for its label."}
     </div>
   );
 }
