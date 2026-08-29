@@ -56,21 +56,25 @@ function SvgHost({
       vbW = p[2] || 0;
       vbH = p[3] || 0;
     }
-    // Size from what is drawn, not from the declared box: a figure that fills
-    // the top third of a tall viewBox otherwise leaves a void under it.
-    try {
-      const b = el.getBBox();
-      if (b.width > 0 && b.height > 0) {
-        const pad = 8;
-        if (!vbW || !vbH || vbH > b.height + 60 || vbW > b.width + 120) {
-          vbW = b.width + pad * 2;
-          vbH = b.height + pad * 2;
-          el.setAttribute("viewBox", `${b.x - pad} ${b.y - pad} ${vbW} ${vbH}`);
+    // Size from what is drawn, measured in this page with its real fonts, not
+    // from the declared box: a hand-set viewBox clips centred text near an
+    // edge or leaves a void under a short drawing.
+    const fitToContent = () => {
+      try {
+        const bb = el.getBBox();
+        if (bb.width > 0 && bb.height > 0) {
+          const pad = 8;
+          vbW = bb.width + pad * 2;
+          vbH = bb.height + pad * 2;
+          el.setAttribute("viewBox", `${bb.x - pad} ${bb.y - pad} ${vbW} ${vbH}`);
+          el.style.width = `${vbW}px`;
+          el.style.height = `${vbH}px`;
         }
+      } catch {
+        /* not laid out yet */
       }
-    } catch {
-      /* not laid out yet */
-    }
+    };
+    fitToContent();
     el.style.width = vbW ? `${vbW}px` : "";
     el.style.height = vbH ? `${vbH}px` : "auto";
 
@@ -81,19 +85,25 @@ function SvgHost({
       return;
     }
 
+    // Inline: no transform. An svg with a viewBox and width: 100% takes its
+    // height from its own aspect ratio, so nothing letterboxes it inside a
+    // host box of the wrong height. Cap the growth on wide columns so a
+    // phone-sized figure does not balloon on a desktop.
     const applyFit = () => {
-      const avail =
-        (host.parentElement && host.parentElement.clientWidth) ||
-        host.clientWidth ||
-        vbW;
-      // Shrink to fit; grow a little on wide columns so phone-sized figures stay legible.
-      const s = vbW > 0 && avail > 0 ? Math.min(avail / vbW, 1.4) : 1;
-      el.style.transform = `scale(${s})`;
-      host.style.height = vbH ? `${Math.ceil(vbH * s)}px` : "";
+      el.removeAttribute("width");
+      el.removeAttribute("height");
+      el.style.transform = "";
+      el.style.width = "100%";
+      el.style.height = "auto";
+      el.style.maxWidth = vbW ? `${Math.round(vbW * 1.4)}px` : "";
+      host.style.height = "";
       host.style.width = "100%";
       host.style.overflow = "hidden";
     };
     applyFit();
+    // Fonts can land after first paint; re-measure once they are ready.
+    const fontsReady: Promise<unknown> | undefined = (document as unknown as { fonts?: { ready?: Promise<unknown> } }).fonts?.ready;
+    if (fontsReady) fontsReady.then(() => { fitToContent(); applyFit(); }).catch(() => {});
     let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== "undefined" && host.parentElement) {
       ro = new ResizeObserver(applyFit);
