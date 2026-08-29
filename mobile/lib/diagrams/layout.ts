@@ -344,6 +344,8 @@ export function setDebugEdge(id: string) {
 }
 const CROSS = 3000; // a 3000-unit detour is still better than two lines crossing
 const HEADER = 80;
+/** An authored fromSide/toSide is worth this much: a long detour, but never a crossing. */
+const HINT = 1500;
 const INF = Number.POSITIVE_INFINITY;
 
 function slotsFor(r: Rect, side: Side, frame: boolean): number[] {
@@ -583,7 +585,7 @@ export class Router {
         if (node == null || this.blocked[node]) continue;
         // Centre slots first; an authored side is a preference, not an order.
         // An authored side is close to an order: it is the author's one routing instrument.
-        out.push({ f: { side, slot }, node, bonus: (prefer ? (prefer === side ? -400 : 0) : 0) + Math.abs(slot) * 0.3 });
+        out.push({ f: { side, slot }, node, bonus: (prefer ? (prefer === side ? -HINT : 0) : 0) + Math.abs(slot) * 0.3 });
       }
     }
     return out;
@@ -668,15 +670,22 @@ export class Router {
       }
     }
     let goal = -1;
+    let goalCost = INF;
     while (heap.length) {
       const [st, c] = pop();
+      // The end bonus is negative, so a goal popped later can still be better;
+      // stop only once nothing cheaper than the best goal can remain.
+      if (c >= goalCost) break;
       if (c > dist[st]) continue;
       const node = st >> 2;
       const dir = st & 3;
       const end = endAt.get(node);
       if (end && end.dir === dir) {
-        goal = st;
-        break;
+        if (c < goalCost) {
+          goalCost = c;
+          goal = st;
+        }
+        continue;
       }
       const i = Math.floor(node / this.ny);
       const j = node % this.ny;
@@ -716,7 +725,9 @@ export class Router {
           const y = this.ys[nj];
           for (const f of foreign) if (x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h) trespass += step * 0.8;
         }
-        const nc = c + step + bend + extra + trespass + this.penalty[nn];
+        const arriving = endAt.get(nn);
+        const endBonus = arriving && arriving.dir === nd ? arriving.bonus : 0;
+        const nc = c + step + bend + extra + trespass + this.penalty[nn] + endBonus;
         const ns = nn * 4 + nd;
         if (nc < dist[ns]) {
           dist[ns] = nc;
@@ -837,7 +848,7 @@ export function routeEdges(
   collapsed: Set<string> = new Set(),
   /** Restarts and polishing are only worth it on a grid; legacy pixel specs get one pass. */
   thorough = true,
-  budgetMs = 1500,
+  budgetMs = 6000,
 ): { routes: Record<string, Route>; crossings: number } {
   const deadline = Date.now() + budgetMs;
   const overBudget = () => Date.now() > deadline;

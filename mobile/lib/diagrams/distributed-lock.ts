@@ -59,8 +59,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       label: "Worker B, next holder",
       sub: "acquires at t=22, writes with 34",
       kind: "service",
-      col: 1,
-      row: 1,
+      col: 0,
+      row: 3,
       detail: {
         what: "The second process, which acquires the key legitimately once A's lease expires and writes to the resource with a strictly higher token.",
         why: "It exists in the diagram to make the race concrete. Without a second acquirer the lease expiry is harmless; with one, two live processes each believe they are the holder and both issue writes into the same row.",
@@ -75,7 +75,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       kind: "service",
       col: 0,
       row: 0,
-      sub: "correctness or best-effort",
+      sub: "lock class; or a version CAS",
       detail: {
         what: "The client-side decision, made per call site rather than globally, about which backend a given lock goes to and whether it returns a fencing token at all.",
         why: "Sizing only works if the two lock classes are counted separately, because they land on different backends and only one of them is anywhere near a ceiling. Putting all 10k acquires/s on consensus wastes headroom; putting all of them on Redis makes money movement unsafe.",
@@ -98,7 +98,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       sub: "Raft, majority commit per grant",
       kind: "database",
       col: 2,
-      row: 2,
+      row: 1,
       parent: "grant-side",
       detail: {
         what: "A small consensus cluster that does not acknowledge a lock write until a majority holds it durably on disk.",
@@ -120,10 +120,10 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "lease",
       label: "Lease and keep-alive",
       kind: "service",
+      sub: "TTL 30s, renew at 10s, alerts",
       col: 3,
-      row: 2,
+      row: 1,
       parent: "grant-side",
-      sub: "TTL 30s, renew at 10s",
       detail: {
         what: "The expiry attached to every grant, plus the holder's renewal loop that extends it while work is still in progress.",
         why: "Without a TTL a crashed holder wedges the key until a human intervenes. With one, liveness is automatic and the cost is that a live but slow holder can be expired out from under itself, which is precisely the hole fencing closes.",
@@ -146,7 +146,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       sub: "etcd mod_revision, ZK czxid",
       kind: "database",
       col: 1,
-      row: 2,
+      row: 1,
       detail: {
         what: "A number returned with every grant that strictly increases across successive grants, taken from the position of that grant in the consensus log.",
         why: "It is the one thing the lock service produces that the resource can check. It has to come from something that already has a single agreed order, and a renewal deliberately does not mint a new one, or an in-flight write from the correct holder would be rejected by your own fence.",
@@ -191,7 +191,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       label: "Fence check at the write",
       kind: "service",
       col: 0,
-      row: 3,
+      row: 2,
       sub: "AND fence_token < :token",
       detail: {
         what: "The compare-and-advance predicate that rides inside the same UPDATE as the write, refusing any token lower than the highest already accepted.",
@@ -212,10 +212,10 @@ export const DISTRIBUTED_LOCK: Diagram = {
     {
       id: "resource",
       label: "Protected resource",
-      sub: "row with a fence_token column",
       kind: "database",
+      sub: "fence_token column, rejections",
       col: 1,
-      row: 3,
+      row: 2,
       detail: {
         what: "The database row the lock exists to protect, carrying the highest token it has ever accepted alongside the data.",
         why: "The counter belongs to the protected object, not to the lock, because the object is what both writers touch. That is also what makes fencing composable with optimistic concurrency: both are a monotonic check at the last hop, differing only in who mints the number.",
@@ -229,67 +229,6 @@ export const DISTRIBUTED_LOCK: Diagram = {
             "Partial fencing and false rejects. If one lock key guards 3 rows, all 3 carry the column and take the same token in the same transaction, or a partially fenced writer updates some and not others. And an object guarded by lock A on Monday and lock B on Tuesday sees 2 independent sequences, so the lower one is refused for no good reason.",
           flips:
             "A store with native conditional writes on a version or ETag, where the existing concurrency primitive already is the counter and a second column adds nothing.",
-        },
-      },
-    },
-    {
-      id: "optimistic",
-      label: "Optimistic concurrency",
-      kind: "service",
-      col: 3,
-      row: 0,
-      sub: "version column CAS",
-      detail: {
-        what: "The no-lock fork: read the row with its version, do the work, update conditionally on that version, and retry when zero rows are affected.",
-        why: "Once you have committed to a resource-side check, the honest question is whether the lock is still earning its place. Optimistic concurrency is the fencing token with the lock deleted: no lease to size, no renewal thread, no lock service in the availability path, and no way to hold something you have already lost.",
-        numbers: ["wins under ~10% conflicts", "loses above ~30% conflicts", "1 store, 1 conditional write"],
-        breaks:
-          "It only holds when the critical section ends in a single conditional write to one store. Two mutated systems and there is no single write left to hang correctness on.",
-        choice: {
-          pick: "No lock when the section ends in one conditional write to one store",
-          instead: "Acquire a distributed lock around the section.",
-          decider:
-            "How many systems the section mutates, crossed with the conflict rate. One store under about 10% conflicts and optimistic wins on every axis; above roughly 30% the retry loop burns more work than the lock would have cost, and at 2 or more mutated systems the single conditional write no longer exists.",
-          flips:
-            "Side effects that cannot be cheaply redone, such as moving money at a payment provider or delivering a file to a bank's SFTP endpoint, or work long enough that losing the race is expensive, like a 5 minute report regenerated on every conflict.",
-        },
-      },
-    },
-    {
-      id: "external-api",
-      label: "Unfenceable resource",
-      sub: "payment API, SFTP drop, email",
-      kind: "external",
-      col: 2,
-      row: 1,
-      detail: {
-        what: "A resource you do not own, with no counter you can add and no way to make it reject a late writer.",
-        why: "It is drawn explicitly because the mechanism assumes you can attach a monotonic check to the thing being written, and here you cannot. The honest position is that the lock is advisory, the safety property has to come from somewhere else, and you say that out loud rather than implying the lock covers it.",
-        numbers: ["0 fencing available", "idempotency key plus reconciliation", "detection after the fact"],
-        breaks:
-          "The best available substitute is an idempotency key the receiver deduplicates, which depends entirely on their retention window and their definition of duplicate. Where they offer nothing, the failure is detected by reconciliation rather than prevented.",
-      },
-    },
-    {
-      id: "observability",
-      label: "Fenced-write rejections",
-      sub: "plus duplicate-holder canary",
-      kind: "service",
-      col: 2,
-      row: 3,
-      detail: {
-        what: "The counter of writes refused by the fence at the resource, plus a synthetic that deliberately pauses a holder past its TTL to prove the counter can move.",
-        why: "A bad cache shows up in hit rate within minutes; a bad lock shows up as a support ticket three weeks later about a balance that does not add up. This is the instrument that closes that gap, and it is the only proof that the end-to-end design is actually safe rather than merely drawn correctly.",
-        numbers: ["near-zero in steady state", "non-zero in chaos tests", "acquire p99, renewal lateness, queue depth"],
-        breaks:
-          "A rejection counter that has never moved is indistinguishable from a fence that was never wired up, which is why the canary matters more than the dashboard.",
-        choice: {
-          pick: "Fenced-write rejection count plus a duplicate-holder canary",
-          instead: "Lock-service health metrics: quorum write success, acquire p99, leader churn.",
-          decider:
-            "What each signal can see. Every metric on the lock service can be clean while 2 workers demonstrably write the same record, because the service behaved correctly at every step. Only a counter at the resource observes the outcome the design exists to prevent, and only a synthetic that pauses a holder past its lease proves it fires.",
-          flips:
-            "A best-effort-only estate, where nothing is fenced, there is no rejection to count, and lock-service health genuinely is the whole story.",
         },
       },
     },
@@ -398,6 +337,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "e8",
       from: "lease",
       to: "worker-a",
+      fromSide: "top",
+      toSide: "left",
       tier: "data",
       label: "renew at TTL/3, 10s",
       offset: 110,
@@ -413,6 +354,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "e9",
       from: "fence-token",
       to: "worker-b",
+      fromSide: "right",
+      toSide: "bottom",
       tier: "hot",
       label: "granted, token 34",
       offset: 100,
@@ -428,8 +371,6 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "e10",
       from: "worker-b",
       to: "fence-check",
-      fromSide: "left",
-      toSide: "top",
       tier: "hot",
       label: "write, fence=34",
       offset: 90,
@@ -445,7 +386,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "e11",
       from: "worker-a",
       to: "fence-check",
-      label: "stale write 33: 0 rows, fenced",
+      label: "stale write 33: fenced out",
       tier: "hot",
       offset: 110,
       detail: {
@@ -468,79 +409,6 @@ export const DISTRIBUTED_LOCK: Diagram = {
         numbers: ["1 extra predicate", "1 extra column write", "0 extra round trips"],
         breaks:
           "The cost of fencing is organisational rather than computational: this predicate is trivial, and the difficulty is getting every writer to the row to carry a token at all.",
-      },
-    },
-    {
-      id: "e14",
-      from: "router",
-      to: "optimistic",
-      tier: "data",
-      label: "single-store section",
-      offset: 140,
-      detail: {
-        what: "The fork where a call site skips the lock service entirely because its critical section ends in one conditional write.",
-        why: "The cheapest lock is the one you never take. Removing the lock removes the lease, the renewal thread, the token plumbing and a service from the availability path, and it removes the whole class of failures where a holder acts after losing the lock.",
-        numbers: ["under ~10% conflicts", "1 store, 1 conditional write"],
-        breaks:
-          "It stops being available the moment the section touches a second system, and the retry loop starts costing more than the lock once conflicts pass roughly 30%.",
-      },
-    },
-    {
-      id: "e15",
-      from: "optimistic",
-      to: "resource",
-      tier: "data",
-      label: "CAS on version column",
-      detail: {
-        what: "A conditional update predicated on the version the caller read, incrementing it on success.",
-        why: "It is structurally the same check as the fence, with the number minted by the row itself rather than by a consensus log. That is why the two compose cleanly: the resource is doing one job, refusing writes that are not based on what it currently holds.",
-        numbers: ["version = v+1 WHERE version = v", "0 rows means you lost, retry"],
-        breaks:
-          "Losing means redoing the work, so a long or side-effecting critical section pays the whole cost again on every conflict.",
-      },
-    },
-    {
-      id: "e16",
-      from: "worker-b",
-      to: "external-api",
-      tier: "control",
-      label: "advisory, idempotency key",
-      offset: 130,
-      detail: {
-        what: "A call into a system that has no fence: the holder sends it, and nothing downstream can reject a late duplicate.",
-        why: "It is drawn to make the limit explicit rather than leaving it implied. The lock still reduces contention here, so duplicates are rarer, but rarer is not the same claim as safe and should never be presented as one.",
-        numbers: ["0 fencing available", "dedup depends on their retention window"],
-        breaks:
-          "A paused holder resuming and calling this endpoint is unstoppable at this layer, so the fallback is at-least-once delivery plus reconciliation, which detects the failure after the money has moved.",
-      },
-    },
-    {
-      id: "e17",
-      from: "resource",
-      to: "observability",
-      tier: "control",
-      label: "rejection counter",
-      detail: {
-        what: "Every fenced-out write incrementing a counter at the resource, tagged by object and by token gap.",
-        why: "This is the only place in the system where a duplicate holder becomes visible, because it is the only place the two writers meet. A spike here means holders are pausing or renewing badly and is worth paging on.",
-        numbers: ["near-zero steady state", "non-zero under chaos tests"],
-        breaks:
-          "If a writer bypasses the fence, nothing increments and the dashboard stays green while the corruption happens, which is why the constraint belongs in the storage layer.",
-      },
-    },
-    {
-      id: "e18",
-      from: "lease",
-      to: "observability",
-      tier: "control",
-      label: "renewal lateness",
-      offset: 90,
-      detail: {
-        what: "Actual renewal times measured against their planned deadlines, plus remaining lease time per holder.",
-        why: "It catches GC pauses, overloaded runtimes and network jitter before a holder actually loses its lock, which turns the paused-holder failure from a post-hoc discovery into a leading indicator.",
-        numbers: ["renew deadline every 10s", "alert when lease remaining hits the safety floor"],
-        breaks:
-          "It cannot see the pause that matters most, because a fully frozen process reports nothing at all; the absence of a renewal is the signal, not a late one.",
       },
     },
   ],

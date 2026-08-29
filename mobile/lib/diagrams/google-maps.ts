@@ -791,6 +791,8 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e20",
       from: "history-profiles",
       to: "eta-model",
+      fromSide: "left",
+      toSide: "left",
       tier: "control",
       label: "beyond ~20 min",
       detail: {
