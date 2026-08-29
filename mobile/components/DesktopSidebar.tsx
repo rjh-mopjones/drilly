@@ -212,7 +212,7 @@ export function DesktopSidebar() {
             style={styles.iconButton}
             accessibilityLabel="Drill"
           >
-            <ChevronsIcon size={18} color={palette.accent} />
+            <ChevronsIcon size={18} color={palette.drill} />
           </Pressable>
           <Pressable
             onPress={onRefresh}

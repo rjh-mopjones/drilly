@@ -43,6 +43,8 @@ export interface Palette {
   textStrong: string;
   /** Primary action (links, active chip, accents). */
   accent: string;
+  /** The Drill mark (chevrons). Yellow so it reads as its own thing. */
+  drill: string;
   /** Inline + fenced code background. */
   codeBg: string;
   /** Code foreground (for fenced blocks). */
@@ -66,6 +68,7 @@ const DARK: Palette = {
   textMuted: "#8a93a6",
   textStrong: "#ffffff",
   accent: "#7c9cff",
+  drill: "#fbbf24",
   codeBg: "#1f2028",
   codeFg: "#d6dae4",
   errorFg: "#fbbf24",
@@ -83,6 +86,7 @@ const LIGHT: Palette = {
   textMuted: "#5b6577",
   textStrong: "#0b0d12",
   accent: "#3253c7",
+  drill: "#ca8a04",
   codeBg: "#f0f1f5",
   codeFg: "#1d2330",
   errorFg: "#a14a00",

@@ -120,7 +120,7 @@ export function SourceLibrary() {
             style={styles.cog}
             accessibilityLabel="Drill"
           >
-            <ChevronsIcon size={22} color={palette.accent} />
+            <ChevronsIcon size={22} color={palette.drill} />
           </Pressable>
           <RefreshAllButton />
           <Pressable
