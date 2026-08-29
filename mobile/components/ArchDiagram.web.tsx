@@ -1022,28 +1022,6 @@ function OverviewPanel({
     >
       <PanelHeader p={p} title={diagram.title} sub={diagram.question} onClose={onClose} />
       <Section p={p} title="The shape of it" body={o.shape} />
-      {o.forces?.length ? (
-        <>
-          <Label p={p}>What forces what</Label>
-          <div style={{ color: p.textMuted, fontSize: 11.5, marginTop: 4 }}>
-            The numbers that shaped this design and the decision each one forced. Tap a row to see where.
-          </div>
-          {o.forces.map((f, i) => {
-            const key = `force:${i}`;
-            return (
-              <div key={key} role="button" onClick={() => onWalk(key)} style={rowStyle(walk === key, true)}>
-                <div style={{ flex: "0 0 42%", color: p.textStrong, fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
-                  <Glossed p={p} text={f.constraint} />
-                </div>
-                <div style={{ flex: "0 0 auto", color: p.accent, fontSize: 13, lineHeight: 1.45 }}>→</div>
-                <div style={{ color: p.text, fontSize: 13, lineHeight: 1.45 }}>
-                  <Glossed p={p} text={f.decision} bold={labelsOf(f.lights)} />
-                </div>
-              </div>
-            );
-          })}
-        </>
-      ) : null}
       {o.naive ? (
         <>
           <Label p={p}>The obvious design, and where it breaks</Label>
@@ -1093,6 +1071,28 @@ function OverviewPanel({
           </div>
         );
       })}
+      {o.forces?.length ? (
+        <>
+          <Label p={p}>What forces what</Label>
+          <div style={{ color: p.textMuted, fontSize: 11.5, marginTop: 4 }}>
+            The numbers that shaped this design and the decision each one forced. Tap a row to see where.
+          </div>
+          {o.forces.map((f, i) => {
+            const key = `force:${i}`;
+            return (
+              <div key={key} role="button" onClick={() => onWalk(key)} style={rowStyle(walk === key, true)}>
+                <div style={{ flex: "0 0 42%", color: p.textStrong, fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
+                  <Glossed p={p} text={f.constraint} />
+                </div>
+                <div style={{ flex: "0 0 auto", color: p.accent, fontSize: 13, lineHeight: 1.45 }}>→</div>
+                <div style={{ color: p.text, fontSize: 13, lineHeight: 1.45 }}>
+                  <Glossed p={p} text={f.decision} bold={labelsOf(f.lights)} />
+                </div>
+              </div>
+            );
+          })}
+        </>
+      ) : null}
       {o.numbers?.length ? <Pills p={p} items={o.numbers} /> : null}
       <Section p={p} title="The hard part" body={cruxText(o.crux)} handled={cruxHandled(o.crux)} accent />
     </div>

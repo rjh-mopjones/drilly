@@ -98,10 +98,10 @@ finished pattern. `bunx tsx scripts/check-diagrams.ts <id>` fails on the errors
 below and warns on the rest; a diagram ships with 0 of either.
 
 - **The Overview is a learning path, in this order.** `shape` (the design's
-  one idea) → `forces` (3–5 rows `{ constraint, decision, lights }`: a number
-  of the problem and the decision it forced, naming the box) → `naive`
-  (`{ text, lights }`: the design a reader arrives with and the number at which
-  it breaks) → `beats` (the walk) → `numbers` → `crux`. Every row lights the
+  one idea) → `naive` (`{ text, lights }`: the design a reader arrives with and
+  the number at which it breaks) → `beats` (the walk) → `forces` (3–5 rows
+  `{ constraint, decision, lights }`: a number of the problem and the decision
+  it forced, naming the box) → `numbers` → `crux`. Every row lights the
   boxes it is about; box labels named in the text render bold.
 - **Beats light the picture.** `overview.beats` are `{ text, lights: [ids] }`:
   each names boxes by their *labels* and lists the node and edge ids it is

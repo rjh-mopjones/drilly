@@ -149,11 +149,6 @@ export function diagramToMarkdown(d: Diagram): string {
   };
   const figures = (xs: Figure[]) => xs.map((f) => `- ${figureValue(f)}${figureExplain(f) ? ` — ${figureExplain(f)}` : ""}`);
   out.push("### Overview", "", `**The shape of it.** ${o.shape}`, "");
-  if (o.forces?.length) {
-    out.push("**What forces what.**", "", "| Constraint | Decision |", "|---|---|");
-    for (const f of o.forces) out.push(`| ${f.constraint} | ${f.decision} |`);
-    out.push("");
-  }
   if (o.naive) out.push(`**The obvious design, and where it breaks.** ${o.naive.text}`, "");
   out.push("**How it works.**", "");
   o.beats.forEach((b, i) => {
@@ -161,6 +156,11 @@ export function diagramToMarkdown(d: Diagram): string {
     out.push(`${i + 1}. ${beatText(b)}${lights.length ? ` _(${lights.join(", ")})_` : ""}`);
   });
   out.push("");
+  if (o.forces?.length) {
+    out.push("**What forces what.**", "", "| Constraint | Decision |", "|---|---|");
+    for (const f of o.forces) out.push(`| ${f.constraint} | ${f.decision} |`);
+    out.push("");
+  }
   if (o.numbers?.length) out.push("**Numbers.**", "", ...figures(o.numbers), "");
   out.push(`**The hard part.** ${cruxText(o.crux)}`, "");
   if (cruxHandled(o.crux)) out.push(`**How the design handles it.** ${cruxHandled(o.crux)}`, "");
