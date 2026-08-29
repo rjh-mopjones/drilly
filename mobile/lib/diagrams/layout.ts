@@ -1096,12 +1096,15 @@ export function labelWidth(text: string): number {
   return text.length * LABEL_CHAR_W + LABEL_PAD;
 }
 
+/** Minimum gap between a label and any box, in layout units. */
+const LABEL_CLEAR = 16;
+
 /** Height of the title strip along the top of an expanded frame, in layout units. */
 const FRAME_TITLE_H = 22;
 
 /** The label as drawn: a stepped hot edge carries a round badge before the text. */
 export function displayLabel(e: DiagramEdge): string {
-  return e.step != null ? `00 ${e.label ?? ""}` : (e.label ?? "");
+  return e.step != null ? `0000 ${e.label ?? ""}` : (e.label ?? "");
 }
 
 export function placeLabels(
@@ -1156,7 +1159,8 @@ export function placeLabels(
       const r = { x: x - w / 2, y: y - LABEL_H / 2, w, h: LABEL_H };
       let c = 0;
       // A label touching a box reads as part of it: keep a real margin.
-      for (const b of boxes) c += overlap(r, b, 12) * 4;
+      // 16 units is ≥ 13 px at the 0.8 zoom floor; the browser checker flags anything under 10 px.
+      for (const b of boxes) c += overlap(r, b, LABEL_CLEAR) * 4;
       for (const q of placed) c += overlap(r, q, 4) * 3;
       // other lines under the label
       for (const o of allSegs) {
