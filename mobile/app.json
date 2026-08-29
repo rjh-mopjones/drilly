@@ -20,14 +20,15 @@
     "web": {
       "bundler": "metro",
       "output": "single",
-      "favicon": "./assets/icon.png"
+      "favicon": "./assets/favicon.png"
     },
     "android": {
       "package": "com.mjrjh.drilly",
       "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#0b0d12"
+        "backgroundColor": "#0b0d12",
+        "monochromeImage": "./assets/adaptive-icon-mono.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false

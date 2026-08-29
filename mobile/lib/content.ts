@@ -137,8 +137,8 @@ export async function loadSource(cfg: SourceConfig): Promise<string> {
  * under a different cache key than subsequent normal loads request, so
  * the warm-the-cache effect would never apply. The whole point of this
  * call is for the Android WebView shell: hit refresh once online and
- * every primer is now in the WebView cache at its canonical URL, ready
- * to be served offline by `cacheMode="LOAD_CACHE_ELSE_NETWORK"`.
+ * every primer is now in the service worker's cache at its canonical
+ * URL, ready to be served offline.
  * On native, downloads to the FS cache and overwrites. Throws on network
  * error so the caller can fall back to whatever it already has.
  */

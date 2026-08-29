@@ -148,7 +148,8 @@ export default function SettingsScreen() {
         <Text style={styles.hint}>
           Installs the offline reader. Enable “install from unknown
           apps” for your browser, open the downloaded file, then open
-          the app online once and hit refresh to cache everything.
+          the app online once — it caches itself, and refresh pulls
+          every primer down for offline.
         </Text>
       </Section>
       </ScrollView>

@@ -225,6 +225,8 @@ manifests. `scripts/validate_sd.py` treats the section as optional.
 
 ## Deploy gotchas
 
+- `web/public/service-worker.js` has a `__SHELL_ASSETS__` placeholder that `scripts/build-web.sh` replaces with the exported bundle's hashed JS/CSS paths. Only the `mobile/dist/` copy is real; the SW's install is atomic on those, so a `CACHE_VERSION` bump is safe **only** through a full build — never hand-edit the dist copy.
+- App icons are generated: edit `scripts/build-app-icons.sh`, run it, then `cd mobile && bunx expo prebuild --clean --platform android`. `mobile/android/` is gitignored, so the PNGs in `mobile/assets/` are what ships.
 - `drilly-delta-brown.vercel.app` is a **project domain**, not a manual alias. It auto-promotes with each prod deploy. **Never** `vercel alias set <deployment> drilly-delta-brown.vercel.app` — that freezes it to a specific deploy. Use `vercel domains add` only.
 - The legacy `interview-prep-delta-brown.vercel.app` may auto-regenerate because the project's original name was `interview-prep`. If it reappears, `vercel alias rm` it.
 - The Expo dev server (`bunx expo start --web`) **does not serve** `web/public/*.md` — it returns the SPA shell for any non-bundle path, so primers parse as zero items ("No items" in the sidebar). For local content testing, run `bash scripts/build-web.sh` then `bunx serve -s mobile/dist -l 8081`.

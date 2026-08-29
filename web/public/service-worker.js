@@ -17,11 +17,19 @@
  * whole site is cached.
  *
  * To force every client to re-cache after a breaking change, bump
- * CACHE_VERSION — the old cache is deleted on activate.
+ * CACHE_VERSION — the old cache is deleted on activate. Activation only
+ * follows a COMPLETE shell install (see below), so a bump can never leave a
+ * client with the shell's HTML but not the bundle it references.
  */
 
-const CACHE_VERSION = "v42";
+const CACHE_VERSION = "v43";
 const CACHE = `drilly-${CACHE_VERSION}`;
+
+// The content-hashed JS/CSS the shell HTML references. scripts/build-web.sh
+// replaces the placeholder with the real paths read from dist/index.html;
+// without them a cached index.html loads a bundle that is not cached and
+// the app is a blank page offline.
+const SHELL_ASSETS = __SHELL_ASSETS__;
 
 const MERMAID_CDN =
   "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js";
@@ -34,8 +42,7 @@ const FONT_URLS = [
   "/fonts/jetbrains-mono-400-italic.woff2",
 ];
 
-// Same-origin content to seed at install time. Best-effort: a single 404
-// (e.g. a renamed primer) must not abort the whole install.
+// Same-origin content to seed at install time (best-effort, see install).
 const CONTENT_URLS = [
   "/manifest.json",
   "/patterns.md",
@@ -63,13 +70,19 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(CACHE);
+      // The shell is all-or-nothing: if any part fails the install rejects,
+      // the previous worker and its cache stay live, and the browser retries
+      // next time. A half-cached shell is worse than an old complete one.
+      await cache.addAll(
+        ["/", "/index.html", ...SHELL_ASSETS, ...FONT_URLS].map(
+          (u) => new Request(u, { cache: "reload" }),
+        ),
+      );
+      // Content is best-effort: a single 404 must not block the shell.
       await Promise.allSettled([
-        cache.add(new Request("/", { cache: "reload" })),
-        cache.add(new Request("/index.html", { cache: "reload" })),
         ...CONTENT_URLS.map((u) =>
           cache.add(new Request(u, { cache: "reload" })),
         ),
-        ...FONT_URLS.map((u) => cache.add(new Request(u, { cache: "reload" }))),
         cache.add(new Request(MERMAID_CDN, { mode: "no-cors" })),
       ]);
       await self.skipWaiting();

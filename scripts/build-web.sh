@@ -175,4 +175,27 @@ else:
     print("   • already present, skipped")
 PY
 
+# The service worker precaches the app shell at install. The shell's JS/CSS
+# are content-hashed by the export, so their paths are only known now: read
+# them from the exported index.html and splice them into the mirrored SW.
+# Without this a cached index.html references a bundle the SW never stored
+# and the app is a blank page offline.
+echo "→ Injecting shell asset list into service-worker.js"
+OUT="$OUT" python3 - <<'PY'
+import json, os, re
+out = os.environ["OUT"]
+html = open(os.path.join(out, "index.html"), encoding="utf-8").read()
+assets = sorted(set("/" + m for m in re.findall(r'_expo/static/[^"\']+', html)))
+if not any(a.endswith(".js") for a in assets):
+    raise SystemExit("no _expo/static JS bundle found in index.html")
+path = os.path.join(out, "service-worker.js")
+sw = open(path, encoding="utf-8").read()
+if "__SHELL_ASSETS__" not in sw:
+    raise SystemExit("service-worker.js has no __SHELL_ASSETS__ placeholder")
+sw = sw.replace("__SHELL_ASSETS__", json.dumps(assets), 1)
+open(path, "w", encoding="utf-8").write(sw)
+for a in assets:
+    print("   ✓ " + a)
+PY
+
 echo "→ Build complete: $OUT"
