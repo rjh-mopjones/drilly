@@ -820,4 +820,77 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       },
     },
   ],
+  figures: {
+    "read-repair": {
+      title: "Read repair: two fast replicas satisfy R=2, the stale third catches up",
+      nodes: [
+        { id: "client", label: "Client", kind: "client", col: 0, row: 0 },
+        { id: "coordinator", label: "Coordinator", kind: "service", col: 0, row: 1 },
+        {
+          id: "replica-fast",
+          label: "Replica 1 + 2",
+          sub: "v=5, respond fast",
+          kind: "database",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The two replicas that answer quickly with the current value, satisfying R=2.",
+            why: "The coordinator only needs R of N responses to answer the client, so it never waits for the slowest replica.",
+          },
+        },
+        {
+          id: "replica-stale",
+          label: "Replica 3",
+          sub: "v=3, stale, late",
+          kind: "database",
+          col: 0,
+          row: 3,
+          detail: {
+            what: "The replica that missed the last write and answers late with an old version.",
+            why: "Its stale reply arrives after the client already has an answer, so the mismatch is repaired in the background rather than on the client's critical path.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "client", to: "coordinator", tier: "hot", step: 1, label: "GET key" },
+        { id: "e2", from: "coordinator", to: "replica-fast", tier: "hot", step: 2, label: "read → v=5" },
+        { id: "e3", from: "coordinator", to: "replica-stale", tier: "hot", step: 3, label: "read → v=3, late" },
+        { id: "e4", from: "coordinator", to: "client", tier: "hot", step: 4, label: "v=5, R=2 satisfied" },
+        { id: "e5", from: "coordinator", to: "replica-stale", tier: "hot", step: 5, label: "write_repair(v=5)" },
+      ],
+    },
+    "version-vectors": {
+      title: "Version vectors: dominance versus concurrency",
+      nodes: [
+        { id: "va", label: "{A:3, B:5}", kind: "database", col: 0, row: 0 },
+        {
+          id: "vb",
+          label: "{A:4, B:5}",
+          kind: "database",
+          col: 1,
+          row: 0,
+          detail: {
+            what: "A vector where every component is greater than or equal, and one strictly greater.",
+            why: "That makes it strictly newer than {A:3, B:5}, so the store can order the two writes with no ambiguity.",
+          },
+        },
+        { id: "vc", label: "{A:3, B:5}", kind: "database", col: 0, row: 1 },
+        {
+          id: "vd",
+          label: "{A:4, B:4}",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "A vector that is greater in one component and lower in another.",
+            why: "Neither vector dominates the other, so the store reports the two writes as concurrent and returns both as siblings rather than guessing which is newer.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "va", to: "vb", tier: "hot", step: 1, label: "dominates: strictly newer" },
+        { id: "e2", from: "vc", to: "vd", tier: "data", label: "no dominance: concurrent" },
+      ],
+    },
+  },
 };

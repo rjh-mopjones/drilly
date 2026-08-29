@@ -750,4 +750,29 @@ export const SLACK: Diagram = {
       },
     },
   ],
+  figures: {
+    "thread-write": {
+      title: "Write once to the timeline, once to the thread's own partition",
+      nodes: [
+        { id: "reply", label: "Thread reply", kind: "service", col: 0, row: 0 },
+        { id: "timeline", label: "Channel timeline", sub: "4M rows, by message id", kind: "database", col: 0, row: 1 },
+        {
+          id: "threadtbl",
+          label: "(channel, thread_parent)",
+          sub: "800 rows, this thread",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "The second table each reply is written to, partitioned by channel and thread parent.",
+            why: "Loading a thread reads only this partition, so an 800-reply thread costs 800 rows regardless of how many messages sit in the surrounding channel.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "reply", to: "timeline", tier: "hot", step: 1, label: "write 1: scroll order" },
+        { id: "e2", from: "reply", to: "threadtbl", tier: "hot", step: 2, label: "write 2: thread order" },
+      ],
+    },
+  },
 };

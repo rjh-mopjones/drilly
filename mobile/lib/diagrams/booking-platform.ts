@@ -683,4 +683,31 @@ export const BOOKING_PLATFORM: Diagram = {
       },
     },
   ],
+  figures: {
+    "lock-order": {
+      title: "Ascending lock order turns overlap into a queue, not a cycle",
+      nodes: [
+        { id: "reqa", label: "Guest A: Jun 14–16", kind: "client", col: 0, row: 0 },
+        { id: "reqb", label: "Guest B: Jun 15–17", kind: "client", col: 1, row: 0 },
+        {
+          id: "shared",
+          label: "Jun 15–16 rows",
+          sub: "locked ascending by both",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The two nights both ranges need, the only rows either transaction can collide on.",
+            why: "Every transaction acquires its rows in the same ascending order, so whichever reaches these rows second simply waits instead of forming a cycle with the first.",
+          },
+        },
+        { id: "queue", label: "B waits for A", sub: "clean queue, not a deadlock", kind: "service", col: 1, row: 1 },
+      ],
+      edges: [
+        { id: "e1", from: "reqa", to: "shared", tier: "hot", step: 1, label: "locks ascending, wins" },
+        { id: "e2", from: "reqb", to: "shared", tier: "hot", step: 2, label: "locks ascending, waits" },
+        { id: "e3", from: "shared", to: "queue", tier: "data", label: "no cycle possible" },
+      ],
+    },
+  },
 };

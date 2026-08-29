@@ -1055,4 +1055,45 @@ export const NEWS_FEED: Diagram = {
       },
     },
   ],
+  figures: {
+    hybrid: {
+      title: "Hybrid fan-out: push below the threshold, pull above it",
+      nodes: [
+        { id: "post", label: "Post created", kind: "service", col: 0, row: 0 },
+        { id: "decide", label: "Route by follower count", sub: "threshold at ~10k", kind: "service", col: 0, row: 1 },
+        {
+          id: "push-path",
+          label: "Push",
+          sub: "O(F) writes, small accounts",
+          kind: "cache",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "Fan-out on write for accounts under the threshold: one write per follower into their timeline cache.",
+            why: "A feed load becomes a single cache read, the cheapest possible read, and the write burst stays bounded because ordinary accounts have few followers.",
+          },
+        },
+        {
+          id: "pull-path",
+          label: "Pull-only",
+          sub: "O(1) write, large accounts",
+          kind: "database",
+          col: 1,
+          row: 2,
+          detail: {
+            what: "Fan-out on read for accounts over the threshold: one write no matter the follower count, merged in at read time.",
+            why: "A push here would be a burst of millions of writes landing on one cluster in one moment; pull turns that into one key read by many readers instead.",
+          },
+        },
+        { id: "merge", label: "Read = push + pull merge", kind: "cache", col: 0, row: 3 },
+      ],
+      edges: [
+        { id: "e1", from: "post", to: "decide", tier: "hot", step: 1, label: "new post" },
+        { id: "e2", from: "decide", to: "push-path", tier: "hot", step: 2, label: "≤10k followers" },
+        { id: "e3", from: "decide", to: "pull-path", tier: "hot", step: 3, label: ">10k followers" },
+        { id: "e4", from: "push-path", to: "merge", tier: "hot", step: 4, label: "prebuilt timeline" },
+        { id: "e5", from: "pull-path", to: "merge", tier: "hot", step: 5, label: "merged at read time" },
+      ],
+    },
+  },
 };

@@ -700,4 +700,43 @@ export const INSTAGRAM: Diagram = {
       },
     },
   ],
+  figures: {
+    "retry-cas": {
+      title: "Deterministic keys plus a CAS close both failure modes",
+      nodes: [
+        { id: "worker-a", label: "Worker A: delivery 1", kind: "service", col: 0, row: 0 },
+        { id: "worker-b", label: "Worker B: delivery 2", sub: "retry of the same event", kind: "service", col: 1, row: 0 },
+        {
+          id: "same-key",
+          label: "Same key",
+          sub: "{post_id}/med.avif",
+          kind: "blob",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The deterministic variant object key both deliveries write to, derived from post_id and rung rather than minted fresh.",
+            why: "A retried worker overwrites identical bytes at the same key instead of creating an orphaned duplicate nothing in metadata ever references.",
+          },
+        },
+        {
+          id: "cas-win",
+          label: "CAS wins: ready",
+          kind: "database",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The compare-and-swap of the post's status from processing to ready, matched by whichever delivery reaches it first.",
+            why: "Keying the transition on the specific prior value, not an unconditional write, is what makes a second delivery a no-op rather than a race.",
+          },
+        },
+        { id: "cas-fail", label: "CAS fails: no-op", kind: "database", col: 1, row: 2 },
+      ],
+      edges: [
+        { id: "e1", from: "worker-a", to: "same-key", tier: "hot", step: 1, label: "writes" },
+        { id: "e2", from: "worker-b", to: "same-key", tier: "hot", step: 2, label: "overwrites, harmless" },
+        { id: "e3", from: "same-key", to: "cas-win", tier: "hot", step: 3, label: "first CAS" },
+        { id: "e4", from: "same-key", to: "cas-fail", tier: "control", label: "second CAS" },
+      ],
+    },
+  },
 };

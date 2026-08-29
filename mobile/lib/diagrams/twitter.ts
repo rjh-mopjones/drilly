@@ -710,4 +710,40 @@ export const TWITTER: Diagram = {
       },
     },
   ],
+  figures: {
+    "cascade-dedupe": {
+      title: "The k-way merge dedupes a cascade in one pass",
+      nodes: [
+        {
+          id: "dup-source",
+          label: "3 followees, tweet X",
+          sub: "same tweet, arrives 3 times",
+          kind: "database",
+          col: 0,
+          row: 0,
+          detail: {
+            what: "The same retweeted original arriving from several followees' sorted lists during the same k-way merge pass.",
+            why: "A viral cascade means many followees carry the identical tweet id, and merging naively would repeat it once per followee.",
+          },
+        },
+        { id: "single-source", label: "1 followee, tweet Y", kind: "database", col: 0, row: 1 },
+        {
+          id: "merged-feed",
+          label: "Merged feed: 2 rows",
+          sub: "not 4",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The deduplicated output of the merge: each distinct tweet id kept once, with repeats folded into an attribution count.",
+            why: "A hash set over the candidate window catches the duplicate in the same pass that already merges the sorted lists, so the visible feed never repeats a tweet just because several followees retweeted it.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "dup-source", to: "merged-feed", tier: "hot", step: 1, label: "kept once, +2 others" },
+        { id: "e2", from: "single-source", to: "merged-feed", tier: "hot", step: 2, label: "kept as-is" },
+      ],
+    },
+  },
 };

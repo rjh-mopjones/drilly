@@ -880,4 +880,93 @@ export const AD_CLICK_AGGREGATION: Diagram = {
       },
     },
   ],
+  figures: {
+    "sub-key": {
+      title: "Round-robin double-counts; sub-key by user_id does not",
+      nodes: [
+        {
+          id: "rr-retries",
+          label: "Round-robin: retries of X",
+          sub: "click_id X, user U, 2 copies",
+          kind: "client",
+          col: 0,
+          row: 0,
+        },
+        {
+          id: "rr-shards",
+          label: "2 shards count X",
+          sub: "double counted",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "Round-robin spreads a retry's two copies across different shards, each with its own dedup state.",
+            why: "Neither shard's keyed state knows the other exists, so both copies of the same click get counted.",
+          },
+        },
+        {
+          id: "uk-retries",
+          label: "Sub-key by user_id",
+          sub: "retries of X, both carry user U",
+          kind: "client",
+          col: 1,
+          row: 0,
+        },
+        {
+          id: "uk-shard",
+          label: "shard = hash(U)",
+          sub: "counts X once",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "Sub-keying by hash(user_id) sends every retry of one click to the same shard, because user_id is identical across retries.",
+            why: "Dedup stays correct because both copies land in one shard's keyed state, and the ad's load still spreads across N shards by user.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "rr-retries", to: "rr-shards", tier: "control", label: "split across shards" },
+        { id: "e2", from: "uk-retries", to: "uk-shard", tier: "hot", step: 1, label: "same shard, both copies" },
+      ],
+    },
+    restatement: {
+      title: "A recompute posts an adjustment, never a rewrite",
+      nodes: [
+        { id: "run0", label: "run_id 0", sub: "stream, first pass", kind: "service", col: 0, row: 0 },
+        { id: "invoiced", label: "Period invoiced", sub: "closed, billed to advertiser", kind: "external", col: 1, row: 0 },
+        {
+          id: "run2",
+          label: "run_id 2",
+          sub: "nightly recompute, corrected",
+          kind: "service",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "A full recompute over the immutable archive, written as a new numbered run rather than overwriting run_id 0.",
+            why: "Keeping the old run intact means the served table's history is never silently rewritten; only a new run supersedes it going forward.",
+          },
+        },
+        { id: "bugfound", label: "Bug found", sub: "3 weeks later", kind: "external", col: 1, row: 1 },
+        {
+          id: "adjustment",
+          label: "Adjustment",
+          sub: "credit or charge, own record",
+          kind: "database",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "A credit or charge posted against the affected advertisers once a corrected run disagrees with an already-invoiced total.",
+            why: "A number that has already been invoiced is an accounting fact. Changing it needs a recorded adjustment, not a silent update.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "run0", to: "run2", tier: "hot", step: 1, label: "superseded by correction" },
+        { id: "e2", from: "bugfound", to: "run2", tier: "data", label: "triggers recompute" },
+        { id: "e3", from: "run2", to: "adjustment", tier: "hot", step: 2, label: "corrected total" },
+        { id: "e4", from: "invoiced", to: "adjustment", tier: "control", label: "never rewritten in place" },
+      ],
+    },
+  },
 };

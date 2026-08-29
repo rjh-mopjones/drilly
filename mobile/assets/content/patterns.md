@@ -79,35 +79,7 @@ The gateway runs on two hundred machines, all of them enforcing the same limit f
 
 Worked example. `user_42` sits at 99 requests against a limit of 100, and two requests arrive in the same millisecond on different gateway nodes. Under the bad version, node A reads 99, node B reads 99, both decide allow, both write 100: the store now shows 100 having actually let through 101. Under the atomic version, the store runs node A's script to completion first, sees 99, allows it and writes 100; node B's script then runs against the already-updated 100, sees the limit is reached, and denies. At 1M requests a second with a half-millisecond round trip, hundreds of requests are typically in flight against any popular key at once, so this is the ordinary case, not an edge case.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Two nodes racing an unsafe read-then-write against the store, compared with one atomic script per node">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-opacity:.55;stroke-width:1.3}
-    .flowacc{fill:none;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="140" y="20">Read-then-write: both see 99</text>
-  <text class="sub" x="55" y="44">Node A</text><text class="sub" x="225" y="44">Node B</text>
-  <line class="flow" x1="20" y1="56" x2="20" y2="270"/><line class="flow" x1="260" y1="56" x2="260" y2="270"/>
-  <circle class="acc" cx="20" cy="80" r="4"/><text class="sub" x="70" y="80">read 99</text>
-  <circle class="acc" cx="260" cy="92" r="4"/><text class="sub" x="200" y="92">read 99</text>
-  <circle cx="20" cy="130" r="4" fill="currentColor"/><text class="sub" x="72" y="130">write 100</text>
-  <circle cx="260" cy="142" r="4" fill="currentColor"/><text class="sub" x="198" y="142">write 100</text>
-  <text class="sub" x="140" y="180">store ends at 100, having allowed 101 requests</text>
-
-  <text class="lbl" x="590" y="20">Atomic script: B waits its turn</text>
-  <text class="sub" x="500" y="44">Node A</text><text class="sub" x="670" y="44">Node B</text>
-  <line class="flow" x1="470" y1="56" x2="470" y2="270"/><line class="flow" x1="710" y1="56" x2="710" y2="270"/>
-  <rect class="box acc" x="450" y="70" width="40" height="34" rx="4"/><text class="sub" x="530" y="87">runs: 99→allow→100</text>
-  <rect class="box" x="690" y="112" width="40" height="34" rx="4"/><text class="sub" x="640" y="129">waits for the shard</text>
-  <rect class="box" x="690" y="150" width="40" height="34" rx="4"/><text class="sub" x="655" y="167">runs: 100→deny</text>
-  <text class="sub" x="590" y="220">shard is single-threaded: one script finishes before the next starts</text>
-</svg>
-```
+[Two nodes race the same key; the shard serializes](/diagram/rate-limiter?figure=race)
 
 #### A shared store, or a counter on every node
 Every node could keep its own count with no network hop at all. What does that actually cost, and when is it the right answer?
@@ -122,26 +94,7 @@ Every node could keep its own count with no network hop at all. What does that a
 
 The arithmetic is the actual decider, not intuition. Local counters only make sense once `limit ÷ N` stays comfortably above one per window per node, roughly `limit > 10 × N`. At two hundred nodes that needs limits above about 2,000 per window; a per-user limit of 100 misses that by a factor of twenty, and needs the shared store.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="A gateway node reserving a block of 20 tokens in one round trip, then spending them locally for the next 20 requests">
-  <defs><marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ahb)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="70" width="170" height="50" rx="9"/><text class="lbl" x="105" y="90">Gateway node</text><text class="sub" x="105" y="106">local block: 20 tokens</text>
-  <rect class="box acc" x="560" y="70" width="170" height="50" rx="9"/><text class="lbl" x="645" y="90">Counter store</text><text class="sub" x="645" y="106">grants one block of 20</text>
-  <path class="flow acc" d="M190,85 L558,85"/><text class="sub" x="375" y="70">1 round trip: "give me 20"</text>
-  <text class="sub" x="105" y="150">requests 1–20 spend locally, 0 round trips</text>
-  <text class="sub" x="105" y="170">request 21 triggers the next reservation</text>
-  <text class="sub" x="645" y="150">worst case if every node reserves at once:</text>
-  <text class="sub" x="645" y="170">N × W = 200 × 20 = 4,000 over the limit</text>
-</svg>
-```
+[Block reservation: one round trip serves twenty requests](/diagram/rate-limiter?figure=block-reservation)
 
 A shared store does not make every hot key cheap, either. Sharding spreads keys evenly across the sixteen shards, but it cannot split one key. A single identity running 200k requests a second lands every one of those checks on the one shard that owns it, twice that shard's roughly 100k-a-second ceiling, and no amount of resharding helps, because the key is the unit of placement. The two fixes both spend accuracy on purpose: split the key into `k` random sub-counters, each enforcing `limit ÷ k`, which turns enforcement statistical; or use the same block reservation above, which is the better fix when the hot key belongs to one large, named customer, because the bound is explainable rather than approximate.
 
@@ -165,28 +118,27 @@ else:                deny;   retry_after = tat - τ - now
 That single comparison also produces an exact `Retry-After` for the deny path, rather than an estimate, which matters because a wrong `Retry-After` is what synchronises a crowd of clients into retrying at the same instant. Token bucket computes the identical decision from two separate fields, crediting `(now − last_refill) × rate` and capping at B; GCRA is the same arithmetic with those two fields folded into one instant.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A timeline of theoretical arrival time: each allowed request pushes tat forward by T; a request inside the burst tolerance is allowed, one outside it is denied with an exact retry-after">
-  <defs><marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img" aria-label="A vertical timeline of theoretical arrival time: two on-schedule requests each push tat forward by T, a request inside the burst window is denied with an exact retry-after, and one at tat minus tau is allowed">
   <style>
-    .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3;marker-end:url(#ahc)}
-    .tick{stroke:currentColor;stroke-opacity:.5;stroke-width:1.3}
+    .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
+    .tick{stroke:currentColor;stroke-opacity:.5;stroke-width:1.2}
     .acc{stroke:var(--accent);fill:var(--accent)}
     .miss{stroke:currentColor;fill:currentColor}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="30" y1="120" x2="730" y2="120"/>
-  <text class="sub" x="700" y="105">time</text>
-  <circle class="acc" cx="120" cy="120" r="5"/><text class="sub" x="120" y="145" text-anchor="middle">req, tat→T later</text>
-  <circle class="acc" cx="240" cy="120" r="5"/><text class="sub" x="240" y="145" text-anchor="middle">req, tat→T later</text>
-  <line class="tick" x1="240" y1="70" x2="240" y2="120" stroke-dasharray="3 3"/>
-  <rect x="200" y="60" width="80" height="16" fill="none" class="tick" stroke-dasharray="2 2"/><text class="sub" x="240" y="52" text-anchor="middle">τ burst window</text>
-  <circle class="miss" cx="420" cy="120" r="5"/><text class="sub" x="420" y="145" text-anchor="middle">req before tat−τ: deny</text>
-  <line class="tick" x1="420" y1="120" x2="470" y2="120" stroke-dasharray="4 3"/>
-  <text class="sub" x="445" y="105" text-anchor="middle">retry_after</text>
-  <circle class="acc" cx="470" cy="120" r="5"/><text class="sub" x="500" y="180" text-anchor="middle">req at tat−τ: allow</text>
-  <text class="sub" x="380" y="200">one stored field, tat, replaces (tokens, last_refill_ts); the deny path reads its own exact wait time off the axis</text>
+  <text class="lbl" x="8" y="16">GCRA: one field, tat, decides allow or deny</text>
+  <line class="axis" x1="40" y1="30" x2="40" y2="270"/>
+  <circle class="acc" cx="40" cy="55" r="5"/><text class="sub" x="55" y="59">req, tat → T later</text>
+  <circle class="acc" cx="40" cy="95" r="5"/><text class="sub" x="55" y="99">req, tat → T later</text>
+  <rect class="tick" x="30" y="55" width="20" height="40" fill="none" stroke-dasharray="2 2"/>
+  <text class="sub" x="55" y="80">τ burst window</text>
+  <circle class="miss" cx="40" cy="170" r="5"/><text class="sub" x="55" y="164">before tat−τ: deny</text>
+  <line class="tick" x1="40" y1="170" x2="40" y2="215" stroke-dasharray="4 3"/>
+  <text class="sub" x="55" y="192">retry_after (exact)</text>
+  <circle class="acc" cx="40" cy="215" r="5"/><text class="sub" x="55" y="219">at tat−τ: allow</text>
+  <text class="sub" x="8" y="250">one stored field, tat, replaces (tokens, last_refill_ts)</text>
+  <text class="sub" x="8" y="268">deny reads its exact wait time off the same axis</text>
 </svg>
 ```
 
@@ -326,28 +278,28 @@ Both approaches hash keys into numbers. Why does one move 91% of the keyspace on
 Worked example. Ten servers, each with one position, modulo-hashed against 10 keys. Add an eleventh server and nine of the ten keys change owner, because `h mod 10` and `h mod 11` agree for only one value in eleven. On the ring, that same eleventh server claims one arc between itself and its counter-clockwise predecessor. Every key outside that arc answers exactly as it did before, because its nearest clockwise server has not changed.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Modulo hashing rewires almost every key when N changes; a ring only rewires the keys inside the new arc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 360" role="img" aria-label="Modulo hashing rewires almost every key when N changes; a ring only rewires the keys inside the new arc">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{stroke:var(--accent)}
     .hit{fill:var(--accent)}
     .miss{fill:currentColor;opacity:.35}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="190" y="20">hash(key) % N: N changes, every answer can change</text>
-  <g transform="translate(20,40)">
-    <circle class="hit" cx="16" cy="16" r="7"/><circle class="hit" cx="56" cy="16" r="7"/><circle class="hit" cx="96" cy="16" r="7"/><circle class="hit" cx="136" cy="16" r="7"/><circle class="hit" cx="176" cy="16" r="7"/>
-    <circle class="hit" cx="216" cy="16" r="7"/><circle class="hit" cx="256" cy="16" r="7"/><circle class="hit" cx="296" cy="16" r="7"/><circle class="miss" cx="336" cy="16" r="7"/><circle class="hit" cx="16" cy="60" r="7"/>
-    <text class="sub" x="180" y="90">N: 10 → 11, only 1 key of 10 keeps its remainder</text>
+  <text class="lbl" x="8" y="16">hash(key) % N: N changes, every answer can change</text>
+  <g transform="translate(30,36)">
+    <circle class="hit" cx="0" cy="14" r="6"/><circle class="hit" cx="36" cy="14" r="6"/><circle class="hit" cx="72" cy="14" r="6"/><circle class="hit" cx="108" cy="14" r="6"/><circle class="hit" cx="144" cy="14" r="6"/>
+    <circle class="hit" cx="0" cy="50" r="6"/><circle class="hit" cx="36" cy="50" r="6"/><circle class="hit" cx="72" cy="50" r="6"/><circle class="hit" cx="108" cy="50" r="6"/><circle class="miss" cx="144" cy="50" r="6"/>
   </g>
-  <text class="lbl" x="570" y="20">Ring: only the new arc's keys move</text>
-  <circle class="box" cx="570" cy="140" r="80"/>
-  <circle class="acc" cx="610" cy="70" r="6"/><text class="sub" x="640" y="65">new server</text>
-  <circle cx="510" cy="90" r="5" fill="currentColor"/><circle cx="640" cy="150" r="5" fill="currentColor"/><circle cx="530" cy="205" r="5" fill="currentColor"/>
-  <path class="acc" d="M570,140 L610,70" stroke-width="2" fill="none"/>
-  <text class="sub" x="570" y="245">only the arc between the new point and its predecessor changes owner</text>
+  <text class="sub" x="8" y="112">N: 10 → 11, only 1 key of 10 keeps its remainder</text>
+  <text class="lbl" x="8" y="150">Ring: only the new arc's keys move</text>
+  <circle class="box" cx="200" cy="250" r="70"/>
+  <circle class="acc" cx="234" cy="190" r="6"/><text class="sub" x="248" y="180">new server</text>
+  <circle cx="149" cy="208" r="5" fill="currentColor"/><circle cx="260" cy="259" r="5" fill="currentColor"/><circle cx="166" cy="305" r="5" fill="currentColor"/>
+  <path class="acc" d="M200,250 L234,190" stroke-width="2" fill="none"/>
+  <text class="sub" x="8" y="335">only the arc between the new point and its</text>
+  <text class="sub" x="8" y="350">predecessor changes owner</text>
 </svg>
 ```
 
@@ -365,20 +317,20 @@ One point per server is enough to make the ring work, but not enough to make it 
 The metadata cost of this is tiny by comparison. Each ring entry is a 32-bit position and a 64-bit vnode id, rounded to 16 bytes with alignment. At 1,000 servers and 200 positions each, that is 1,000 × 200 × 16B ≈ **3.2MB**, small enough to sit entirely in a processor's L2 cache on every node.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="One server's owned keyspace as V grows from 1 random position to 200, spread falling as one over the square root of V">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 230" role="img" aria-label="One server's owned keyspace as V grows from 1 random position to 200, spread falling as one over the square root of V">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .bar{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{text-anchor:middle}
   </style>
-  <line class="axis" x1="60" y1="190" x2="740" y2="190"/>
-  <rect class="bar" x="90" y="30" width="60" height="160"/><text class="sub" x="120" y="210" text-anchor="middle">V=1</text><text class="sub" x="120" y="20" text-anchor="middle">~100%</text>
-  <rect class="bar" x="240" y="150" width="60" height="40"/><text class="sub" x="270" y="210" text-anchor="middle">V=100</text><text class="sub" x="270" y="140" text-anchor="middle">~10%</text>
-  <rect class="bar" x="390" y="160" width="60" height="30"/><text class="sub" x="420" y="210" text-anchor="middle">V=200</text><text class="sub" x="420" y="150" text-anchor="middle">~7.1%</text>
-  <rect class="bar" x="540" y="175" width="60" height="15"/><text class="sub" x="570" y="210" text-anchor="middle">V=1000</text><text class="sub" x="570" y="165" text-anchor="middle">~3.2%</text>
-  <text class="lbl" x="400" y="15" text-anchor="middle">spread (coefficient of variation), bar height ∝ 1/sqrt(V)</text>
+  <text class="lbl" x="200" y="14">spread (coeff. of variation) falls as 1/√V</text>
+  <line class="axis" x1="15" y1="190" x2="385" y2="190"/>
+  <rect class="bar" x="20" y="30" width="50" height="160"/><text class="sub" x="45" y="205">V=1</text><text class="sub" x="45" y="22">~100%</text>
+  <rect class="bar" x="120" y="150" width="50" height="40"/><text class="sub" x="145" y="205">V=100</text><text class="sub" x="145" y="142">~10%</text>
+  <rect class="bar" x="220" y="160" width="50" height="30"/><text class="sub" x="245" y="205">V=200</text><text class="sub" x="245" y="152">~7.1%</text>
+  <rect class="bar" x="320" y="175" width="50" height="15"/><text class="sub" x="345" y="205">V=1000</text><text class="sub" x="345" y="167">~3.2%</text>
 </svg>
 ```
 
@@ -424,28 +376,29 @@ More positions smooth the ring, but they also mean a server's replica peers spre
 **Great: fewer positions, placed deliberately rather than randomly.** A token allocation algorithm chooses each new position to minimise the resulting imbalance instead of trusting chance. That recovers most of the balance a larger random V would have given, at a fraction of the position count, and a rebuild then pulls from sixteen peers instead of the whole cluster.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="At 200 random positions almost every triple of servers is some key's replica set; at 16 positions most triples share nothing">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 320" role="img" aria-label="At 200 random positions almost every triple of servers is some key's replica set; at 16 positions most triples share nothing">
   <style>
     .dot{fill:currentColor}
     .hit{fill:var(--accent)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="190" y="20">V = 200: replica peers ≈ the whole cluster</text>
-  <g transform="translate(40,50)">
-    <circle class="hit" cx="10" cy="10" r="5"/><circle class="hit" cx="40" cy="10" r="5"/><circle class="hit" cx="70" cy="10" r="5"/><circle class="hit" cx="100" cy="10" r="5"/><circle class="hit" cx="130" cy="10" r="5"/>
-    <circle class="hit" cx="10" cy="40" r="5"/><circle class="hit" cx="40" cy="40" r="5"/><circle class="hit" cx="70" cy="40" r="5"/><circle class="hit" cx="100" cy="40" r="5"/><circle class="hit" cx="130" cy="40" r="5"/>
-    <circle class="hit" cx="10" cy="70" r="5"/><circle class="hit" cx="40" cy="70" r="5"/><circle class="hit" cx="70" cy="70" r="5"/><circle class="hit" cx="100" cy="70" r="5"/><circle class="hit" cx="130" cy="70" r="5"/>
+  <text class="lbl" x="8" y="16">V = 200: replica peers ≈ the whole cluster</text>
+  <g transform="translate(30,32)">
+    <circle class="hit" cx="0" cy="0" r="5"/><circle class="hit" cx="34" cy="0" r="5"/><circle class="hit" cx="68" cy="0" r="5"/><circle class="hit" cx="102" cy="0" r="5"/><circle class="hit" cx="136" cy="0" r="5"/>
+    <circle class="hit" cx="0" cy="30" r="5"/><circle class="hit" cx="34" cy="30" r="5"/><circle class="hit" cx="68" cy="30" r="5"/><circle class="hit" cx="102" cy="30" r="5"/><circle class="hit" cx="136" cy="30" r="5"/>
+    <circle class="hit" cx="0" cy="60" r="5"/><circle class="hit" cx="34" cy="60" r="5"/><circle class="hit" cx="68" cy="60" r="5"/><circle class="hit" cx="102" cy="60" r="5"/><circle class="hit" cx="136" cy="60" r="5"/>
   </g>
-  <text class="sub" x="190" y="160">any 3 failing at once: almost certainly loses some key's replica set</text>
-  <text class="lbl" x="570" y="20">V = 16: most triples share nothing</text>
-  <g transform="translate(500,50)">
-    <circle class="hit" cx="10" cy="10" r="5"/><circle class="dot" cx="40" cy="10" r="5" opacity=".25"/><circle class="dot" cx="70" cy="10" r="5" opacity=".25"/><circle class="hit" cx="100" cy="10" r="5"/><circle class="dot" cx="130" cy="10" r="5" opacity=".25"/>
-    <circle class="dot" cx="10" cy="40" r="5" opacity=".25"/><circle class="dot" cx="40" cy="40" r="5" opacity=".25"/><circle class="hit" cx="70" cy="40" r="5"/><circle class="dot" cx="100" cy="40" r="5" opacity=".25"/><circle class="dot" cx="130" cy="40" r="5" opacity=".25"/>
-    <circle class="dot" cx="10" cy="70" r="5" opacity=".25"/><circle class="dot" cx="40" cy="70" r="5" opacity=".25"/><circle class="dot" cx="70" cy="70" r="5" opacity=".25"/><circle class="dot" cx="100" cy="70" r="5" opacity=".25"/><circle class="dot" cx="130" cy="70" r="5" opacity=".25"/>
+  <text class="sub" x="8" y="120">any 3 failing at once: almost certainly</text>
+  <text class="sub" x="8" y="135">loses some key's replica set</text>
+  <text class="lbl" x="8" y="170">V = 16: most triples share nothing</text>
+  <g transform="translate(30,186)">
+    <circle class="hit" cx="0" cy="0" r="5"/><circle class="dot" cx="34" cy="0" r="5" opacity=".25"/><circle class="dot" cx="68" cy="0" r="5" opacity=".25"/><circle class="hit" cx="102" cy="0" r="5"/><circle class="dot" cx="136" cy="0" r="5" opacity=".25"/>
+    <circle class="dot" cx="0" cy="30" r="5" opacity=".25"/><circle class="dot" cx="34" cy="30" r="5" opacity=".25"/><circle class="hit" cx="68" cy="30" r="5"/><circle class="dot" cx="102" cy="30" r="5" opacity=".25"/><circle class="dot" cx="136" cy="30" r="5" opacity=".25"/>
+    <circle class="dot" cx="0" cy="60" r="5" opacity=".25"/><circle class="dot" cx="34" cy="60" r="5" opacity=".25"/><circle class="dot" cx="68" cy="60" r="5" opacity=".25"/><circle class="dot" cx="102" cy="60" r="5" opacity=".25"/><circle class="dot" cx="136" cy="60" r="5" opacity=".25"/>
   </g>
-  <text class="sub" x="570" y="160">the same 3 failing: most possible triples never co-owned a key</text>
+  <text class="sub" x="8" y="280">the same 3 failing: most possible triples</text>
+  <text class="sub" x="8" y="295">never co-owned a key</text>
 </svg>
 ```
 
@@ -569,24 +522,25 @@ With three replicas, waiting for all three to answer every request would make th
 Worked example, the counterexample worth carrying. A write to N=3 with W=2 reaches replica 1, and the coordinator dies before reaching replica 2, so the write is never actually acknowledged to the client. A later R=2 read hitting replicas 1 and 3 returns the new value. A read straight after that, hitting replicas 2 and 3, does not. Two reads, no write in between, two different answers, which a linearizable store forbids.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Any W=2 acknowledging set and any R=2 responding set out of 3 replicas must share a member; the shared member is what a read is guaranteed to see">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Any W=2 acknowledging set and any R=2 responding set out of 3 replicas must share a member; the shared member is what a read is guaranteed to see">
   <style>
     .set{fill:var(--accent);fill-opacity:.12;stroke:var(--accent);stroke-width:1.5}
     .set2{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .dot{fill:currentColor}
     .hit{fill:var(--accent)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{text-anchor:middle}
   </style>
-  <ellipse class="set" cx="260" cy="140" rx="170" ry="95"/>
-  <ellipse class="set2" cx="440" cy="140" rx="170" ry="95"/>
-  <text class="sub" x="180" y="60">W=2 acknowledged</text>
-  <text class="sub" x="530" y="60">R=2 responding</text>
-  <circle class="dot" cx="200" cy="150" r="7"/><text class="sub" x="200" y="175">R1</text>
-  <circle class="hit" cx="350" cy="150" r="8"/><text class="sub" x="350" y="180">R2, in both sets</text>
-  <circle class="dot" cx="500" cy="150" r="7"/><text class="sub" x="500" y="175">R3</text>
-  <text class="lbl" x="380" y="235">N=3, any 2-of-3 sets always overlap by at least one replica</text>
+  <ellipse class="set" cx="150" cy="130" rx="100" ry="65"/>
+  <ellipse class="set2" cx="250" cy="130" rx="100" ry="65"/>
+  <text class="sub" x="105" y="55">W=2 acknowledged</text>
+  <text class="sub" x="295" y="55">R=2 responding</text>
+  <circle class="dot" cx="115" cy="135" r="6"/><text class="sub" x="115" y="158">R1</text>
+  <circle class="hit" cx="200" cy="135" r="7"/><text class="sub" x="200" y="160">R2, in both sets</text>
+  <circle class="dot" cx="285" cy="135" r="6"/><text class="sub" x="285" y="158">R3</text>
+  <text class="lbl" x="200" y="225">N=3, any 2-of-3 sets always overlap by</text>
+  <text class="lbl" x="200" y="242">at least one replica</text>
 </svg>
 ```
 
@@ -601,49 +555,7 @@ Every acknowledged write at W=2 leaves one replica behind, on purpose, every tim
 
 **Great: run all three, and know exactly which gap each one closes.** **Read repair** fixes a stale replica the instant a read happens to notice it: the coordinator asks one replica for the value and the rest for a cheap digest, and a mismatch triggers a writeback to whoever was behind. Its hole is structural: it only touches keys somebody reads, so under the Zipfian skew every real workload has, a long tail can go unread and unrepaired for months. **Hinted handoff** covers an unreachable replica by parking its writes on a healthy neighbour, tagged with the intended owner, replayed the moment that owner returns. Its hole is the TTL: past three hours the hints are dropped, and the problem passes to the third mechanism. **Anti-entropy** sweeps everything, comparing Merkle trees, hashes of hashes, between replicas and recursing only into the branches that disagree. Its hole is cost: building the tree reads every key in the range regardless of how little diverged, about 1.1 hours per node at this size, whether one key was stale or a million.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 560" role="img" aria-label="Quorum read repair sequence: coordinator fans a read to three replicas, responds after R equals 2, then repairs the stale replica">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .life{ fill:none; stroke:currentColor; stroke-width:1; stroke-opacity:0.4; stroke-dasharray:4 4; }
-    .note{ fill:currentColor; fill-opacity:0.06; stroke:currentColor; stroke-opacity:0.5; stroke-width:1.2; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <line class="life" x1="70" y1="66" x2="70" y2="540"/>
-  <line class="life" x1="225" y1="66" x2="225" y2="540"/>
-  <line class="life" x1="375" y1="66" x2="375" y2="540"/>
-  <line class="life" x1="525" y1="66" x2="525" y2="540"/>
-  <line class="life" x1="685" y1="66" x2="685" y2="540"/>
-  <rect class="box" x="15" y="20" width="110" height="44" rx="9"/><text class="sub" x="70" y="42">Client</text>
-  <rect class="box" x="165" y="20" width="120" height="44" rx="9"/><text class="sub" x="225" y="42">Coordinator</text>
-  <rect class="box" x="315" y="20" width="120" height="44" rx="9"/><text class="sub" x="375" y="35">Replica1</text><text class="edge" x="375" y="51">v=5</text>
-  <rect class="box" x="465" y="20" width="120" height="44" rx="9"/><text class="sub" x="525" y="35">Replica2</text><text class="edge" x="525" y="51">v=5</text>
-  <rect class="box acc" x="625" y="20" width="120" height="44" rx="9"/><text class="sub" x="685" y="35">Replica3</text><text class="edge" x="685" y="51">v=3 STALE</text>
-  <path class="flow" d="M70,95 L225,95"/><text class="edge" x="147" y="87">GET key</text>
-  <path class="flow" d="M225,130 L375,130"/><text class="edge" x="300" y="122">read</text>
-  <path class="flow" d="M225,165 L525,165"/><text class="edge" x="375" y="157">read</text>
-  <path class="flow" d="M225,200 L685,200"/><text class="edge" x="455" y="192">read</text>
-  <path class="flow dash" d="M375,235 L225,235"/><text class="edge" x="300" y="227">v=5, value_new</text>
-  <path class="flow dash" d="M525,270 L225,270"/><text class="edge" x="375" y="262">v=5, value_new</text>
-  <rect class="note" x="150" y="290" width="150" height="30" rx="6"/><text class="edge" x="225" y="305">R=2 satisfied → respond</text>
-  <path class="flow dash acc" d="M225,345 L70,345"/><text class="edge" x="147" y="337">value_new (v=5)</text>
-  <path class="flow dash" d="M685,380 L225,380"/><text class="edge" x="455" y="372">v=3, value_old</text>
-  <rect class="note" x="150" y="398" width="150" height="30" rx="6"/><text class="edge" x="225" y="413">divergence detected</text>
-  <path class="flow acc" d="M225,453 L685,453"/><text class="edge" x="455" y="445">write_repair(v=5, value_new)</text>
-  <path class="flow dash" d="M685,488 L225,488"/><text class="edge" x="455" y="480">ack</text>
-  <rect class="note" x="615" y="506" width="140" height="30" rx="6"/><text class="edge" x="685" y="521">replica converged</text>
-</svg>
-```
+[Read repair: two fast replicas satisfy R=2, the stale third catches up](/diagram/distributed-kv-store?figure=read-repair)
 
 #### Deletes that refuse to delete
 A delete cannot simply remove the row, because every repair mechanism above compares versions, and an absent row loses to a present row in every comparison. A replica that missed a delete would helpfully bring the data back.
@@ -659,20 +571,23 @@ A delete cannot simply remove the row, because every repair mechanism above comp
 Worked example. A row is deleted on day 0. Anti-entropy normally sweeps every range within 1.1 hours, so the tombstone reaches every replica the same day. If repair then falls behind for eleven days, past the ten-day grace window, a replica that was offline for the whole gap purges nothing because it never received the tombstone, and any replica that already purged its copy of the tombstone has no record the delete ever happened. The fix, when repair falls behind, is to raise the grace period. Running repair harder is not available, because repair is usually already the saturated resource.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A tombstone's grace period must outlast the worst-case gap between repair passes, or a replica that missed the delete can resurrect the row after purge">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="A tombstone's grace period must outlast the worst-case gap between repair passes, or a replica that missed the delete can resurrect the row after purge">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .safe{fill:var(--accent);fill-opacity:.18;stroke:var(--accent);stroke-width:1.4}
     .danger{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.6;stroke-width:1.4;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="30" y1="140" x2="730" y2="140"/>
-  <rect class="safe" x="60" y="60" width="560" height="50"/><text class="sub" x="340" y="90" text-anchor="middle">gc_grace_seconds: 10 days, repair passes every ~1.1h</text>
-  <rect class="danger" x="620" y="60" width="90" height="50"/><text class="sub" x="665" y="155" text-anchor="middle">repair falls behind past 10 days: purge before every replica saw the tombstone</text>
-  <text class="lbl" x="60" y="40">delete written, day 0</text>
-  <text class="lbl" x="600" y="40">grace window ends</text>
+  <text class="lbl" x="8" y="16">delete written, day 0</text>
+  <line class="axis" x1="15" y1="140" x2="385" y2="140"/>
+  <rect class="safe" x="20" y="60" width="290" height="50"/>
+  <text class="sub" x="30" y="80">gc_grace_seconds: 10 days,</text>
+  <text class="sub" x="30" y="96">repair passes every ~1.1h</text>
+  <rect class="danger" x="310" y="60" width="65" height="50"/>
+  <text class="lbl" x="20" y="40">grace window ends</text>
+  <text class="sub" x="8" y="180">repair falls behind past 10 days: purge happens</text>
+  <text class="sub" x="8" y="196">before every replica has seen the tombstone</text>
 </svg>
 ```
 
@@ -689,29 +604,7 @@ Two clients write the same key within the same millisecond, both against differe
 
 Worked example. Client A in New York writes `{"balance": 100}`. Client B in London writes `{"balance": 200}` in the same millisecond, against a different coordinator. Both satisfy W=2. Version vectors mark the two writes concurrent, because neither vector dominates the other, and a subsequent read returns both siblings with their vectors. Last-write-wins would have silently picked one by timestamp and discarded the other, and if New York's clock ran two seconds fast, it could discard the value that actually happened last.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="Version vector dominance: one vector strictly greater than another is newer; neither greater means concurrent, and both are returned"
->
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="180" y="24">Dominance: {A:3,B:5} → {A:4,B:5}</text>
-  <rect class="box" x="40" y="50" width="140" height="40" rx="8"/><text class="sub" x="110" y="70">{A:3, B:5}</text>
-  <rect class="box acc" x="240" y="50" width="140" height="40" rx="8"/><text class="sub" x="310" y="70">{A:4, B:5}</text>
-  <path class="flow acc" d="M180,70 L240,70"/>
-  <text class="sub" x="210" y="105">every component ≥, one strictly greater: newer</text>
-  <text class="lbl" x="580" y="24">Concurrent: {A:3,B:5} vs {A:4,B:4}</text>
-  <rect class="box" x="480" y="50" width="140" height="40" rx="8"/><text class="sub" x="550" y="70">{A:3, B:5}</text>
-  <rect class="box" x="640" y="50" width="110" height="40" rx="8"/><text class="sub" x="695" y="70">{A:4, B:4}</text>
-  <text class="sub" x="600" y="105">neither dominates: both returned as siblings</text>
-  <text class="sub" x="380" y="180">merge happens above the store: application code, or a self-merging type</text>
-</svg>
-```
+[Version vectors: dominance versus concurrency](/diagram/distributed-kv-store?figure=version-vectors)
 
 #### Sloppy quorum: available at the price of the guarantee it just gave you
 During a partition, the coordinator cannot always reach the canonical replicas. What happens to `W + R > N` when the nodes that acknowledge a write are not the key's actual owners?
@@ -793,19 +686,19 @@ The whole design is decided by four numbers, so derive them before choosing the 
 > **The numbers to carry.** 1024 worker slots (10 bits) · 4,096 IDs/ms/worker, ~4.1M/s ceiling (12 bits) · ~69.7 years of runway (41 bits) · ~320GB of extra index at 10¹⁰ rows if the ID were twice as wide.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="A 64-bit id: unused sign bit, 41 bits of milliseconds since a custom epoch, 10 bits of worker id, 12 bits of sequence">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="A 64-bit id: unused sign bit, 41 bits of milliseconds since a custom epoch, 10 bits of worker id, 12 bits of sequence, high bits to low bits">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{fill:var(--accent);fill-opacity:.15;stroke:var(--accent)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <rect class="box" x="30" y="60" width="26" height="50"/><text class="sub" x="43" y="130">sign, 1b</text>
-  <rect class="acc" x="56" y="60" width="420" height="50"/><text class="lbl" x="266" y="90">timestamp, 41 bits</text><text class="sub" x="266" y="130">~69.7 years from a custom epoch</text>
-  <rect class="box" x="476" y="60" width="140" height="50"/><text class="lbl" x="546" y="90">worker, 10 bits</text><text class="sub" x="546" y="130">1024 slots</text>
-  <rect class="box" x="616" y="60" width="114" height="50"/><text class="lbl" x="673" y="90">seq, 12 bits</text><text class="sub" x="673" y="130">4096 / ms</text>
-  <text class="sub" x="380" y="20">high bits ← sorts as an integer → low bits</text>
+  <text class="sub" x="8" y="16">high bits → low bits, sorts as an integer</text>
+  <rect class="box" x="20" y="24" width="360" height="26" rx="4"/><text class="lbl" x="30" y="41">sign, 1 bit</text>
+  <rect class="acc" x="20" y="58" width="360" height="34" rx="4"/><text class="lbl" x="30" y="72">timestamp, 41 bits</text><text class="sub" x="30" y="87">~69.7 years from a custom epoch</text>
+  <rect class="box" x="20" y="100" width="360" height="26" rx="4"/><text class="lbl" x="30" y="117">worker, 10 bits — 1024 slots</text>
+  <rect class="box" x="20" y="134" width="360" height="26" rx="4"/><text class="lbl" x="30" y="151">sequence, 12 bits — 4096 / ms</text>
+  <text class="sub" x="8" y="185">packed as (timestamp &lt;&lt; 22) | (worker &lt;&lt; 12) | sequence</text>
 </svg>
 ```
 
@@ -865,21 +758,24 @@ The uniqueness guarantee assumes `(timestamp, sequence)` never repeats within on
 Worked example. A VM is live-migrated and its clock jumps back three seconds, from `1740000003000` to `1740000000000`. Under the bad version, the generator keeps issuing, and every ID it mints in the next three seconds duplicates one it already issued moments earlier. Under the great version, the guard sees `now < last_ts`, halts issuance, alerts, and rejoins only once the wall clock genuinely passes `last_ts` again, never overlapping its own earlier output.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="Wall clock steps backward three seconds; the guard halts at the moment of the step and only resumes once real time passes the last timestamp used, never overlapping earlier output">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Wall clock steps backward three seconds; the guard halts at the moment of the step and only resumes once real time passes the last timestamp used, never overlapping earlier output">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .before{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}
     .halt{fill:currentColor;fill-opacity:.1;stroke:currentColor;stroke-opacity:.6;stroke-width:1.4;stroke-dasharray:4 3}
     .after{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{text-anchor:middle}
   </style>
-  <line class="axis" x1="30" y1="150" x2="730" y2="150"/>
-  <rect class="before" x="60" y="90" width="220" height="40"/><text class="sub" x="170" y="80">issuing normally, last_ts climbing</text>
-  <rect class="halt" x="280" y="90" width="260" height="40"/><text class="sub" x="410" y="185">clock steps back 3s here: halt, alert, refuse to issue</text>
-  <rect class="after" x="540" y="90" width="150" height="40"/><text class="sub" x="615" y="80">resumes once now &gt; last_ts</text>
-  <text class="lbl" x="280" y="55">step detected</text>
+  <line class="axis" x1="15" y1="115" x2="385" y2="115"/>
+  <rect class="before" x="20" y="85" width="105" height="30"/><text class="lbl" x="72" y="105">normal</text>
+  <rect class="halt" x="135" y="85" width="130" height="30"/><text class="lbl" x="200" y="105">HALT</text>
+  <rect class="after" x="275" y="85" width="105" height="30"/><text class="lbl" x="327" y="105">resume</text>
+  <text class="lbl" x="200" y="70">clock steps back 3s here</text>
+  <text class="sub" x="8" y="150">normal: issuing, last_ts climbing</text>
+  <text class="sub" x="8" y="167">HALT: now &lt; last_ts → halt, alert, refuse to issue</text>
+  <text class="sub" x="8" y="184">resume: once real time passes last_ts again</text>
 </svg>
 ```
 
@@ -897,21 +793,22 @@ The `now < last_ts` check works only as long as `last_ts` survives. What happens
 A crash restart inside the reserved window simply sleeps until the wall clock passes the watermark, so the cost lands entirely on restart latency, up to ten seconds, rather than on correctness. Tune the window against how often the process actually restarts, and log the sleep loudly, since a crash-looping process with this guard in front of it looks like a hang rather than a crash.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="The watermark is fsynced ten seconds ahead of issuance; a crash restart inside that window sleeps until real time catches up, rather than reissuing anything"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="The watermark is fsynced ten seconds ahead of issuance; a crash restart inside that window sleeps until real time catches up, rather than reissuing anything">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .issued{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}
     .reserved{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.55;stroke-width:1.4;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{text-anchor:middle}
   </style>
-  <line class="axis" x1="30" y1="140" x2="730" y2="140"/>
-  <rect class="issued" x="60" y="80" width="300" height="40"/><text class="sub" x="210" y="70">actual issuance, real time</text>
-  <rect class="reserved" x="360" y="80" width="200" height="40"/><text class="sub" x="460" y="70">watermark: fsynced now+10s</text>
-  <text class="lbl" x="460" y="165">crash + restart lands here: sleep until real time passes the watermark</text>
-  <line x1="460" y1="80" x2="460" y2="150" stroke="currentColor" stroke-dasharray="3 3" stroke-opacity=".5"/>
+  <line class="axis" x1="15" y1="115" x2="385" y2="115"/>
+  <rect class="issued" x="20" y="85" width="185" height="30"/><text class="lbl" x="112" y="105">issued</text>
+  <rect class="reserved" x="205" y="85" width="175" height="30"/><text class="lbl" x="292" y="105">reserved</text>
+  <text class="lbl" x="292" y="70">watermark: fsynced now+10s</text>
+  <text class="sub" x="8" y="150">issued: real issuance so far, real time</text>
+  <text class="sub" x="8" y="167">crash + restart lands here: sleep until real</text>
+  <text class="sub" x="8" y="182">time passes the watermark, nothing reissued</text>
 </svg>
 ```
 
@@ -1078,31 +975,30 @@ A link going from zero to 100,000 requests a second in two minutes hits every la
 Layer a probabilistic early refresh on top of the positive cache, where an entry inside the last tenth of its TTL is refreshed by exactly one request while the rest keep serving the old value. Without it, the hottest keys resynchronise their expiry and recreate a smaller version of the same herd every sixty seconds.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="A hundred thousand requests for one hot alias collapse to one read per app server through single-flight; a hundred thousand distinct enumeration probes do not, because there is nothing shared to coalesce">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img" aria-label="A hundred thousand requests for one hot alias collapse to one read per app server through single-flight; a hundred thousand distinct enumeration probes do not, because there is nothing shared to coalesce">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{stroke:var(--accent)}
     .miss{fill:currentColor;opacity:.3}
     .hit{fill:var(--accent)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="190" y="20">100k requests, 1 alias: coalesces</text>
-  <g transform="translate(20,40)">
-    <circle class="hit" cx="16" cy="16" r="6"/><circle class="hit" cx="46" cy="16" r="6"/><circle class="hit" cx="76" cy="16" r="6"/><circle class="hit" cx="106" cy="16" r="6"/><circle class="hit" cx="136" cy="16" r="6"/><circle class="hit" cx="166" cy="16" r="6"/><circle class="hit" cx="196" cy="16" r="6"/><circle class="hit" cx="226" cy="16" r="6"/>
-    <text class="sub" x="130" y="50">all requests for the same code, in flight together</text>
+  <text class="lbl" x="8" y="16">100k requests, 1 alias: coalesces</text>
+  <g transform="translate(20,32)">
+    <circle class="hit" cx="0" cy="10" r="6"/><circle class="hit" cx="30" cy="10" r="6"/><circle class="hit" cx="60" cy="10" r="6"/><circle class="hit" cx="90" cy="10" r="6"/><circle class="hit" cx="120" cy="10" r="6"/><circle class="hit" cx="150" cy="10" r="6"/><circle class="hit" cx="180" cy="10" r="6"/><circle class="hit" cx="210" cy="10" r="6"/><circle class="hit" cx="240" cy="10" r="6"/><circle class="hit" cx="270" cy="10" r="6"/><circle class="hit" cx="300" cy="10" r="6"/><circle class="hit" cx="330" cy="10" r="6"/>
   </g>
-  <path class="acc" d="M60,90 L340,90" stroke-width="2"/>
-  <text class="sub" x="200" y="115">one store read, every waiter shares the answer</text>
-  <text class="lbl" x="570" y="20">100k probes, 100k distinct codes: does not</text>
-  <g transform="translate(460,40)">
-    <circle class="miss" cx="16" cy="16" r="6"/><circle class="miss" cx="46" cy="16" r="6"/><circle class="miss" cx="76" cy="16" r="6"/><circle class="miss" cx="106" cy="16" r="6"/><circle class="miss" cx="136" cy="16" r="6"/><circle class="miss" cx="166" cy="16" r="6"/><circle class="miss" cx="196" cy="16" r="6"/><circle class="miss" cx="226" cy="16" r="6"/>
-    <text class="sub" x="130" y="50">every code is different: nothing shares an in-flight slot</text>
+  <text class="sub" x="8" y="60">all requests for the same code, in flight together</text>
+  <path class="acc" d="M20,80 L280,80" stroke-width="2"/>
+  <text class="sub" x="8" y="100">one store read, every waiter shares the answer</text>
+  <text class="lbl" x="8" y="140">100k probes, 100k distinct codes: does not</text>
+  <g transform="translate(20,156)">
+    <circle class="miss" cx="0" cy="10" r="6"/><circle class="miss" cx="30" cy="10" r="6"/><circle class="miss" cx="60" cy="10" r="6"/><circle class="miss" cx="90" cy="10" r="6"/><circle class="miss" cx="120" cy="10" r="6"/><circle class="miss" cx="150" cy="10" r="6"/><circle class="miss" cx="180" cy="10" r="6"/><circle class="miss" cx="210" cy="10" r="6"/><circle class="miss" cx="240" cy="10" r="6"/><circle class="miss" cx="270" cy="10" r="6"/><circle class="miss" cx="300" cy="10" r="6"/><circle class="miss" cx="330" cy="10" r="6"/>
   </g>
-  <text class="sub" x="590" y="115">store still sees every distinct probe</text>
-  <text class="lbl" x="590" y="150">fix: negative cache the miss, rate-limit 404s per IP</text>
-  <text class="sub" x="590" y="175">not single-flight, a different mechanism entirely</text>
+  <text class="sub" x="8" y="184">every code is different: nothing shares a slot</text>
+  <text class="sub" x="8" y="200">store still sees every distinct probe</text>
+  <text class="lbl" x="8" y="235">fix: negative cache the miss,</text>
+  <text class="lbl" x="8" y="252">rate-limit 404s per source IP</text>
+  <text class="sub" x="8" y="272">not single-flight — a different mechanism entirely</text>
 </svg>
 ```
 
@@ -1120,22 +1016,20 @@ Deletion has to reach every copy of a redirect for a takedown to actually work, 
 The choice between 301 and 302 is really this same trade-off, stated once at creation time instead of once per takedown. A 301 lets the browser skip asking again entirely, which is the cheapest possible answer for a link that will never change and where nobody is paying for click data. It also means that browser can never be reached again by any mechanism this design controls: the redirect it cached is unreachable, permanently, the moment the destination needs to change. A 302 keeps every client re-checking on a short cycle, at the cost of that cycle's worth of continuous edge traffic, in exchange for keeping the ability to retract or redirect the link at all.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="A deletion reaches four layers at different speeds: origin instantly, the memory cache on the same write, the CDN edge within its TTL or an explicit purge, and a browser holding a 301 not at all"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="A deletion reaches four layers at different speeds: origin instantly, the memory cache on the same write, the CDN edge within its TTL or an explicit purge, and a browser holding a 301 not at all">
   <style>
-    .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .fast{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
     .slow{fill:currentColor;fill-opacity:.1;stroke:currentColor;stroke-opacity:.55;stroke-width:1.4}
     .stuck{fill:currentColor;fill-opacity:.05;stroke:currentColor;stroke-opacity:.5;stroke-width:1.4;stroke-dasharray:4 3}
     .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="30" y1="170" x2="730" y2="170"/>
-  <rect class="fast" x="40" y="30" width="120" height="30"/><text class="sub" x="45" y="20">origin: instant</text>
-  <rect class="fast" x="40" y="70" width="130" height="30"/><text class="sub" x="45" y="115">memory cache: same write</text>
-  <rect class="slow" x="40" y="130" width="260" height="30"/><text class="sub" x="45" y="150">CDN: seconds with an explicit purge, else up to 60s TTL</text>
-  <rect class="stuck" x="320" y="130" width="380" height="30"/><text class="sub" x="330" y="150">browser holding a cached 301: not reachable at all</text>
+  <rect class="fast" x="140" y="8" width="30" height="22"/><text class="lbl" x="8" y="24">Origin</text><text class="sub" x="178" y="24">instant</text>
+  <rect class="fast" x="140" y="42" width="38" height="22"/><text class="lbl" x="8" y="58">Memory cache</text><text class="sub" x="186" y="58">same write</text>
+  <rect class="slow" x="140" y="76" width="150" height="22"/><text class="lbl" x="8" y="92">CDN edge</text>
+  <text class="sub" x="8" y="112">purge: seconds, else up to 60s TTL</text>
+  <rect class="stuck" x="140" y="132" width="240" height="22"/><text class="lbl" x="8" y="148">Browser, 301 cached</text>
+  <text class="sub" x="8" y="168">not reachable at all, ever</text>
 </svg>
 ```
 
@@ -1278,47 +1172,7 @@ A single priority queue looks like the obvious way to decide what to fetch next.
 
 Worked example. A top-band URL sitting behind 40,000 other queued URLs on its own host, paced at one request a second, waits roughly 40,000 seconds, over eleven hours, whatever its score says. Priority in this design governs which hosts get admitted, not the order URLs are fetched within a host. A URL that genuinely must be fetched sooner needs a separate express path spending part of that host's own rate budget directly, capped so it cannot quietly become the whole crawl.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 600" role="img" aria-label="Mercator two-tier URL frontier: front priority queues feed a weighted picker into per-host back queues, a min-heap on next fetch time, and a crawler thread that loops new URLs back">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <rect class="box" x="210" y="28" width="220" height="44" rx="9"/>
-  <text class="sub" x="320" y="50">New URLs</text>
-  <rect class="box" x="200" y="112" width="240" height="52" rx="9"/>
-  <text class="sub" x="320" y="130">Front queues</text>
-  <text class="edge" x="320" y="148">F=10 priority levels</text>
-  <polygon class="box acc" points="320,206 410,240 320,274 230,240"/>
-  <text class="sub" x="320" y="234">Pick weighted</text>
-  <text class="sub" x="320" y="250">by priority</text>
-  <rect class="box" x="190" y="322" width="260" height="54" rx="9"/>
-  <text class="sub" x="320" y="340">Back queues</text>
-  <text class="edge" x="320" y="358">B per host, B = 3&#215; threads</text>
-  <rect class="box" x="195" y="428" width="250" height="44" rx="9"/>
-  <text class="sub" x="320" y="450">Min-heap on next_fetch_time</text>
-  <rect class="box" x="235" y="518" width="170" height="44" rx="9"/>
-  <text class="sub" x="320" y="540">Crawler thread</text>
-  <path class="flow" d="M320,72 L320,112"/>
-  <path class="flow acc" d="M320,164 L320,206"/>
-  <text class="edge" x="330" y="186" text-anchor="start">priority router</text>
-  <path class="flow" d="M320,274 L320,322"/>
-  <path class="flow" d="M320,376 L320,428"/>
-  <path class="flow" d="M320,472 L320,518"/>
-  <text class="edge" x="330" y="496" text-anchor="start">head ready</text>
-  <path class="flow acc" d="M405,540 L560,540 L560,50 L430,50"/>
-  <text class="edge" x="570" y="295" text-anchor="start">fetch + parse + extract</text>
-</svg>
-```
+[Two-tier frontier: front queues for value, back queues for politeness](/diagram/web-crawler?figure=frontier)
 
 #### A lease, not a dequeue
 A worker that crashes mid-fetch cannot be allowed to lose the URL it was holding, and it cannot be allowed to duplicate the page if it merely appeared slow. What contract makes both true at once?
@@ -1335,51 +1189,7 @@ This is also why restart and ordinary retry share one code path. Everything unac
 
 [The full state machine a URL moves through](/diagram/web-crawler?focus=back-queues,p-fetch,p-parse,p-fingerprint,object-store,e11,e15,e20,e22)
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 560" role="img" aria-label="Web crawler URL lifecycle state machine: Discovered, Queued, Fetching, Parsed, Archived, NeedsRefresh, with Skipped, Retry and DeadLetter branches">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <circle cx="340" cy="28" r="7" fill="currentColor"/>
-  <circle cx="580" cy="150" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/>
-  <circle cx="580" cy="150" r="4" fill="currentColor"/>
-  <circle cx="580" cy="440" r="9" fill="none" stroke="currentColor" stroke-width="1.5"/>
-  <circle cx="580" cy="440" r="4" fill="currentColor"/>
-  <rect class="box" x="275" y="59" width="130" height="42" rx="9"/><text class="sub" x="340" y="81">Discovered</text>
-  <rect class="box" x="275" y="144" width="130" height="42" rx="9"/><text class="sub" x="340" y="166">Queued</text>
-  <rect class="box" x="275" y="229" width="130" height="42" rx="9"/><text class="sub" x="340" y="251">Fetching</text>
-  <rect class="box" x="275" y="314" width="130" height="42" rx="9"/><text class="sub" x="340" y="336">Parsed</text>
-  <rect class="box" x="275" y="399" width="130" height="42" rx="9"/><text class="sub" x="340" y="421">Archived</text>
-  <rect class="box" x="270" y="484" width="140" height="42" rx="9"/><text class="sub" x="340" y="506">NeedsRefresh</text>
-  <rect class="box" x="515" y="59" width="130" height="42" rx="9"/><text class="sub" x="580" y="81">Skipped</text>
-  <rect class="box" x="515" y="229" width="130" height="42" rx="9"/><text class="sub" x="580" y="251">Retry</text>
-  <rect class="box" x="515" y="339" width="130" height="42" rx="9"/><text class="sub" x="580" y="361">DeadLetter</text>
-  <path class="flow" d="M340,35 L340,59"/><text class="edge" x="350" y="46" text-anchor="start">link extracted</text>
-  <path class="flow" d="M340,101 L340,144"/><text class="edge" x="350" y="122" text-anchor="start">passes Bloom + robots check</text>
-  <path class="flow" d="M405,80 L515,80"/><text class="edge" x="460" y="70">blocked by robots/dedup</text>
-  <path class="flow" d="M580,101 L580,141"/>
-  <path class="flow" d="M340,186 L340,229"/><text class="edge" x="350" y="207" text-anchor="start">worker picks up (per-domain delay)</text>
-  <path class="flow" d="M340,271 L340,314"/><text class="edge" x="350" y="292" text-anchor="start">200 OK</text>
-  <path class="flow" d="M405,250 L515,250"/><text class="edge" x="460" y="240">5xx / timeout / 429</text>
-  <path class="flow" d="M405,262 L450,262 L450,360 L515,360"/><text class="edge" x="458" y="305" text-anchor="start">4xx permanent</text>
-  <path class="flow" d="M580,271 L580,339"/><text class="edge" x="590" y="305" text-anchor="start">max attempts</text>
-  <path class="flow" d="M515,250 L480,250 L480,205 L160,205 L160,172 L275,172"/><text class="edge" x="300" y="197">backoff elapsed</text>
-  <path class="flow" d="M580,381 L580,431"/>
-  <path class="flow" d="M340,356 L340,399"/><text class="edge" x="350" y="377" text-anchor="start">stored in object store</text>
-  <path class="flow" d="M340,441 L340,484"/><text class="edge" x="350" y="462" text-anchor="start">revisit_ts elapsed</text>
-  <path class="flow acc" d="M270,505 L120,505 L120,158 L275,158"/><text class="edge" x="130" y="330" text-anchor="start">re-enqueued</text>
-</svg>
-```
+[URL lifecycle: lease, retry, and dead-letter](/diagram/web-crawler?figure=lifecycle)
 
 #### Catching a duplicate without remembering every URL
 Ten billion URLs are too many to hold in an exact set cheaply. What does a crawler give up by remembering approximately instead, and where does that cost actually land?
@@ -1395,27 +1205,27 @@ Ten billion URLs are too many to hold in an exact set cheaply. What does a crawl
 Worked example. A page carries 300 outbound links; roughly three, at a 1% false-positive rate, are new URLs the filter wrongly calls "seen". Link-graph redundancy is the usual defence: a page reachable from three independent inbound links survives with probability `1 - 0.01^3`, about one in a million odds of total loss. That argument fails exactly where the loss matters. Popular, well-linked pages would have been found anyway; the pages actually lost are the singly-linked, long-tail content the crawl exists to find.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A Bloom filter bit array: adding a URL sets a few bits from independent hashes; checking a new URL that happens to hash onto bits already set by other URLs produces a false positive">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="A Bloom filter bit array: adding a URL sets a few bits from independent hashes; checking a new URL that happens to hash onto bits already set by other URLs produces a false positive">
   <style>
     .cell{fill:none;stroke:currentColor;stroke-opacity:.4;stroke-width:1.2}
     .set{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.4}
     .hit{fill:currentColor;fill-opacity:.15;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="380" y="20">bit array, one row of a much larger structure</text>
-  <g transform="translate(30,40)">
-    <rect class="cell" x="0" y="0" width="44" height="34"/><rect class="cell" x="44" y="0" width="44" height="34"/><rect class="set" x="88" y="0" width="44" height="34"/><rect class="cell" x="132" y="0" width="44" height="34"/><rect class="set" x="176" y="0" width="44" height="34"/>
-    <rect class="cell" x="220" y="0" width="44" height="34"/><rect class="set" x="264" y="0" width="44" height="34"/><rect class="cell" x="308" y="0" width="44" height="34"/><rect class="cell" x="352" y="0" width="44" height="34"/><rect class="set" x="396" y="0" width="44" height="34"/>
-    <rect class="cell" x="440" y="0" width="44" height="34"/><rect class="cell" x="484" y="0" width="44" height="34"/><rect class="set" x="528" y="0" width="44" height="34"/><rect class="cell" x="572" y="0" width="44" height="34"/><rect class="cell" x="616" y="0" width="44" height="34"/>
+  <text class="lbl" x="8" y="16">bit array, one row of a much larger structure</text>
+  <g transform="translate(15,30)">
+    <rect class="cell" x="0" y="0" width="24" height="30"/><rect class="cell" x="24" y="0" width="24" height="30"/><rect class="set" x="48" y="0" width="24" height="30"/><rect class="cell" x="72" y="0" width="24" height="30"/><rect class="set" x="96" y="0" width="24" height="30"/>
+    <rect class="cell" x="120" y="0" width="24" height="30"/><rect class="set" x="144" y="0" width="24" height="30"/><rect class="cell" x="168" y="0" width="24" height="30"/><rect class="cell" x="192" y="0" width="24" height="30"/><rect class="set" x="216" y="0" width="24" height="30"/>
+    <rect class="cell" x="240" y="0" width="24" height="30"/><rect class="cell" x="264" y="0" width="24" height="30"/><rect class="set" x="288" y="0" width="24" height="30"/><rect class="cell" x="312" y="0" width="24" height="30"/><rect class="cell" x="336" y="0" width="24" height="30"/>
   </g>
-  <text class="sub" x="380" y="100">shaded bits already set by earlier, unrelated URLs</text>
-  <g transform="translate(30,120)">
-    <rect class="hit" x="88" y="0" width="44" height="34"/><rect class="hit" x="264" y="0" width="44" height="34"/><rect class="hit" x="396" y="0" width="44" height="34"/>
+  <text class="sub" x="8" y="80">shaded bits already set by earlier, unrelated URLs</text>
+  <g transform="translate(15,92)">
+    <rect class="hit" x="48" y="0" width="24" height="30"/><rect class="hit" x="144" y="0" width="24" height="30"/><rect class="hit" x="216" y="0" width="24" height="30"/>
   </g>
-  <text class="sub" x="380" y="180">a brand-new URL happens to hash onto three bits already set: filter reports "seen", the URL is dropped</text>
-  <text class="sub" x="380" y="200">this is a false positive, not a bug: it is the price of 12GB instead of 240GB</text>
+  <text class="sub" x="8" y="145">a brand-new URL hashes onto three bits already</text>
+  <text class="sub" x="8" y="160">set: filter reports "seen", the URL is dropped</text>
+  <text class="sub" x="8" y="185">not a bug: the price of 12GB instead of 240GB</text>
 </svg>
 ```
 
@@ -1431,29 +1241,27 @@ Some sites generate URLs without limit, one boilerplate page repeated under an e
 **Great: track novelty rate against content similarity, per domain, and throttle when they diverge.** A domain where nearly every extracted URL is new, and nearly every fetched page is a near-duplicate by content fingerprint, is a trap by definition: distinct addresses, indistinguishable content. Tracking the two signals together catches what neither catches alone, because a domain that is genuinely prolific has both new URLs and new content, while a trap has only the first.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Four domains plotted by URL novelty rate against content fingerprint diversity; only the quadrant with high novelty and low content diversity is a trap"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Four domains plotted by URL novelty rate against content fingerprint diversity; only the quadrant with high novelty and low content diversity is a trap">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.45;stroke-width:1.3}
-    .zone{fill:currentColor;fill-opacity:.06}
     .trap{fill:var(--accent);fill-opacity:.18;stroke:var(--accent);stroke-width:1.4}
     .dot{fill:currentColor}
     .hitdot{fill:var(--accent)}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .lbl{fill:currentColor;font:600 11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="80" y1="220" x2="700" y2="220"/>
-  <line class="axis" x1="80" y1="220" x2="80" y2="20"/>
-  <text class="sub" x="700" y="240" text-anchor="end">URL novelty rate →</text>
-  <text class="sub" x="60" y="20" text-anchor="end" transform="rotate(-90 60 20)">content diversity →</text>
-  <rect class="trap" x="390" y="20" width="310" height="90"/>
-  <text class="lbl" x="545" y="40">trap: new URLs, same content</text>
-  <circle class="hitdot" cx="640" cy="60" r="7"/><text class="sub" x="640" y="85">calendar domain</text>
-  <circle class="dot" cx="620" cy="180" r="7"/><text class="sub" x="620" y="200">prolific news site</text>
-  <text class="sub" x="620" y="160">high novelty, high diversity: fine</text>
-  <circle class="dot" cx="160" cy="180" r="7"/><text class="sub" x="160" y="200">static docs site</text>
-  <text class="sub" x="160" y="160">low novelty either way: fine</text>
+  <line class="axis" x1="40" y1="200" x2="380" y2="200"/>
+  <line class="axis" x1="40" y1="200" x2="40" y2="20"/>
+  <text class="sub" x="380" y="218" text-anchor="end">URL novelty rate →</text>
+  <text class="sub" x="30" y="20" text-anchor="end" transform="rotate(-90 30 20)">content diversity →</text>
+  <rect class="trap" x="220" y="20" width="160" height="65"/>
+  <text class="lbl" x="230" y="38">trap: new URLs,</text>
+  <text class="lbl" x="230" y="53">same content</text>
+  <circle class="hitdot" cx="340" cy="45" r="6"/><text class="sub" x="340" y="65" text-anchor="middle">calendar domain</text>
+  <circle class="dot" cx="320" cy="165" r="6"/><text class="sub" x="320" y="185" text-anchor="middle">prolific news site</text>
+  <text class="sub" x="320" y="150" text-anchor="middle">high novelty, high diversity: fine</text>
+  <circle class="dot" cx="90" cy="165" r="6"/><text class="sub" x="90" y="185" text-anchor="middle">static docs site</text>
+  <text class="sub" x="90" y="150" text-anchor="middle">low novelty either way: fine</text>
 </svg>
 ```
 
@@ -1584,30 +1392,7 @@ There is no single transaction spanning caller, database, queue and provider. Wh
 
 The honest description of the result is at-least-once with duplicate suppression at four hops, which is observably exactly-once and is a different claim from being exactly-once. One hop cannot be covered at all: provider to device. A 200 from APNs means Apple accepted the message, not that a handset received it or a person saw it, and there is no acknowledgement to wait for past that point.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="Four hops, each with its own suppression mechanism: caller retry caught by an idempotency key, database-to-queue gap closed by an outbox, worker redelivery narrowed by a sent-key check, and provider redelivery caught by the provider's own dedup id"
->
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .gap{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.5;stroke-width:1.4;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="10" y="40" width="150" height="44" rx="8"/><text class="sub" x="85" y="62">Caller retry</text>
-  <rect class="box acc" x="10" y="100" width="150" height="34" rx="7"/><text class="sub" x="85" y="120">idempotency key</text>
-  <rect class="box" x="200" y="40" width="150" height="44" rx="8"/><text class="sub" x="275" y="62">DB → queue</text>
-  <rect class="box acc" x="200" y="100" width="150" height="34" rx="7"/><text class="sub" x="275" y="120">outbox, 1 txn</text>
-  <rect class="box" x="390" y="40" width="150" height="44" rx="8"/><text class="sub" x="465" y="62">worker redelivery</text>
-  <rect class="box acc" x="390" y="100" width="150" height="34" rx="7"/><text class="sub" x="465" y="120">sent:{notif_id}</text>
-  <rect class="box" x="580" y="40" width="150" height="44" rx="8"/><text class="sub" x="655" y="62">provider retry</text>
-  <rect class="box acc" x="580" y="100" width="150" height="34" rx="7"/><text class="sub" x="655" y="120">apns-id dedup</text>
-  <rect class="gap" x="820" y="40" width="0" height="0"/>
-  <text class="lbl" x="380" y="165">every hop above narrows the window; none of it reaches past "provider accepted"</text>
-  <text class="sub" x="380" y="190">provider → device has no ack to wait for: this is where the guarantee stops</text>
-</svg>
-```
+[Four hops, four suppression mechanisms, one gap](/diagram/notification-system?figure=dedup-hops)
 
 #### Whose bad hour becomes everyone's
 Push, email and SMS have different rate limits, error codes and outage schedules. What happens if they share one backlog?
@@ -1649,21 +1434,19 @@ Throughput here is nothing. What actually needs protecting is a person's patienc
 The bypass flag is also the mechanism's weak point, and it has to be guarded on purpose. Once a category can skip the cap, every team has an incentive to mark its own traffic transactional, and the gate stops protecting anyone once enough traffic bypasses it. The usable rule: treat any category running above roughly 20% bypass volume as evidence its classification has drifted, and review it.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="Notification volume per user is heavily skewed: the average user gets under one a day, while the p99 user is above forty; a cap sized for the average protects nobody"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="Notification volume per user is heavily skewed: the average user gets under one a day, while the p99 user is above forty; a cap sized for the average protects nobody">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .bar{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{text-anchor:middle}
   </style>
-  <line class="axis" x1="60" y1="170" x2="730" y2="170"/>
-  <rect class="bar" x="90" y="160" width="40" height="10"/><text class="sub" x="110" y="190" text-anchor="middle">median: ~0.6/day</text>
-  <rect class="bar" x="260" y="130" width="40" height="40"/><text class="sub" x="280" y="190" text-anchor="middle">p90: a few/day</text>
-  <rect class="bar" x="430" y="60" width="40" height="110"/><text class="sub" x="450" y="190" text-anchor="middle">p99: 40+/day</text>
-  <text class="lbl" x="590" y="90">the cap is sized here,</text>
-  <text class="lbl" x="590" y="110">not at the median</text>
+  <text class="lbl" x="8" y="16">the cap is sized at the tail, not the median</text>
+  <line class="axis" x1="15" y1="160" x2="385" y2="160"/>
+  <rect class="bar" x="40" y="150" width="34" height="10"/><text class="sub" x="57" y="180">median: ~0.6/day</text>
+  <rect class="bar" x="160" y="120" width="34" height="40"/><text class="sub" x="177" y="180">p90: a few/day</text>
+  <rect class="bar" x="280" y="40" width="34" height="120"/><text class="sub" x="297" y="180">p99: 40+/day</text>
 </svg>
 ```
 
@@ -1791,55 +1574,7 @@ Two obvious strategies exist, compute on write or compute on read. Why does neit
 
 **Great: split the population by size, and run both.** Push for accounts under the threshold, so ordinary users get the cheap, prebuilt read. Pull for accounts over it, so the largest authors write once and let readers merge them in. This bounds the write burst at the top of the graph and the read fan-out at the bottom, at the cost of two delivery paths that have to agree on which authors belong to which.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 450" role="img" aria-label="Fan-out strategies: push, pull, hybrid">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <rect class="grp" x="10" y="15" width="740" height="95" rx="10"/>
-  <text class="sub" x="24" y="32" text-anchor="start" font-weight="600">PUSH (fan-out on write)</text>
-  <rect class="box" x="45" y="53" width="130" height="46" rx="9"/><text class="lbl" x="110" y="78">Post created</text>
-  <rect class="box acc" x="255" y="53" width="210" height="46" rx="9"/>
-  <text class="sub" x="360" y="68">For each follower</text><text class="sub" x="360" y="86">O(F) Redis ZADD</text>
-  <rect class="box" x="525" y="53" width="210" height="46" rx="9"/>
-  <text class="sub" x="630" y="68">Read = O(1)</text><text class="sub" x="630" y="86">pre-built timeline</text>
-  <path class="flow" d="M175,76 L255,76"/><path class="flow" d="M465,76 L525,76"/>
-  <rect class="grp" x="10" y="125" width="740" height="95" rx="10"/>
-  <text class="sub" x="24" y="142" text-anchor="start" font-weight="600">PULL (fan-out on read)</text>
-  <rect class="box" x="45" y="163" width="130" height="46" rx="9"/><text class="lbl" x="110" y="188">Post created</text>
-  <rect class="box" x="255" y="163" width="210" height="46" rx="9"/>
-  <text class="sub" x="360" y="178">O(1) write</text><text class="sub" x="360" y="196">append to user posts</text>
-  <rect class="box acc" x="525" y="163" width="210" height="46" rx="9"/>
-  <text class="sub" x="630" y="178">Read = O(follows &#215; posts)</text><text class="sub" x="630" y="196">merge at query time</text>
-  <path class="flow" d="M175,186 L255,186"/><path class="flow" d="M465,186 L525,186"/>
-  <rect class="grp" x="10" y="245" width="740" height="190" rx="10"/>
-  <text class="sub" x="24" y="262" text-anchor="start" font-weight="600">HYBRID (Twitter / Insta default)</text>
-  <rect class="box" x="25" y="322" width="110" height="46" rx="9"/><text class="lbl" x="80" y="347">Post created</text>
-  <polygon class="box" points="270,315 348,345 270,375 192,345"/>
-  <text class="sub" x="270" y="338">followers</text><text class="sub" x="270" y="353">&#62; 10k?</text>
-  <rect class="box" x="395" y="282" width="150" height="46" rx="9"/><text class="lbl" x="470" y="307">Push: O(F) writes</text>
-  <rect class="box" x="395" y="367" width="150" height="46" rx="9"/>
-  <text class="sub" x="470" y="382">Pull-only</text><text class="sub" x="470" y="400">O(1) write</text>
-  <rect class="box acc" x="565" y="324" width="180" height="46" rx="9"/>
-  <text class="sub" x="655" y="339">Read = pushed timeline</text><text class="sub" x="655" y="357">+ celeb pull merge</text>
-  <path class="flow" d="M135,345 L192,345"/>
-  <path class="flow" d="M348,345 L395,305"/><text class="edge" x="360" y="317" text-anchor="start">No</text>
-  <path class="flow" d="M348,345 L395,390"/><text class="edge" x="356" y="378" text-anchor="start">Yes celeb</text>
-  <path class="flow" d="M545,305 L565,336"/><path class="flow" d="M545,390 L565,358"/>
-</svg>
-```
+[Hybrid fan-out: push below the threshold, pull above it](/diagram/news-feed?figure=hybrid)
 
 The intuition that "push is expensive for celebrities" is not actually a cost argument. Amortised over a day, push costs `F × posts_per_day` writes and pull costs `F × active_fraction × loads_per_day` reads, and the follower count `F` cancels out of the ratio between them at every scale. What actually breaks is concentration: a push is a burst of `F` writes that must land inside a freshness window, all on one cluster, at one moment. A pull is one key read by many readers, which is the access pattern a cache is best at.
 
@@ -1857,23 +1592,23 @@ The threshold is not a single number picked by instinct. It is the middle of a b
 Worked example. At a 10,000 threshold, about 4% of follow edges point above the line, so a typical 200-follow reader carries roughly 8 pull sources, comfortably under the 25-source cap. Drop the threshold to 1,000 and that share rises to about 20%, pushing the same reader to roughly 40 sources, past the merge budget the read side allows. The threshold is a config value with a floor and a ceiling, not a constant, and it should move when either side of the capacity changes.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="The threshold sits in a band: a read-side floor near 1,000 followers set by the merge budget, and a write-side ceiling near 30,000 set by cache write capacity"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="The threshold sits in a band: a read-side floor near 1,000 followers set by the merge budget, and a write-side ceiling near 30,000 set by cache write capacity">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.45;stroke-width:1.4}
     .band{fill:var(--accent);fill-opacity:.16;stroke:var(--accent);stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{text-anchor:middle}
   </style>
-  <line class="axis" x1="60" y1="120" x2="700" y2="120"/>
-  <rect class="band" x="200" y="95" width="360" height="50"/>
-  <text class="lbl" x="380" y="120">defensible band</text>
-  <text class="sub" x="200" y="80">~1,000</text>
-  <text class="sub" x="560" y="80">~30,000</text>
-  <text class="sub" x="380" y="150">10,000 sits near the middle, not derived from either bound alone</text>
-  <text class="sub" x="150" y="40">floor: ~30ms merge budget</text>
-  <text class="sub" x="620" y="40">ceiling: ~15M/s cache write capacity</text>
+  <text class="sub" x="8" y="16" text-anchor="start">floor: ~30ms merge budget</text>
+  <text class="sub" x="8" y="32" text-anchor="start">ceiling: ~15M/s cache write capacity</text>
+  <line class="axis" x1="20" y1="110" x2="380" y2="110"/>
+  <rect class="band" x="110" y="88" width="170" height="44"/>
+  <text class="lbl" x="195" y="110">defensible band</text>
+  <text class="sub" x="110" y="75">~1,000</text>
+  <text class="sub" x="280" y="75">~30,000</text>
+  <text class="sub" x="8" y="152" text-anchor="start">10,000 sits near the middle of this band,</text>
+  <text class="sub" x="8" y="168" text-anchor="start">not derived from either bound alone</text>
 </svg>
 ```
 
@@ -1917,23 +1652,22 @@ The pull-side merge is capped at roughly 25 sources for the ranking budget's sak
 Worked example. The median reader carries about 8 pull sources, well inside the 25-source cap and effectively unaffected by it. The p99 reader, disproportionately a new account, carries 60 or more, so 35 of those sources contribute nothing to any single load. That is a measurable completeness gap this design accepts rather than closes, because closing it, either by raising the cap for everyone or by adding a per-reader dynamic cap, spends latency budget that the 200ms target does not have.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="Pull sources per reader by percentile: the median reader carries about 8, well under the 25-source cap, while the p99 reader carries 60 or more, well over it"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="Pull sources per reader by percentile: the median reader carries about 8, well under the 25-source cap, while the p99 reader carries 60 or more, well over it">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .bar{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.4}
     .over{fill:currentColor;fill-opacity:.15;stroke:currentColor;stroke-opacity:.6;stroke-width:1.4}
     .cap{stroke:currentColor;stroke-opacity:.6;stroke-width:1.4;stroke-dasharray:5 4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{text-anchor:middle}
   </style>
-  <line class="axis" x1="60" y1="170" x2="730" y2="170"/>
-  <line class="cap" x1="60" y1="90" x2="730" y2="90"/><text class="sub" x="700" y="80" text-anchor="end">cap: 25 sources</text>
-  <rect class="bar" x="110" y="150" width="60" height="20"/><text class="sub" x="140" y="190" text-anchor="middle">p50: ~8</text>
-  <rect class="bar" x="300" y="120" width="60" height="50"/><text class="sub" x="330" y="190" text-anchor="middle">p90: ~20</text>
-  <rect class="over" x="500" y="40" width="60" height="130"/><text class="sub" x="530" y="190" text-anchor="middle">p99: 60+</text>
-  <text class="lbl" x="530" y="25">everything above the cap line is simply absent, not just deprioritised</text>
+  <text class="lbl" x="200" y="16">above the cap line: absent, not deprioritised</text>
+  <line class="axis" x1="20" y1="180" x2="380" y2="180"/>
+  <line class="cap" x1="20" y1="95" x2="380" y2="95"/><text class="sub" x="370" y="85" text-anchor="end">cap: 25 sources</text>
+  <rect class="bar" x="55" y="160" width="34" height="20"/><text class="sub" x="72" y="200">p50: ~8</text>
+  <rect class="bar" x="175" y="130" width="34" height="50"/><text class="sub" x="192" y="200">p90: ~20</text>
+  <rect class="over" x="295" y="40" width="34" height="140"/><text class="sub" x="312" y="200">p99: 60+</text>
 </svg>
 ```
 
@@ -2055,20 +1789,20 @@ A message passes three separate facts back to the sender: it is stored, it reach
 Worked example. A send commits, but the ack frame is lost on the way back to the sender. The client retries with the same `client_msg_id`. Without the idempotency check, this produces two stored messages with two ids, both delivered, indistinguishable from two real sends. With it, the conditional write sees the id already exists, and the retry simply returns the original `server_msg_id`, converting what looked like data loss into a routine duplicate request.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A commit happens before the ack is ever emitted; a retry carrying the same client_msg_id resolves to the original server_msg_id instead of creating a second message">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A commit happens before the ack is ever emitted; a retry carrying the same client_msg_id resolves to the original server_msg_id instead of creating a second message">
   <style>
-    .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .commit{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}
     .retry{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.55;stroke-width:1.4;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="30" y1="150" x2="730" y2="150"/>
-  <rect class="commit" x="60" y="90" width="200" height="40"/><text class="sub" x="160" y="80">quorum write commits</text>
-  <text class="lbl" x="290" y="110">→ ack, one tick, never before this point</text>
-  <rect class="retry" x="500" y="90" width="220" height="40"/><text class="sub" x="610" y="80">ack lost, client retries same client_msg_id</text>
-  <text class="sub" x="610" y="150">conditional write sees the id exists: returns original server_msg_id, no duplicate</text>
+  <text class="lbl" x="8" y="18">quorum write commits</text>
+  <rect class="commit" x="20" y="26" width="280" height="30"/>
+  <text class="sub" x="8" y="75">→ ack, one tick, never before this point</text>
+  <text class="lbl" x="8" y="108">ack lost, retry: same client_msg_id</text>
+  <rect class="retry" x="20" y="116" width="280" height="30"/>
+  <text class="sub" x="8" y="163">conditional write sees the id exists:</text>
+  <text class="sub" x="8" y="180">returns original server_msg_id, no duplicate</text>
 </svg>
 ```
 
@@ -2086,22 +1820,21 @@ A device can miss a message because it crashed, deployed, lost signal, or was si
 That bound has a real, stated cost: a device that resyncs never receives the intervening messages as pushes, so it never individually acknowledges them, and the sender's ticks for those specific messages never complete. It is the correct trade against the alternative of a socket that reliably times out trying to stream tens of thousands of frames, but it is a behaviour change, not a free optimisation, and it should be described as one.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="A cursor within the replay bound streams the backlog normally; a cursor past the bound gets a resync marker and jumps forward instead of streaming"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="A cursor within the replay bound streams the backlog normally; a cursor past the bound gets a resync marker and jumps forward instead of streaming">
   <style>
-    .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .ok{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}
-    .bound{stroke:currentColor;stroke-opacity:.6;stroke-width:1.4;stroke-dasharray:5 4}
     .gap{fill:currentColor;fill-opacity:.1;stroke:currentColor;stroke-opacity:.55;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="30" y1="150" x2="730" y2="150"/>
-  <rect class="ok" x="60" y="100" width="240" height="30"/><text class="sub" x="180" y="90">gap under 500 msgs / 7 days: stream the backlog</text>
-  <line class="bound" x1="340" y1="70" x2="340" y2="150"/><text class="sub" x="340" y="55">bound</text>
-  <rect class="gap" x="380" y="100" width="300" height="30"/><text class="sub" x="530" y="90">past the bound: resync marker, jump cursor forward</text>
-  <text class="sub" x="530" y="170">those specific messages are never individually acked</text>
+  <text class="lbl" x="8" y="16">gap under 500 msgs / 7 days:</text>
+  <text class="lbl" x="8" y="31">stream the backlog</text>
+  <rect class="ok" x="20" y="40" width="280" height="28"/>
+  <text class="lbl" x="8" y="98">past the bound: resync marker,</text>
+  <text class="lbl" x="8" y="113">jump cursor forward</text>
+  <rect class="gap" x="20" y="122" width="280" height="28"/>
+  <text class="sub" x="8" y="170">those specific messages are never</text>
+  <text class="sub" x="8" y="185">individually acked</text>
 </svg>
 ```
 
@@ -2116,37 +1849,7 @@ Multi-device makes "delivered" and "read" two different questions with two diffe
 
 **Great: track per device with a high-water mark instead of a row per message, debounced.** "This device has applied everything up to message id X" collapses a burst of forty messages into one update. Debouncing per conversation per device on a short window absorbs rapid bursts further, and above roughly fifty members the client shows an aggregate count rather than per-member status. The high-water mark is the same row as the sync cursor, so tracking a receipt and tracking catch-up state cost one write, not two.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 440" role="img" aria-label="Chat message delivery state machine">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <circle cx="280" cy="28" r="8" fill="currentColor"/>
-  <rect class="box acc" x="220" y="70"  width="120" height="40" rx="9"/><text class="lbl" x="280" y="92">Sending</text>
-  <rect class="box" x="220" y="155" width="120" height="40" rx="9"/><text class="lbl" x="280" y="177">Sent</text>
-  <rect class="box" x="220" y="240" width="120" height="40" rx="9"/><text class="lbl" x="280" y="262">Delivered</text>
-  <rect class="box" x="220" y="325" width="120" height="40" rx="9"/><text class="lbl" x="280" y="347">Read</text>
-  <rect class="box" x="460" y="70"  width="120" height="40" rx="9"/><text class="lbl" x="520" y="92">Failed</text>
-  <circle cx="280" cy="410" r="9" class="box"/><circle cx="280" cy="410" r="4" fill="currentColor"/>
-  <path class="flow" d="M280,36 L280,70"/><text class="edge" x="290" y="52" text-anchor="start">user hits send</text>
-  <path class="flow acc" d="M280,110 L280,155"/><text class="edge" x="290" y="132" text-anchor="start">persists + msg_id</text>
-  <path class="flow" d="M280,195 L280,240"/><text class="edge" x="290" y="217" text-anchor="start">device acks</text>
-  <path class="flow" d="M280,280 L280,325"/><text class="edge" x="290" y="302" text-anchor="start">opens chat</text>
-  <path class="flow" d="M280,365 L280,401"/>
-  <path class="flow" d="M340,82 L460,82"/><text class="edge" x="400" y="72">timeout / net err</text>
-  <path class="flow" d="M475,110 L475,140 L310,140 L310,110"/><text class="edge" x="395" y="152">retry (exp backoff)</text>
-</svg>
-```
+[Delivery state machine: sending to read, with retry](/diagram/chat-system?figure=delivery)
 
 #### The fork that changes four subsystems at once
 Whether the server can read message content is not one feature among many. It is a single decision that reshapes four separate subsystems the moment it is made.
@@ -2159,25 +1862,7 @@ Whether the server can read message content is not one feature among many. It is
 
 **Great: take the fork explicitly, and redesign each of the four deliberately rather than by accident.** Server-side search over history stops existing and becomes an on-device index, genuinely workable at the roughly one megabyte of text a typical user holds after thirty days, but it can only search what that one device has ever received. New-device history stops being a server read and becomes a device-to-device transfer or an encrypted backup, the weakest link in the confidentiality claim, since a lost-and-broken-phone user needs a real recovery path. Group send goes from one ciphertext to one per recipient device, which is why sender-key schemes exist rather than pairwise encryption for every member. And content-based abuse detection disappears entirely, leaving only rate, graph shape and account age to work with.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="One decision, whether the server can read plaintext, reshapes four subsystems at once: search, new-device history, group fan-out, and abuse detection"
->
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box acc" x="310" y="15" width="140" height="46" rx="9"/><text class="lbl" x="380" y="40">E2EE: yes or no</text>
-  <rect class="box" x="30" y="140" width="150" height="50" rx="8"/><text class="sub" x="105" y="158">Search</text><text class="sub" x="105" y="176">server index → on-device only</text>
-  <rect class="box" x="215" y="140" width="150" height="50" rx="8"/><text class="sub" x="290" y="158">New-device history</text><text class="sub" x="290" y="176">server read → transfer or backup</text>
-  <rect class="box" x="400" y="140" width="150" height="50" rx="8"/><text class="sub" x="475" y="158">Group fan-out</text><text class="sub" x="475" y="176">1 write → 1 per device</text>
-  <rect class="box" x="580" y="140" width="150" height="50" rx="8"/><text class="sub" x="655" y="158">Abuse detection</text><text class="sub" x="655" y="176">content → metadata only</text>
-  <path class="flow" d="M340,61 L105,140"/><path class="flow" d="M370,61 L290,140"/><path class="flow" d="M420,61 L475,140"/><path class="flow" d="M450,61 L655,140"/>
-</svg>
-```
+[One fork, four subsystems reshaped at once](/diagram/chat-system?figure=e2ee-fork)
 
 #### Where it breaks
 | Layer | Failure | How the design handles it |
@@ -2292,45 +1977,7 @@ The obvious alternative is to store only the candidates under a prefix and rank 
 
 Worked example. At the 50-microsecond figure this design actually runs at, the entire 100k-QPS origin fleet spends roughly the CPU of a handful of cores on lookups. Query-time ranking at even the low end of its one-to-three-millisecond range would need on the order of a hundred cores for the identical traffic, a difference measured in orders of magnitude rather than a tuning adjustment.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 485" role="img" aria-label="Autocomplete build pipeline vs serving path">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .store{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <rect class="grp" x="8" y="10" width="744" height="190" rx="10"/>
-  <text class="sub" x="20" y="28" text-anchor="start" font-weight="600">BUILD (hourly batch, offline)</text>
-  <rect class="box" x="20"  y="49" width="150" height="46" rx="9"/><text class="sub" x="95" y="64">Query logs</text><text class="sub" x="95" y="82">Kafka stream</text>
-  <rect class="box" x="185" y="49" width="150" height="46" rx="9"/><text class="sub" x="260" y="64">Aggregator</text><text class="sub" x="260" y="82">Spark / Flink</text>
-  <rect class="box" x="350" y="49" width="150" height="46" rx="9"/><text class="sub" x="425" y="64">Top-K per prefix</text><text class="sub" x="425" y="82">bottom-up roll-up</text>
-  <rect class="box" x="515" y="49" width="150" height="46" rx="9"/><text class="sub" x="590" y="64">Compile to FST</text><text class="sub" x="590" y="82">5-10x compress</text>
-  <ellipse class="store" cx="590" cy="127" rx="70" ry="9"/><path class="store" d="M520,127 v32 a70,9 0 0 0 140,0 v-32"/><text class="sub" x="590" y="147">Snapshot to S3</text>
-  <rect class="box" x="350" y="127" width="150" height="46" rx="9"/><text class="sub" x="425" y="142">Push to all</text><text class="sub" x="425" y="160">serving shards</text>
-  <rect class="box acc" x="185" y="127" width="150" height="46" rx="9"/><text class="sub" x="260" y="142">Atomic swap</text><text class="sub" x="260" y="160">old &#8594; new trie</text>
-  <path class="flow" d="M170,72 L185,72"/><path class="flow" d="M335,72 L350,72"/><path class="flow" d="M500,72 L515,72"/>
-  <path class="flow" d="M590,95 L590,118"/><path class="flow" d="M520,150 L500,150"/><path class="flow" d="M350,150 L335,150"/>
-  <rect class="grp" x="8" y="215" width="744" height="252" rx="10"/>
-  <text class="sub" x="20" y="233" text-anchor="start" font-weight="600">SERVE (online, p99 &#8804; 100ms)</text>
-  <rect class="box" x="20" y="267" width="120" height="46" rx="9"/><text class="sub" x="80" y="282">User</text><text class="sub" x="80" y="300">keypress</text>
-  <polygon class="box" points="250,260 328,290 250,320 172,290"/><text class="sub" x="250" y="292">CDN cache?</text>
-  <rect class="box acc" x="365" y="227" width="150" height="46" rx="9"/><text class="sub" x="440" y="252">Return top-K</text>
-  <rect class="box" x="365" y="317" width="150" height="46" rx="9"/><text class="sub" x="440" y="332">Route to</text><text class="sub" x="440" y="350">prefix shard</text>
-  <rect class="box" x="525" y="317" width="150" height="46" rx="9"/><text class="sub" x="600" y="332">In-RAM trie</text><text class="sub" x="600" y="350">/ FST lookup</text>
-  <path class="flow" d="M140,290 L172,290"/><path class="flow acc" d="M328,290 L365,262"/><text class="sub" x="336" y="268" text-anchor="start">hit ~95%</text>
-  <path class="flow" d="M328,290 L365,335"/><text class="sub" x="336" y="322" text-anchor="start">miss</text>
-  <path class="flow" d="M515,340 L525,340"/>
-</svg>
-```
+[Build removes ranking from the serve path](/diagram/search-autocomplete?figure=build-vs-serve)
 
 #### The roll-up that makes one pass enough
 Building the top ten for every one of a hundred million prefixes sounds like it should cost a scan of every subtree. Why does one bottom-up pass suffice instead?
@@ -2345,26 +1992,7 @@ Building the top ten for every one of a hundred million prefixes sounds like it 
 
 The correctness argument rests on exactly one condition, and it is the condition that breaks in practice: the score has to be a property of the completion alone, never of the specific prefix it is being ranked under. The instant a design wants "wea" to rank one completion above another for a reason that would not also hold at "we", the roll-up stops being valid, because a candidate that was correctly excluded from a child's top ten for local reasons could still belong in the parent's. Length normalisation and prefix-position boosts both violate this quietly, which is why adding either one means abandoning the single-pass build, not patching it.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="A parent node's top-10 is built from the union of its children's top-10 lists, never by rescanning the whole subtree"
->
-  <defs><marker id="arh" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;marker-end:url(#arh)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box acc" x="290" y="20" width="180" height="50" rx="9"/><text class="lbl" x="380" y="40">node "wea"</text><text class="sub" x="380" y="58">top-10 = best 10 of the union below</text>
-  <rect class="box" x="60" y="140" width="180" height="50" rx="9"/><text class="sub" x="150" y="160">child "weat"</text><text class="sub" x="150" y="178">its own top-10</text>
-  <rect class="box" x="290" y="140" width="180" height="50" rx="9"/><text class="sub" x="380" y="160">child "wear"</text><text class="sub" x="380" y="178">its own top-10</text>
-  <rect class="box" x="520" y="140" width="180" height="50" rx="9"/><text class="sub" x="610" y="160">terminal "wea" itself</text><text class="sub" x="610" y="178">if a complete query</text>
-  <path class="flow" d="M150,140 L340,72"/><path class="flow" d="M380,140 L380,72"/><path class="flow" d="M610,140 L420,72"/>
-  <text class="sub" x="380" y="230">any true top-10 member of "wea" lives in exactly one child's subtree, so it is already in that child's own top-10</text>
-</svg>
-```
+[A parent's top-10 comes from the union of its children's](/diagram/search-autocomplete?figure=rollup)
 
 #### Compiling away the routing problem
 A hashmap trie is intuitive and mutable. Why does this design pay the cost of compiling it into something else entirely?
@@ -2393,22 +2021,21 @@ A new snapshot has to reach every serving node roughly once an hour. What stops 
 Worked example. A build reads an empty log partition and produces a structure that is perfectly well-formed, checksums correctly, and returns nothing for every query. A checksum-only rollout would push this to every node in the fleet within the hour, and the "outage" would look like a mystery for however long it takes someone to notice suggestions have gone empty. The canary set catches it before the pointer ever flips, because the expected results for a known set of prefixes simply are not there.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A node downloads and canary-checks a new snapshot while still serving from the old one; only after canaries pass does one atomic pointer flip, and the old snapshot is freed once its last in-flight request finishes"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A node downloads and canary-checks a new snapshot while still serving from the old one; only after canaries pass does one atomic pointer flip, and the old snapshot is freed once its last in-flight request finishes">
   <style>
-    .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .old{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.55;stroke-width:1.4}
     .new{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4;stroke-dasharray:4 3}
     .flip{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="30" y1="150" x2="730" y2="150"/>
-  <rect class="old" x="60" y="90" width="640" height="30"/><text class="sub" x="130" y="80">old snapshot: serving every request throughout</text>
-  <rect class="new" x="350" y="40" width="200" height="30"/><text class="sub" x="450" y="30">new snapshot: download, checksum, canary set, still invisible</text>
-  <rect class="flip" x="550" y="130" width="20" height="30"/><text class="lbl" x="560" y="175">flip</text>
-  <text class="sub" x="650" y="90">old freed once refcount hits zero</text>
+  <text class="lbl" x="8" y="16">old snapshot: serving every request throughout</text>
+  <rect class="old" x="20" y="24" width="360" height="26"/>
+  <text class="lbl" x="8" y="76">new snapshot: download, checksum, canary —</text>
+  <text class="lbl" x="8" y="91">still invisible</text>
+  <rect class="new" x="180" y="100" width="180" height="26"/>
+  <rect class="flip" x="330" y="140" width="14" height="26"/><text class="sub" x="290" y="158">flip →</text>
+  <text class="sub" x="8" y="185">old freed once its refcount hits zero</text>
 </svg>
 ```
 
@@ -2526,44 +2153,7 @@ A twenty-minute upload finishes its floor pass inside a minute of wall clock. Wh
 
 Rung alignment is the detail that breaks quietly if skipped: every rung must carry keyframes at the same presentation timestamps as every other rung, or a player switching between 360p and 720p mid-stream cannot do so without a visible stall. That constraint is fixed before any encoding starts, not patched in afterward.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 680" role="img" aria-label="Video transcoding pipeline DAG">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <rect class="box acc" x="320" y="17" width="120" height="46" rx="9"/><text class="sub" x="380" y="32">Raw upload</text><text class="sub" x="380" y="50">S3 ingest</text>
-  <rect class="box acc" x="320" y="87" width="120" height="46" rx="9"/><text class="sub" x="380" y="102">Validate</text><text class="sub" x="380" y="120">mediainfo</text>
-  <rect class="box acc" x="250" y="162" width="260" height="46" rx="9"/><text class="sub" x="380" y="177">Split into 6s segments</text><text class="sub" x="380" y="195">(600 for 1hr video)</text>
-  <rect class="box" x="75"  y="237" width="90" height="46" rx="9"/><text class="sub" x="120" y="262">Segment 1</text>
-  <rect class="box" x="255" y="237" width="90" height="46" rx="9"/><text class="sub" x="300" y="262">Segment 2</text>
-  <rect class="box" x="435" y="237" width="90" height="46" rx="9"/><text class="sub" x="480" y="264">...</text>
-  <rect class="box" x="605" y="237" width="90" height="46" rx="9"/><text class="sub" x="650" y="262">Segment N</text>
-  <path class="box" d="M120,315 L650,315"/>
-  <rect class="box" x="60"  y="357" width="120" height="46" rx="9"/><text class="sub" x="120" y="372">Encode 1080p</text><text class="sub" x="120" y="390">NVENC GPU</text>
-  <rect class="box" x="240" y="357" width="120" height="46" rx="9"/><text class="sub" x="300" y="382">Encode 720p</text>
-  <rect class="box" x="420" y="357" width="120" height="46" rx="9"/><text class="sub" x="480" y="382">Encode 480p</text>
-  <rect class="box" x="590" y="357" width="120" height="46" rx="9"/><text class="sub" x="650" y="382">Encode 240p</text>
-  <rect class="box" x="280" y="447" width="200" height="46" rx="9"/><text class="sub" x="380" y="462">Package HLS/DASH</text><text class="sub" x="380" y="480">fMP4 + manifest</text>
-  <rect class="box" x="170" y="532" width="120" height="46" rx="9"/><text class="sub" x="230" y="557">Thumbnails</text>
-  <rect class="box acc" x="470" y="532" width="120" height="46" rx="9"/><text class="sub" x="530" y="547">Status: READY</text><text class="sub" x="530" y="565">notify uploader</text>
-  <rect class="box" x="470" y="612" width="120" height="46" rx="9"/><text class="sub" x="530" y="627">Pre-warm CDN POPs</text><text class="sub" x="530" y="645">if creator &#62; thresh</text>
-  <path class="flow acc" d="M380,63 L380,87"/><path class="flow acc" d="M380,133 L380,162"/>
-  <path class="flow" d="M380,208 L120,237"/><path class="flow" d="M380,208 L300,237"/><path class="flow" d="M380,208 L480,237"/><path class="flow" d="M380,208 L650,237"/>
-  <path class="box" d="M120,283 L120,315"/><path class="box" d="M300,283 L300,315"/><path class="box" d="M650,283 L650,315"/>
-  <path class="flow" d="M120,315 L120,357"/><path class="flow" d="M300,315 L300,357"/><path class="flow" d="M480,315 L480,357"/><path class="flow" d="M650,315 L650,357"/>
-  <path class="flow" d="M120,403 L330,447"/><path class="flow" d="M300,403 L360,447"/><path class="flow" d="M480,403 L400,447"/><path class="flow" d="M650,403 L430,447"/>
-  <path class="flow" d="M340,493 L250,532"/><path class="flow acc" d="M420,493 L520,532"/><path class="flow" d="M530,578 L530,612"/>
-</svg>
-```
+[Transcoding pipeline: split into independent segment jobs](/diagram/youtube?figure=pipeline)
 
 #### A manifest that lies for up to a minute
 Segments are immutable once written; manifests change whenever a rung is added. What does that asymmetry force onto how the two are cached?
@@ -2579,20 +2169,19 @@ Segments are immutable once written; manifests change whenever a rung is added. 
 Worked example. A video escalates from two rungs to six. Every edge already caching its manifest keeps serving the old two-rung version for up to sixty seconds, and a player mid-playback on a stale manifest will not see the new rungs until it happens to refresh, typically on a seek or a stall. The practical effect is that a quality upgrade lands for the next viewer who requests the manifest fresh, not for whoever is already watching, and that is a deliberate consequence of the cache split rather than a bug to fix.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="Manifests carry a roughly 60 second cache lifetime while segments, content-addressed and never overwritten, carry a full year; escalation adds new segment URLs without ever touching an existing one"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240" role="img" aria-label="Manifests carry a roughly 60 second cache lifetime while segments, content-addressed and never overwritten, carry a full year; escalation adds new segment URLs without ever touching an existing one">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{fill:var(--accent);fill-opacity:.15;stroke:var(--accent)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <rect class="box" x="40" y="50" width="280" height="60" rx="9"/><text class="lbl" x="180" y="75">Manifest</text><text class="sub" x="180" y="95">max-age=60, rewritten on escalation</text>
-  <rect class="acc" x="400" y="50" width="320" height="60" rx="9"/><text class="lbl" x="560" y="75">Segments</text><text class="sub" x="560" y="95">max-age=1yr, immutable, content-addressed</text>
-  <text class="sub" x="180" y="140">stale for up to 60s after a rung is added</text>
-  <text class="sub" x="560" y="140">new rung = new URL, old objects never rewritten</text>
-  <text class="sub" x="380" y="180">the same escalation event is fast on one side and permanent on the other</text>
+  <rect class="box" x="20" y="10" width="360" height="46"/><text class="lbl" x="30" y="28">Manifest</text><text class="sub" x="30" y="45">max-age=60, rewritten on escalation</text>
+  <text class="sub" x="8" y="76">stale for up to 60s after a rung is added</text>
+  <rect class="acc" x="20" y="94" width="360" height="46"/><text class="lbl" x="30" y="112">Segments</text><text class="sub" x="30" y="129">max-age=1yr, immutable, content-addressed</text>
+  <text class="sub" x="8" y="160">new rung = new URL, old objects never rewritten</text>
+  <text class="sub" x="8" y="200">the same escalation event is fast on one</text>
+  <text class="sub" x="8" y="216">side and permanent on the other</text>
 </svg>
 ```
 
@@ -2610,22 +2199,22 @@ Two rungs cover every upload at the floor. What decides which small fraction get
 Worked example. A channel with a million subscribers gets the full ladder at ingest regardless of its view counter, because its expected value is known before the file even finishes uploading. A first-time uploader whose video goes from zero to a million views in ten minutes gets none of that benefit: nothing observable at ingest distinguishes them from the half of uploads that never reach a hundred views, so their video is served at the floor rung through the entire viral ramp, and the upper rungs land only after the audience that would have most benefited has largely moved on.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="A video's view-velocity crosses the escalation threshold ten minutes after upload; the upper rungs only begin producing after that crossing, so the viral ramp itself is served entirely at the floor rung"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="A video's view-velocity crosses the escalation threshold ten minutes after upload; the upper rungs only begin producing after that crossing, so the viral ramp itself is served entirely at the floor rung">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .ramp{fill:none;stroke:var(--accent);stroke-width:2}
     .thresh{stroke:currentColor;stroke-opacity:.6;stroke-width:1.4;stroke-dasharray:5 4}
     .floor{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.5;stroke-width:1.3}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="axis" x1="40" y1="160" x2="720" y2="160"/>
-  <rect class="floor" x="60" y="60" width="300" height="100"/><text class="sub" x="70" y="50">served at floor rung: the entire viral ramp</text>
-  <line class="thresh" x1="360" y1="30" x2="360" y2="160"/><text class="sub" x="370" y="30">crosses threshold, ~10 min in</text>
-  <path class="ramp" d="M60,155 C 200,150 320,90 360,60 C 450,20 600,15 700,12"/>
-  <text class="sub" x="500" y="170">upper rungs begin producing here, after the audience already arrived</text>
+  <text class="sub" x="8" y="16">served at floor rung: the entire viral ramp</text>
+  <line class="axis" x1="20" y1="170" x2="380" y2="170"/>
+  <rect class="floor" x="25" y="70" width="165" height="100"/>
+  <line class="thresh" x1="190" y1="40" x2="190" y2="170"/><text class="sub" x="195" y="34">crosses threshold, ~10 min in</text>
+  <path class="ramp" d="M25,166 C 90,160 160,100 190,70 C 250,25 320,18 375,15"/>
+  <text class="sub" x="8" y="198">upper rungs begin producing here, after</text>
+  <text class="sub" x="8" y="213">the audience already arrived</text>
 </svg>
 ```
 
@@ -2755,26 +2344,7 @@ The client needs to tell its own edits apart from the server's edits since the l
 
 Worked example. A file exists locally but has vanished from the server. Diffing only local against current server state cannot say whether the user created it or another device deleted the server's copy first. Diffing local against `synced` instead shows the file was already present at the last agreement point, and diffing server against `synced` shows it is now missing there, which together correctly identify a remote deletion rather than a local creation, with no ambiguity left over.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Three trees: local, synced (the last agreed state) and server. Diffing local against synced isolates local changes; diffing server against synced isolates remote changes; a path in both diffs is a conflict"
->
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="30" y="90" width="180" height="60" rx="9"/><text class="lbl" x="120" y="115">Local</text><text class="sub" x="120" y="135">filesystem now</text>
-  <rect class="box acc" x="290" y="20" width="180" height="60" rx="9"/><text class="lbl" x="380" y="45">Synced</text><text class="sub" x="380" y="65">last agreed state</text>
-  <rect class="box" x="550" y="90" width="180" height="60" rx="9"/><text class="lbl" x="640" y="115">Server</text><text class="sub" x="640" y="135">current remote state</text>
-  <path class="flow acc" d="M170,105 L320,70"/><text class="sub" x="240" y="70">diff → local changes</text>
-  <path class="flow acc" d="M590,105 L440,70"/><text class="sub" x="520" y="70">diff → remote changes</text>
-  <text class="sub" x="380" y="200">a path appearing in both diffs is a real conflict</text>
-  <text class="sub" x="380" y="220">a path in neither diff was never touched by anyone</text>
-</svg>
-```
+[Three trees: local, synced, and server](/diagram/google-drive?figure=three-trees)
 
 #### Upload is a handshake, not a transfer
 Before sending a single byte, the client and server negotiate what actually needs to move. What does that negotiation buy, and where can it be attacked?
@@ -2787,45 +2357,7 @@ Before sending a single byte, the client and server negotiate what actually need
 
 **Great: hash first to minimise transfer, and never let a claim of possession substitute for proof of it.** Trusting "I already have chunk h" unconditionally means knowing a hash becomes equivalent to holding the file, since anyone who can guess or obtain a hash could attach another user's chunk to their own file and read it. The fix is either to challenge the client for a random slice of the chunk it claims to hold, proving possession at the cost of one round trip, or to restrict deduplication to chunks that specific user has actually uploaded, which is airtight and forfeits most of the cross-user saving.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 610" role="img" aria-label="Chunk hash dedup upload sequence">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .dash{ stroke-dasharray:5 4; }
-    .acc{ stroke:var(--accent); }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    .life{ fill:none; stroke:currentColor; stroke-width:1; stroke-opacity:0.4; stroke-dasharray:4 4; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <rect class="box" x="62"  y="16" width="96"  height="38" rx="8"/><text class="sub" x="110" y="36">Client</text>
-  <rect class="box" x="285" y="16" width="110" height="38" rx="8"/><text class="sub" x="340" y="36">Metaserver</text>
-  <rect class="box" x="495" y="16" width="110" height="38" rx="8"/><text class="sub" x="550" y="36">Block server</text>
-  <rect class="box" x="662" y="16" width="96"  height="38" rx="8"/><text class="sub" x="710" y="36">Hash KV</text>
-  <path class="life" d="M110,54 L110,600"/><path class="life" d="M340,54 L340,600"/><path class="life" d="M550,54 L550,600"/><path class="life" d="M710,54 L710,600"/>
-  <path class="flow" d="M110,86 L152,86 L152,100 L110,100"/><text class="edge" x="160" y="93" text-anchor="start">Split 4MB chunks, SHA-256 each</text>
-  <path class="flow" d="M110,132 L340,132"/><text class="edge" x="225" y="124">have_blocks(blocklist=[h1..hN])</text>
-  <path class="flow" d="M340,168 L710,168"/><text class="edge" x="525" y="160">lookup hashes</text>
-  <path class="flow dash" d="M710,204 L340,204"/><text class="edge" x="525" y="196">h1=present, h2=missing, ...</text>
-  <path class="flow dash acc" d="M340,240 L110,240"/><text class="edge" x="225" y="232">missing=[h2, h5, h7]</text>
-  <rect class="grp" x="60" y="262" width="340" height="42" rx="8"/><text class="sub" x="230" y="277">Dedup win: 80%+ of chunks</text><text class="sub" x="230" y="293">often already exist (templates, OS, media)</text>
-  <rect class="grp" x="8" y="322" width="744" height="150" rx="8"/><text class="sub" x="18" y="335" text-anchor="start" font-weight="600">par — upload only missing chunks (parallel)</text>
-  <path class="flow acc" d="M110,354 L550,354"/><text class="edge" x="330" y="346">PUT chunk(h2)</text>
-  <path class="flow" d="M550,388 L710,388"/><text class="edge" x="630" y="380">store(h2)</text>
-  <path class="flow acc" d="M110,420 L550,420"/><text class="edge" x="330" y="412">PUT chunk(h5)</text>
-  <path class="flow acc" d="M110,452 L550,452"/><text class="edge" x="330" y="444">PUT chunk(h7)</text>
-  <path class="flow" d="M110,502 L340,502"/><text class="edge" x="225" y="494">commit_file(blocklist, metadata)</text>
-  <path class="flow" d="M340,528 L382,528 L382,542 L340,542"/><text class="edge" x="390" y="535" text-anchor="start">persist = ordered blocklist</text>
-  <path class="flow dash" d="M340,578 L110,578"/><text class="edge" x="225" y="570">ack(file_id, version)</text>
-</svg>
-```
+[The chunk handshake: negotiate, then commit](/diagram/google-drive?figure=chunk-handshake)
 
 #### Commit is the only atomic step
 Chunks upload independently, hashing happens locally, and none of it is coordinated until one moment. What makes that one moment safe, and what happens when two devices reach it at once?
@@ -2854,26 +2386,24 @@ Splitting a file at fixed offsets is simple. What kind of edit does that simplic
 Worked example. A ten-byte insert at the very start of a one-gigabyte file, under fixed 4MB chunking, shifts all 256 chunk boundaries and re-uploads the entire gigabyte. The same insert under content-defined chunking perturbs roughly one or two chunks near the insertion point, costing on the order of a few megabytes, a difference of two orders of magnitude for what the user experienced as a trivial edit. Consumer Drive traffic sits at the low end of edit-in-the-middle behaviour, which is why fixed chunking is the right default here even though it is the wrong default for a backup product ingesting VM images or database files.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A 10-byte insert at the start of a file shifts every fixed chunk boundary after it, changing every hash; a content-defined boundary anchored to the bytes themselves resynchronises after one or two chunks"
->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="A 10-byte insert at the start of a file shifts every fixed chunk boundary after it, changing every hash; a content-defined boundary anchored to the bytes themselves resynchronises after one or two chunks">
   <style>
-    .cell{fill:none;stroke:currentColor;stroke-opacity:.4;stroke-width:1.2}
     .changed{fill:currentColor;fill-opacity:.15;stroke:currentColor;stroke-width:1.3}
     .same{fill:var(--accent);fill-opacity:.18;stroke:var(--accent);stroke-width:1.3}
     .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="190" y="20">Fixed offsets: insert shifts every boundary after it</text>
-  <g transform="translate(30,40)">
-    <rect class="changed" x="0" y="0" width="60" height="34"/><rect class="changed" x="64" y="0" width="60" height="34"/><rect class="changed" x="128" y="0" width="60" height="34"/><rect class="changed" x="192" y="0" width="60" height="34"/><rect class="changed" x="256" y="0" width="60" height="34"/>
+  <text class="lbl" x="8" y="16">Fixed offsets: insert shifts every boundary</text>
+  <g transform="translate(20,26)">
+    <rect class="changed" x="0" y="0" width="66" height="30"/><rect class="changed" x="70" y="0" width="66" height="30"/><rect class="changed" x="140" y="0" width="66" height="30"/><rect class="changed" x="210" y="0" width="66" height="30"/><rect class="changed" x="280" y="0" width="66" height="30"/>
   </g>
-  <text class="sub" x="190" y="95">every chunk after the insert re-hashes and re-uploads</text>
-  <text class="lbl" x="570" y="20">Content-defined: boundary anchored to bytes</text>
-  <g transform="translate(410,40)">
-    <rect class="changed" x="0" y="0" width="60" height="34"/><rect class="same" x="64" y="0" width="60" height="34"/><rect class="same" x="128" y="0" width="60" height="34"/><rect class="same" x="192" y="0" width="60" height="34"/><rect class="same" x="256" y="0" width="60" height="34"/>
+  <text class="sub" x="8" y="76">every chunk after the insert re-hashes and re-uploads</text>
+  <text class="lbl" x="8" y="112">Content-defined: boundary anchored to bytes</text>
+  <g transform="translate(20,122)">
+    <rect class="changed" x="0" y="0" width="66" height="30"/><rect class="same" x="70" y="0" width="66" height="30"/><rect class="same" x="140" y="0" width="66" height="30"/><rect class="same" x="210" y="0" width="66" height="30"/><rect class="same" x="280" y="0" width="66" height="30"/>
   </g>
-  <text class="sub" x="570" y="95">only the chunk touching the insert changes; the rest resynchronise unchanged</text>
+  <text class="sub" x="8" y="172">only the touched chunk changes; the rest</text>
+  <text class="sub" x="8" y="187">resynchronise unchanged</text>
 </svg>
 ```
 
@@ -3005,37 +2535,7 @@ A circle is defined by one centre and one radius. The structure being queried is
 
 Worked example. At one common precision level a cell measures roughly 1.22km by 0.61km. For a 1km radius, columns needed each side round up to 1, but rows needed each side round up to 2, giving a block of 3 by 5, fifteen cells, not the folk answer's nine. Using nine loses every result between 610 metres and 1000 metres directly north or south of the searcher, a failure that never throws an error and shows up only as a place quietly missing from results. Too coarse a precision level over-fetches instead: one level up, the same 1km search reads a block covering roughly 68 times the area of the actual circle, turning a 22,000-candidate scan into hundreds of thousands.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 372" role="img" aria-label="Geohash precision versus query cost: three rows for length 5, 6, 7 showing over-fetch, good match, and under-fetch">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <rect class="box" x="25" y="33" width="190" height="74" rx="9"/><text class="sub" x="120" y="63">geohash len=5</text><text class="sub" x="120" y="78">~5 km cell</text>
-  <path class="flow" d="M215,70 L265,70"/>
-  <rect class="box" x="265" y="33" width="230" height="74" rx="9"/><text class="sub" x="380" y="55">1km radius search</text><text class="sub" x="380" y="70">= 1 cell + 8 neighbors</text><text class="sub" x="380" y="85">covers 15km - OVER-FETCH</text>
-  <path class="flow" d="M495,70 L515,70"/>
-  <rect class="box" x="515" y="33" width="240" height="74" rx="9"/><text class="sub" x="635" y="63">~10x more candidates</text><text class="sub" x="635" y="78">haversine pays cost</text>
-  <rect class="box acc" x="25" y="148" width="190" height="74" rx="9"/><text class="sub" x="120" y="178">geohash len=6</text><text class="sub" x="120" y="193">~600 m cell</text>
-  <path class="flow acc" d="M215,185 L265,185"/>
-  <rect class="box acc" x="265" y="148" width="230" height="74" rx="9"/><text class="sub" x="380" y="163">1km radius</text><text class="sub" x="380" y="178">= cell + 8 neighbors</text><text class="sub" x="380" y="193">≈ 1.8km coverage</text><text class="sub" x="380" y="208">GOOD MATCH</text>
-  <path class="flow acc" d="M495,185 L515,185"/>
-  <rect class="box acc" x="515" y="148" width="240" height="74" rx="9"/><text class="sub" x="635" y="178">~3x candidates</text><text class="sub" x="635" y="193">well-balanced</text>
-  <rect class="box" x="25" y="263" width="190" height="74" rx="9"/><text class="sub" x="120" y="293">geohash len=7</text><text class="sub" x="120" y="308">~150 m cell</text>
-  <path class="flow" d="M215,300 L265,300"/>
-  <rect class="box" x="265" y="263" width="230" height="74" rx="9"/><text class="sub" x="380" y="278">1km radius</text><text class="sub" x="380" y="293">= 8x8 grid scan</text><text class="sub" x="380" y="308">= 64 cells fetched</text><text class="sub" x="380" y="323">UNDER-FETCH per cell</text>
-  <path class="flow" d="M495,300 L515,300"/>
-  <rect class="box" x="515" y="263" width="240" height="74" rx="9"/><text class="sub" x="635" y="293">~64 cell lookups</text><text class="sub" x="635" y="308">round-trip multiplier</text>
-</svg>
-```
+[Geohash precision vs query cost](/diagram/proximity-service?figure=geohash-precision)
 
 #### Why phase one has to cost nanoseconds, not microseconds
 An index could store just enough to identify a candidate, leaving filtering and ranking to a second fetch. Why does this design pay to make every entry self-contained instead?
@@ -3063,25 +2563,7 @@ Coordinate writes are vanishingly rare against reads. What does that ratio let t
 
 Worked example. A build job fails partway through and silently produces an artifact missing a large slice of one region's entries. Under a write-through design, the corruption is already live and searchers immediately see it. Under build-and-verify, the entry-count check catches the shortfall before the artifact is ever promoted, the previous known-good version keeps serving every query in the meantime, and the whole failed build costs nothing but a delayed release rather than an outage.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="An index build passes through a checksum and corpus-diff gate, then a canary node, before the rest of the fleet flips its pointer; the previous artifact stays resident for instant rollback"
->
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="70" width="140" height="50" rx="8"/><text class="lbl" x="90" y="90">Nightly build</text><text class="sub" x="90" y="108">map + sort by cell</text>
-  <rect class="box" x="200" y="70" width="140" height="50" rx="8"/><text class="lbl" x="270" y="90">Gate</text><text class="sub" x="270" y="108">1% band + corpus diff</text>
-  <rect class="box" x="380" y="70" width="140" height="50" rx="8"/><text class="lbl" x="450" y="90">Canary node</text><text class="sub" x="450" y="108">live result-set diff</text>
-  <rect class="box acc" x="560" y="70" width="180" height="50" rx="8"/><text class="lbl" x="650" y="90">Fleet pointer flip</text><text class="sub" x="650" y="108">previous artifact stays resident</text>
-  <path class="flow" d="M160,95 L200,95"/><path class="flow" d="M340,95 L380,95"/><path class="flow" d="M520,95 L560,95"/>
-  <text class="sub" x="380" y="160">any stage failing means the current artifact keeps serving; nothing is ever promoted blind</text>
-</svg>
-```
+[Build, gate, canary, flip: nothing promoted blind](/diagram/proximity-service?figure=build-gate-canary)
 
 #### The cache key that turns millions of coordinates into a few thousand hot ones
 Two people standing metres apart send different coordinates for the same search. If the cache is keyed on raw location, it never gets a second hit on either of them.
@@ -3156,7 +2638,7 @@ Second, the read side is nearly trivial once seen correctly: nobody ever asks wh
 
 Third, privacy has to be structural rather than a checkbox. Sharing is bidirectional, permission has to be current to the millisecond it is checked, and the design has to survive the fact that "I stopped sharing" is itself information a viewer can infer from silence.
 
-> **What this is not.** The sharper contrast is ride hailing, because it shares the property that actually makes this hard: both index continuously moving points at a comparable write rate, so the difference is not static against moving. It is the shape of the match. Ride hailing is bipartite and open: a rider is matched against drivers who are strangers, so the candidate set genuinely is everyone nearby, and a spatial index over all live supply is unavoidable. Nearby Friends is symmetric and closed: every participant is simultaneously a moving point and a subscriber, and the candidate set is pre-declared by a graph averaging two hundred entries that changes on a timescale of days, not seconds. That closure is what deletes the read-side spatial index entirely. It also runs the other way: a ride-hailing service chooses how many drivers to consider and can cap it low, whereas here the fan-out is dictated by a social graph nobody controls, which is why crowd and hot-user cases are something to survive rather than something to tune away.
+> **What this is not.** The sharper contrast is ride hailing, since it shares the property that actually makes this hard: both index continuously moving points at a comparable write rate, so the difference is not static against moving, it is the shape of the match. Ride hailing is bipartite and open: a rider is matched against drivers who are strangers, so the candidate set is genuinely everyone nearby, and a spatial index over all live supply is unavoidable. Nearby Friends is symmetric and closed: every participant is simultaneously a moving point and a subscriber, and the candidate set is pre-declared by a graph averaging two hundred entries that changes over days, not seconds. That closure deletes the read-side spatial index entirely. It also runs the other way: ride hailing chooses how many drivers to consider and can cap it low, whereas here fan-out is dictated by a social graph nobody controls, so crowd and hot-user cases are something to survive rather than tune away.
 
 #### Requirements and the numbers
 **Functional.** See which friends are currently in range. Be notified when one enters or leaves. Grant and revoke sharing per friend. History is a separate, opt-in product.
@@ -3239,41 +2721,7 @@ A phone reporting its location every few seconds all day exhausts its battery we
 
 Worked example. A user who is still, which describes most users for most of a typical day, drops from a driving-rate fix every ten seconds to a stationary-rate fix every five minutes, roughly thirty times fewer writes for that period. The classification cost to achieve this is close to free, drawing single-digit milliamps on a dedicated low-power sensor coprocessor against the hundreds of milliamps a GPS fix requires, which is the entire reason this policy belongs on the device rather than anywhere it would need a network round trip to apply.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 392" role="img" aria-label="Adaptive GPS sample-rate state machine: Stationary, Walking, Driving and Background states with transition conditions and GPS sample-rate notes">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
-  <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .grp{ fill:currentColor; fill-opacity:0.05; stroke:currentColor; stroke-opacity:0.45; stroke-width:1.2; stroke-dasharray:5 4; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .lbl{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:15px; }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
-  </style>
-  <circle cx="390" cy="34" r="6" fill="currentColor"/>
-  <path class="flow" d="M390,40 L390,77"/>
-  <rect class="box" x="320" y="77"  width="140" height="46" rx="9"/><text class="lbl" x="390" y="100">Stationary</text>
-  <rect class="box" x="320" y="192" width="140" height="46" rx="9"/><text class="lbl" x="390" y="215">Walking</text>
-  <rect class="box" x="320" y="307" width="140" height="46" rx="9"/><text class="lbl" x="390" y="330">Driving</text>
-  <rect class="box" x="70" y="77" width="140" height="46" rx="9"/><text class="lbl" x="140" y="100">Background</text>
-  <path class="flow" d="M360,123 L360,192"/><text class="edge" x="310" y="150" text-anchor="end">accel motion &gt;5s</text>
-  <path class="flow" d="M420,192 L420,123"/><text class="edge" x="470" y="158" text-anchor="start">still &gt;5min</text>
-  <path class="flow" d="M360,238 L360,307"/><text class="edge" x="310" y="265" text-anchor="end">speed &gt;10 m/s</text>
-  <path class="flow" d="M420,307 L420,238"/><text class="edge" x="470" y="273" text-anchor="start">speed &lt;5 m/s</text>
-  <path class="flow" d="M460,330 L540,330 L540,100 L460,100"/><text class="edge" x="548" y="215" text-anchor="start">still</text><text class="edge" x="548" y="230" text-anchor="start">&gt;5min</text>
-  <path class="flow" d="M320,92 L210,92"/><text class="edge" x="265" y="78">app backgrounded</text>
-  <path class="flow" d="M210,108 L320,108"/><text class="edge" x="265" y="122">app foregrounded</text>
-  <rect class="grp" x="70" y="20" width="140" height="40"/><text class="sub" x="140" y="34">Background:</text><text class="sub" x="140" y="49">min 1min, OS-permitted</text>
-  <rect class="grp" x="585" y="80" width="160" height="40"/><text class="sub" x="665" y="94">Stationary:</text><text class="sub" x="665" y="109">GPS off, sample 5min</text>
-  <rect class="grp" x="585" y="195" width="160" height="40"/><text class="sub" x="665" y="209">Walking:</text><text class="sub" x="665" y="224">GPS on, sample 30s</text>
-  <rect class="grp" x="585" y="310" width="160" height="40"/><text class="sub" x="665" y="324">Driving:</text><text class="sub" x="665" y="339">GPS on, sample 10s</text>
-</svg>
-```
+[Adaptive sampling: motion state sets the GPS interval](/diagram/nearby-friends?figure=motion-state)
 
 #### Sharding by geography turns writes into local set intersections
 The pre-filter has to answer, for every surviving write, whether any friend is nearby. Done naively, that question is itself a distributed lookup on every single write. What makes it cheap instead?
@@ -3288,28 +2736,7 @@ The pre-filter has to answer, for every surviving write, whether any friend is n
 
 This trades one cost for a different, smaller one: users migrate between shards as they physically move between cells, but at realistic crossing rates that migration traffic is a small single-digit percentage of the write rate, cheap enough to treat as noise. The real cost surfaces where population itself concentrates: a quiet cell holds a few thousand reporters, but a stadium or festival cell can hold tens of thousands within a few hundred metres, which is exactly the geography-based sharding scheme's blind spot, since load now follows population directly rather than being spread evenly by a hash. The mitigation, splitting any cell above a threshold into a small, bounded number of hash sub-shards, bounds the worst case but also reintroduces, in precisely that crowd scenario, the cross-node scatter-gather geographic sharding exists to avoid.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="Sharding by user id scatters a write's candidates across many nodes; sharding by geographic cell keeps a write and its candidates on the same node"
->
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent);fill:var(--accent);fill-opacity:.12}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;opacity:.6}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="180" y="20">Sharded by user id: candidates scattered</text>
-  <rect class="box" x="30" y="40" width="90" height="40" rx="7"/><text class="sub" x="75" y="63">write</text>
-  <rect class="box" x="150" y="90" width="70" height="34" rx="6"/><rect class="box" x="240" y="40" width="70" height="34" rx="6"/><rect class="box" x="150" y="140" width="70" height="34" rx="6"/><rect class="box" x="260" y="140" width="70" height="34" rx="6"/>
-  <path class="flow" d="M75,80 L185,107"/><path class="flow" d="M75,80 L275,57"/><path class="flow" d="M75,80 L185,157"/><path class="flow" d="M75,80 L295,157"/>
-  <text class="sub" x="180" y="180">4 friends, 4 separate shards, one write waits on the slowest</text>
-  <text class="lbl" x="570" y="20">Sharded by cell: candidates local</text>
-  <rect class="acc" x="480" y="50" width="220" height="110" rx="10"/>
-  <rect class="box" x="500" y="70" width="60" height="30" rx="6"/><rect class="box" x="580" y="70" width="60" height="30" rx="6"/><rect class="box" x="500" y="110" width="60" height="30" rx="6"/><rect class="box" x="580" y="110" width="60" height="30" rx="6"/>
-  <text class="sub" x="590" y="180">write and every nearby friend share one node: no network hop at all</text>
-</svg>
-```
+[Sharding by cell keeps a write's candidates local](/diagram/nearby-friends?figure=cell-sharding)
 
 #### Sending verdicts, not positions
 Once a write survives the pre-filter, what actually gets sent to an interested friend? The answer is not the position that triggered the check.
@@ -3325,42 +2752,25 @@ Once a write survives the pre-filter, what actually gets sent to an interested f
 Crossings need hysteresis to avoid flapping at the boundary: entering and leaving thresholds set apart from each other, plus a cooldown before re-notifying the same pair, mean someone loitering near the edge of the radius produces one notification rather than dozens as ordinary GPS noise nudges them back and forth across a single boundary.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 612" role="img" aria-label="Pub/sub fan-out: publisher through pre-filter and ACL decisions, routing WS pushes to friends or dropping">
-  <defs>
-    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
-    </marker>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="A position stream sends every coordinate as a friend walks through the radius; a verdict-only design sends one entered event and one left event, with no coordinates in either">
   <style>
-    .box{ fill:none; stroke:currentColor; stroke-width:1.5; }
-    .flow{ fill:none; stroke:currentColor; stroke-width:1.5; marker-end:url(#ah); }
-    .acc{ stroke:var(--accent); }
-    .sub{ fill:currentColor; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:13px; }
-    .edge{ fill:currentColor; opacity:0.72; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; font-size:12px; }
-    text{ dominant-baseline:middle; text-anchor:middle; }
+    .acc{stroke:var(--accent);fill:var(--accent);fill-opacity:.15}
+    .dot{fill:currentColor}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <rect class="box" x="225" y="22" width="150" height="46" rx="9"/><text class="sub" x="300" y="38">Publisher A</text><text class="sub" x="300" y="53">location update</text>
-  <path class="flow" d="M300,68 L300,120"/>
-  <polygon class="box" points="300,120 378,150 300,180 222,150"/><text class="sub" x="300" y="143">Pre-filter:</text><text class="sub" x="300" y="158">friend in radius?</text>
-  <path class="flow" d="M378,150 L485,150"/><text class="edge" x="392" y="140" text-anchor="start">No</text>
-  <rect class="box" x="485" y="127" width="150" height="46" rx="9"/><text class="sub" x="560" y="143">Drop publish</text><text class="sub" x="560" y="158">save bus traffic</text>
-  <path class="flow acc" d="M300,180 L300,227"/><text class="edge" x="308" y="204" text-anchor="start">Yes</text>
-  <rect class="box acc" x="225" y="227" width="150" height="46" rx="9"/><text class="sub" x="300" y="250">Topic user.location.A</text>
-  <path class="flow acc" d="M300,273 L300,327"/>
-  <rect class="box acc" x="225" y="327" width="150" height="46" rx="9"/><text class="sub" x="300" y="343">Subscription Service</text><text class="sub" x="300" y="358">routes to active WS</text>
-  <path class="flow" d="M375,345 L430,345 L430,315 L485,315"/>
-  <rect class="box" x="485" y="292" width="150" height="46" rx="9"/><text class="sub" x="560" y="315">WS push to friend C</text>
-  <path class="flow" d="M375,357 L430,357 L430,392 L485,392"/>
-  <rect class="box" x="485" y="369" width="150" height="46" rx="9"/><text class="lbl" x="560" y="392">...</text>
-  <path class="flow acc" d="M300,373 L300,430"/>
-  <polygon class="box" points="300,430 378,460 300,490 222,460"/><text class="sub" x="300" y="453">ACL</text><text class="sub" x="300" y="468">cache hit?</text>
-  <path class="flow" d="M378,460 L485,460"/><text class="edge" x="392" y="450" text-anchor="start">No</text>
-  <rect class="box" x="485" y="437" width="150" height="46" rx="9"/><text class="sub" x="560" y="453">Permission DB</text><text class="sub" x="560" y="468">~0.5ms</text>
-  <path class="flow" d="M222,460 L155,460"/><text class="edge" x="215" y="450" text-anchor="end">denied</text>
-  <rect class="box" x="25" y="437" width="130" height="46" rx="9"/><text class="sub" x="90" y="461">Drop</text>
-  <path class="flow acc" d="M300,490 L300,537"/><text class="edge" x="308" y="513" text-anchor="start">Yes (allowed)</text>
-  <rect class="box acc" x="225" y="537" width="150" height="46" rx="9"/><text class="sub" x="300" y="561">WS push to friend B</text>
-  <path class="flow" d="M560,483 L560,560 L378,560"/>
+  <text class="lbl" x="8" y="16">Position stream: one message per fix</text>
+  <g transform="translate(20,32)">
+    <circle class="dot" cx="0" cy="10" r="5"/><circle class="dot" cx="42" cy="10" r="5"/><circle class="dot" cx="84" cy="10" r="5"/><circle class="dot" cx="126" cy="10" r="5"/><circle class="dot" cx="168" cy="10" r="5"/><circle class="dot" cx="210" cy="10" r="5"/><circle class="dot" cx="252" cy="10" r="5"/><circle class="dot" cx="294" cy="10" r="5"/><circle class="dot" cx="336" cy="10" r="5"/>
+  </g>
+  <text class="sub" x="8" y="72">every fix while inside the radius reaches the client</text>
+  <text class="lbl" x="8" y="115">Verdict only: two events, no coordinates</text>
+  <g transform="translate(20,132)">
+    <circle class="acc" cx="10" cy="10" r="6"/><text class="sub" x="10" y="33">entered</text>
+    <circle class="acc" cx="330" cy="10" r="6"/><text class="sub" x="330" y="33">left</text>
+  </g>
+  <text class="sub" x="8" y="180">only who, which direction, and when —</text>
+  <text class="sub" x="8" y="195">never latitude or longitude</text>
 </svg>
 ```
 
@@ -3391,12 +2801,12 @@ Worked example. A user revokes a friend's access. Under a fan-out cache with eve
 #### What this design does not solve
 **A silent pause is not actually silent, and pretending otherwise would be dishonest.** Every location product needs a way to stop sharing without announcing it, because the realistic threat here is not a stranger scraping a directory, it is someone who already has consent on file and is watching closely. But absence is itself a signal: a dot that stops moving at a specific moment can simply be asked about by whoever was watching it. Making a pause genuinely undetectable would mean fabricating plausible fake positions, which means lying to one user about another user's location, and that is not something this design is willing to build. The available mitigations, routine-looking expiry, never surfacing an explicit "paused" state, coarse last-seen rounding, narrow the inference without closing it.
 
-**Revocation stops the next read and reaches nothing already delivered.** A read-time permission check gives a genuinely zero-length window on any answer produced after the revoke, which is the strongest guarantee the server side can offer. It says nothing about positions a friend's client already holds in memory, or chose to retain, and a modified client that has been logging every polled position since sharing began keeps all of it regardless of what the server does afterward. Capping client-side retention, quantising shared precision, and keeping a server-side access log all help after the fact; none of them can retroactively un-send anything already delivered.
+**Revocation stops the next read and reaches nothing already delivered.** A read-time permission check gives a genuinely zero-length window on any answer produced after the revoke, the strongest guarantee the server side can offer. It says nothing about positions a friend's client already holds in memory or chose to retain, and a modified client logging every polled position since sharing began keeps all of it regardless. Capping client-side retention, quantising shared precision, and keeping a server-side access log help after the fact; none of it retroactively un-sends anything already delivered.
 
-**Geographic sharding degrades exactly where the product matters most.** The pre-filter is cheap specifically because people physically near a writer are already on that writer's shard, and a crowd inverts that assumption completely. At a festival, precisely the situation where finding friends nearby matters most, sub-sharding under load means crossing notifications arrive far slower than the design target, and some do not arrive at all. The honest alternatives are all worse in some other way: a second index keyed by friendship rather than geography roughly doubles the write path to cover well under a tenth of a percent of cells, and simply raising the sub-shard cap trades the cross-node fan-in cost for a local scan that degrades just as badly at higher volume.
+**Geographic sharding degrades exactly where the product matters most.** The pre-filter is cheap specifically because people physically near a writer are already on that writer's shard, and a crowd inverts that assumption completely. At a festival, precisely the situation where finding friends matters most, sub-sharding under load means notifications arrive far slower than target, and some do not arrive at all. The alternatives are all worse another way: a second index keyed by friendship roughly doubles the write path to cover well under a tenth of a percent of cells, and simply raising the sub-shard cap trades cross-node fan-in for a local scan that degrades just as badly at higher volume.
 
 #### Final design
-Read it back through the numbers. The gap between ~10M raw writes and ~46k actual crossing notifications, roughly two hundredfold, is what the entire three-stage attenuation pipeline, device sampling, the pre-filter, and verdict-only delivery, exists to produce, and none of the three stages alone would get there. The fact that a friend graph averaging two hundred entries is cheaper to scan directly than any spatial index could be maintained is what deletes an entire read-side subsystem a static proximity service would otherwise need. And a zero-length revocation window, bought by checking permission on the read rather than caching it at delivery time, is the one guarantee this design refuses to compromise on, because for location data the cost of getting it wrong is a safety failure, not a latency one.
+Read it back through the numbers. The gap between ~10M raw writes and ~46k actual crossing notifications, roughly two hundredfold, is what the three-stage pipeline, device sampling, the pre-filter, and verdict-only delivery, exists to produce, and no single stage alone gets there. A friend graph averaging two hundred entries being cheaper to scan directly than any spatial index could be maintained is what deletes an entire read-side subsystem a static proximity service would need. And a zero-length revocation window, bought by checking permission on the read rather than caching it at delivery, is the one guarantee this design refuses to compromise on, because for location data getting it wrong is a safety failure, not a latency one.
 
 [The whole design](/diagram/nearby-friends?focus=device,ingest,latest-loc,cell-members,prefilter,acl-gate,publisher,crossing-bus,subscription,friend-socket,map-client,nearby-api,perm-cache,perm-db,history)
 
@@ -3491,35 +2901,7 @@ How do you answer a shortest-path query over 10 million intersections inside a 1
 
 **Great: contract the graph once, then only ever search upward.** Rank every junction by importance. Working bottom-up, remove each junction and, wherever no equal-or-shorter alternative exists, add a direct shortcut edge between its neighbours that stands in for the path through it. A shortcut is exact: it represents a real path, not an approximation, so no optimal route is ever lost. The query then runs two searches at once, one from the origin and one from the destination, and each only ever relaxes edges towards higher-ranked nodes. The two searches meet somewhere near the motorway level instead of exploring the whole graph, settling hundreds of nodes rather than millions.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Nodes ranked by importance; contraction adds a shortcut past a removed junction; the query climbs upward from both ends and meets near the top">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
-    .flowacc{fill:none;stroke:var(--accent);stroke-width:1.8;marker-end:url(#ah)}
-    .dash{stroke-dasharray:5 4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="sub" x="20" y="20" text-anchor="start">rank rises with importance, low to high</text>
-  <circle class="box" cx="90" cy="230" r="16"/><text class="sub" x="90" y="255">u</text>
-  <circle class="box dash" cx="220" cy="230" r="16"/><text class="sub" x="220" y="255">v (contracted)</text>
-  <circle class="box" cx="350" cy="230" r="16"/><text class="sub" x="350" y="255">w</text>
-  <path class="flow" d="M104,225 Q220,150 336,225"/>
-  <text class="lbl" x="220" y="150">shortcut u→w, weight = w(u,v)+w(v,w)</text>
-  <path class="flow dash" d="M104,235 L206,235"/><path class="flow dash" d="M234,235 L336,235"/>
-  <text class="sub" x="20" y="90" text-anchor="start">query: two searches, each upward only</text>
-  <circle class="box acc" cx="130" cy="60" r="14"/><text class="sub" x="130" y="60">origin</text>
-  <circle class="box acc" cx="630" cy="60" r="14"/><text class="sub" x="630" y="60">dest</text>
-  <circle class="box acc" cx="380" cy="40" r="16"/><text class="lbl" x="380" y="40">meet</text>
-  <path class="flowacc" d="M144,55 Q260,15 366,36"/>
-  <path class="flowacc" d="M616,55 Q500,15 394,36"/>
-  <text class="sub" x="380" y="90">settles hundreds of nodes, not millions · ~150μs on a static metric</text>
-</svg>
-```
+[Contraction: a shortcut skips a removed junction](/diagram/google-maps?figure=contraction)
 
 Contraction hierarchies, introduced by Geisberger, Sanders, Schultes and Delling in 2008, are roughly four orders of magnitude faster than an unguided search: 150 microseconds against a second, exact rather than approximate. Landmark-guided search stays useful as a fallback for a region whose metric is mid-refresh, because its bound survives weight increases without needing a rebuild.
 
@@ -3550,23 +2932,26 @@ Sketch workers aside, the weight metric above has to come from somewhere. How do
 **Great: a state machine with hysteresis, plus a separate channel for closures.** Each segment holds one of four traffic states, Free, Slow, Heavy or Stopped, and a state change requires the new trimmed mean to hold for two consecutive windows before it takes effect. A segment flickering around a boundary stays in its current state until the change is real. Closures get their own path entirely: a verified closure arrives on an override channel that skips the aggregation window and sets the edge impassable within seconds, because a closed road produces zero probes, which looks identical to a quiet one, and the state machine alone can never tell the two apart.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="A raw probe stream flickers a single-sample weight; a trimmed mean over a window smooths it but still flips near a threshold; a two-window hysteresis state holds steady">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img" aria-label="A raw probe stream flickers a single-sample weight; a trimmed mean over a window smooths it but still flips near a threshold; a two-window hysteresis state holds steady">
   <style>
     .ax{stroke:currentColor;stroke-opacity:.3;stroke-width:1}
     .raw{fill:none;stroke:currentColor;stroke-opacity:.45;stroke-width:1.3}
     .trim{fill:none;stroke:currentColor;stroke-width:1.6}
     .hyst{fill:none;stroke:var(--accent);stroke-width:2.2}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <line class="ax" x1="20" y1="170" x2="740" y2="170"/>
-  <text class="lbl" x="20" y="24">raw probes, per-ping</text>
-  <path class="raw" d="M20,60 L60,110 L100,50 L140,120 L180,55 L220,115 L260,60 L300,105 L340,58 L380,112 L420,62 L460,108 L500,60 L540,110 L580,58 L620,112 L660,60 L700,105 L740,62"/>
-  <text class="lbl" x="20" y="140">trimmed mean, 5-min window</text>
-  <path class="trim" d="M20,130 L180,132 L340,95 L500,97 L660,100 L740,99"/>
-  <text class="sub" x="345" y="82">state boundary: flips at every window crossing it</text>
-  <path class="hyst" d="M20,148 L340,150 L340,150 L660,110 L740,110"/>
-  <text class="lbl" x="500" y="128" fill="var(--accent)">hysteresis state: holds for 2 windows before it moves</text>
+  <text class="lbl" x="8" y="16">raw probes, per-ping</text>
+  <line class="ax" x1="8" y1="80" x2="392" y2="80"/>
+  <path class="raw" d="M8,45 L48,68 L88,38 L128,72 L168,42 L208,70 L248,44 L288,66 L328,42 L368,68"/>
+  <text class="lbl" x="8" y="118">trimmed mean, 5-min window</text>
+  <line class="ax" x1="8" y1="178" x2="392" y2="178"/>
+  <path class="trim" d="M8,168 L168,169 L208,138 L392,140"/>
+  <text class="sub" x="8" y="196">flips at every window crossing the threshold</text>
+  <text class="lbl" x="8" y="234" fill="var(--accent)">hysteresis state</text>
+  <text class="sub" x="8" y="250">holds for 2 windows before it moves</text>
+  <line class="ax" x1="8" y1="278" x2="392" y2="278"/>
+  <path class="hyst" d="M8,268 L208,270 L208,270 L392,235"/>
 </svg>
 ```
 
@@ -3596,28 +2981,7 @@ The router has already found the shortest path. A user wants a second option. Wh
 
 **Great: generate via-node candidates and admit only the ones that pass three tests.** For a candidate route through some intermediate node, published by Abraham and co-authors in 2010, check bounded stretch (no more than roughly 10% longer than the shortest path), limited sharing (no more than roughly 80% of its edges in common with the shortest path), and local optimality (every long enough sub-path of the candidate is itself a shortest path between its own endpoints). The third test is what rules out an alternative that only looks different because part of it is a bad detour: a genuinely different route should still be internally efficient along its whole length.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A shortest path and a via-node candidate; the candidate is checked for bounded stretch, limited edge sharing, and local optimality along its own sub-paths">
-  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.6;marker-end:url(#ah2)}
-    .flowacc{fill:none;stroke:var(--accent);stroke-width:1.8;marker-end:url(#ah2)}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <circle class="box" cx="60" cy="140" r="14"/><text class="sub" x="60" y="165">origin</text>
-  <circle class="box" cx="700" cy="140" r="14"/><text class="sub" x="700" y="165">dest</text>
-  <path class="flow" d="M74,140 L686,140"/>
-  <text class="lbl" x="380" y="120">shortest path</text>
-  <circle class="box" cx="380" cy="50" r="14"/><text class="sub" x="380" y="30">via-node</text>
-  <path class="flowacc" d="M74,132 Q220,30 366,50"/>
-  <path class="flowacc" d="M394,50 Q540,30 686,132"/>
-  <text class="lbl" x="380" y="70" fill="var(--accent)">candidate: stretch ≤10% · shared edges ≤80% · each half is itself shortest</text>
-  <text class="sub" x="380" y="200">fails any test → discarded, not offered as an alternative</text>
-</svg>
-```
+[A via-node candidate, checked before it is offered](/diagram/google-maps?figure=via-node)
 
 The three thresholds are a product decision, not a mathematical one. Loosen the sharing limit and two options become the same route twice; tighten it and a candidate becomes a route that is 25% slower, which reads to a user as the system being wrong rather than genuinely offering a choice.
 
@@ -3744,24 +3108,20 @@ The producer's `acks=all` call has just returned successfully. Where is the data
 **Great: committed means present in the page cache of every in-sync replica.** The leader tracks each follower's log-end-offset and advances the high watermark to the minimum across the in-sync set. Consumers may not read past the high watermark, and `acks=all` is released only once the watermark passes the batch. So "committed" is a claim about replication, never a claim about any disk.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="At the moment acks=all returns, the batch sits in the page cache of the leader and two followers, none of them yet flushed to disk">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="At the moment acks=all returns, the batch sits in the page cache of the leader and two followers, none of them yet flushed to disk">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent);stroke-width:2}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .box{fill:none;stroke:currentColor;stroke-width:1.4}
+    .acc{stroke:var(--accent);stroke-width:1.8}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="24" text-anchor="start">Moment acks=all returns to the producer</text>
-  <rect class="box acc" x="40" y="50" width="200" height="60" rx="8"/><text class="lbl" x="140" y="72">Leader, Broker 1</text><text class="sub" x="140" y="92">page cache: has batch N</text>
-  <rect class="box acc" x="280" y="50" width="200" height="60" rx="8"/><text class="lbl" x="380" y="72">Follower, Broker 2</text><text class="sub" x="380" y="92">page cache: fetched N</text>
-  <rect class="box acc" x="520" y="50" width="200" height="60" rx="8"/><text class="lbl" x="620" y="72">Follower, Broker 3</text><text class="sub" x="620" y="92">page cache: fetched N</text>
-  <path class="flow" d="M140,110 L140,150"/><path class="flow" d="M380,110 L380,150"/><path class="flow" d="M620,110 L620,150"/>
-  <rect class="box" x="40" y="150" width="200" height="46" rx="8"/><text class="sub" x="140" y="173">disk: not yet, kernel's clock</text>
-  <rect class="box" x="280" y="150" width="200" height="46" rx="8"/><text class="sub" x="380" y="173">disk: not yet, kernel's clock</text>
-  <rect class="box" x="520" y="150" width="200" height="46" rx="8"/><text class="sub" x="620" y="173">disk: not yet, kernel's clock</text>
-  <text class="sub" x="380" y="215">durability comes from 3 independent copies in RAM, not from any single fsync</text>
+  <text class="lbl" x="8" y="16">Moment acks=all returns to the producer</text>
+  <rect class="box acc" x="8" y="28" width="384" height="30" rx="6"/><text class="lbl" x="16" y="47">Leader, Broker 1</text><text class="sub" x="384" y="47" text-anchor="end">cache: has N</text>
+  <rect class="box acc" x="8" y="64" width="384" height="30" rx="6"/><text class="lbl" x="16" y="83">Follower, Broker 2</text><text class="sub" x="384" y="83" text-anchor="end">cache: fetched N</text>
+  <rect class="box acc" x="8" y="100" width="384" height="30" rx="6"/><text class="lbl" x="16" y="119">Follower, Broker 3</text><text class="sub" x="384" y="119" text-anchor="end">cache: fetched N</text>
+  <rect class="box" x="8" y="146" width="384" height="30" rx="6"/><text class="sub" x="16" y="165">disk, all three: not yet, kernel's clock</text>
+  <text class="sub" x="8" y="200">durability = 3 independent RAM copies,</text>
+  <text class="sub" x="8" y="216">not any single fsync</text>
 </svg>
 ```
 
@@ -3807,22 +3167,22 @@ Seven days of retention already needs 92TB of NVMe per broker. A 30-day requirem
 The price of the tier is latency for anyone who lags behind it: a fetch that has to go to object storage runs at 50 to 200 milliseconds instead of under 1 millisecond from local disk. That is exactly the moment a consumer is trying to catch up after an incident, which is when the slower path matters most.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A consumer reading recent data hits local NVMe under 1 millisecond; a consumer catching up after an incident reaches past the 12-hour local window and pays 50 to 200 milliseconds fetching from object storage, exactly when it can least afford it">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="A consumer reading recent data hits local NVMe under 1 millisecond; a consumer catching up after an incident reaches past the 12-hour local window and pays 50 to 200 milliseconds fetching from object storage, exactly when it can least afford it">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
     .bad{stroke-opacity:.55}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="20" y="24" text-anchor="start">Caught-up consumer: reads within the 12h local window</text>
-  <rect class="box acc" x="20" y="40" width="60" height="26" rx="4"/>
-  <text class="sub" x="200" y="53">local NVMe, under 1ms</text>
-  <text class="lbl" x="20" y="110" text-anchor="start">Lagging consumer: reads past the local window, after an incident</text>
-  <rect class="box bad" x="20" y="126" width="600" height="26" rx="4"/>
-  <text class="sub" x="330" y="139" fill="currentColor">object storage, 50 to 200ms</text>
-  <text class="sub" x="330" y="170">the slower path arrives exactly when recovery speed matters most</text>
+  <text class="lbl" x="8" y="16">Caught-up: reads within the 12h local window</text>
+  <rect class="box acc" x="8" y="28" width="32" height="24" rx="4"/>
+  <text class="sub" x="48" y="44">local NVMe, under 1ms</text>
+  <text class="lbl" x="8" y="88">Lagging: past the local window, after an incident</text>
+  <rect class="box bad" x="8" y="100" width="384" height="24" rx="4"/>
+  <text class="sub" x="200" y="116" text-anchor="middle">object storage, 50 to 200ms</text>
+  <text class="sub" x="8" y="150">the slower path arrives exactly when</text>
+  <text class="sub" x="8" y="166">recovery speed matters most</text>
 </svg>
 ```
 
@@ -3931,20 +3291,24 @@ A sample costs 1.5 bytes. A series costs kilobytes of memory that never comes ba
 **Good: compress harder.** Delta-of-delta encoding on timestamps and XOR encoding on floats take a 16-byte sample down to roughly 1.5 bytes, which is real and worth doing. It reduces disk for samples that already exist. It does nothing for the cost of creating a new series in the first place, which is paid in index memory before a single byte of the compressed sample is written.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A sample costs 1.5 bytes on disk; a series costs 3 to 4 kilobytes of memory at creation, roughly three orders of magnitude more">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 250" role="img" aria-label="A sample costs 1.5 bytes on disk; a series costs 3 to 4 kilobytes of memory at creation, roughly three orders of magnitude more">
   <style>
     .bar{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.5}
     .bar2{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="30">One sample: appends to an existing series</text>
-  <rect class="bar2" x="20" y="46" width="4" height="24" rx="2"/>
-  <text class="sub" x="34" y="63">1.5 bytes on disk, near-zero in memory</text>
-  <text class="lbl" x="20" y="120">One new series: index entry, postings, open chunk, WAL record</text>
-  <rect class="bar" x="20" y="136" width="600" height="24" rx="2"/>
-  <text class="sub" x="20" y="180">3 to 4KB of ingester memory, held for as long as the series stays active</text>
-  <text class="sub" x="20" y="204">1,000 new values on one label ≈ 3 to 4MB of head memory the ingester did not have a minute ago</text>
+  <text class="lbl" x="8" y="16">One sample: appends to an existing series</text>
+  <rect class="bar2" x="8" y="28" width="4" height="22" rx="2"/>
+  <text class="sub" x="20" y="43">1.5 bytes on disk, near-zero in memory</text>
+  <text class="lbl" x="8" y="86">One new series: index entry, postings,</text>
+  <text class="lbl" x="8" y="102">open chunk, WAL record</text>
+  <rect class="bar" x="8" y="114" width="384" height="22" rx="2"/>
+  <text class="sub" x="8" y="156">3 to 4KB of ingester memory, held for as</text>
+  <text class="sub" x="8" y="172">long as the series stays active</text>
+  <text class="sub" x="8" y="200">1,000 new values on one label ≈ 3 to 4MB</text>
+  <text class="sub" x="8" y="216">of head memory the ingester didn't have</text>
+  <text class="sub" x="8" y="232">a minute ago</text>
 </svg>
 ```
 
@@ -3989,33 +3353,7 @@ A database fails. Every service that depends on it fires its own alert rule with
 
 **Great: group by shared labels, then inhibit the downstream symptoms of a known cause.** The **Alert router** groups alerts that share a label set into a single notification, so 200 pods alerting on one database failure becomes one page rather than 200. Inhibition goes further: while a `db_down` alert is firing, every `api_5xx` alert that is its known downstream effect is suppressed rather than sent at all.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="200 individual alerts collapse through grouping into one notification, while inhibition suppresses the downstream symptom alerts entirely">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.3}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
-    .flowacc{fill:none;stroke:var(--accent);stroke-width:1.8;marker-end:url(#ah)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box acc" x="20" y="20" width="150" height="34" rx="6"/><text class="sub" x="95" y="37">db_down (1 rule)</text>
-  <g>
-    <rect class="box" x="220" y="10" width="90" height="24" rx="5"/><text class="sub" x="265" y="22">api_5xx ×70</text>
-    <rect class="box" x="220" y="42" width="90" height="24" rx="5"/><text class="sub" x="265" y="54">queue_lag ×60</text>
-    <rect class="box" x="220" y="74" width="90" height="24" rx="5"/><text class="sub" x="265" y="86">cache_miss ×70</text>
-  </g>
-  <path class="flow" d="M310,22 L370,22 M310,54 L370,54 M310,86 L370,86"/>
-  <text class="sub" x="380" y="54" text-anchor="start">200 symptom alerts, all true</text>
-  <path class="flowacc" d="M95,54 L95,150"/>
-  <rect class="box acc" x="20" y="150" width="230" height="40" rx="6"/><text class="sub" x="135" y="170">inhibits: 200 symptoms suppressed</text>
-  <rect class="box acc" x="480" y="150" width="240" height="40" rx="6"/><text class="lbl" x="600" y="170" fill="var(--accent)">1 notification: db_down</text>
-  <path class="flowacc" d="M250,170 L480,170"/>
-  <text class="sub" x="380" y="140">grouped and routed</text>
-</svg>
-```
+[200 symptoms collapse to one page](/diagram/metrics-monitoring?figure=grouping)
 
 The result of grouping and inhibition together: 200 true alerts become one page carrying the one fact an on-call engineer actually needs to act on.
 
@@ -4138,34 +3476,7 @@ One ad takes 100 times the normal click volume during a live event. One partitio
 
 **Great: sub-key by `(ad_id, hash(user_id) % N)`.** A retry always carries the same `user_id`, so both copies of one click land on the same shard, keeping deduplication intact. The ad's load spreads across N independently counting shards, and a downstream operator sums their totals. The property this depends on is narrow and worth stating exactly: the sub-key must be a function of something that is provably identical across every retry of the same click, and `user_id` is that thing; `click_id` and round-robin are not.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 240" role="img" aria-label="Round-robin splits two retries of one click onto different shards, double counting it; sub-keying by user id keeps both retries on the same shard">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .bad{stroke:currentColor;stroke-opacity:.55}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;marker-end:url(#ah)}
-    .flowacc{fill:none;stroke:var(--accent);stroke-width:1.8;marker-end:url(#ah)}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">Round-robin: two copies of one click, click_id=X, user=U</text>
-  <rect class="box bad" x="20" y="36" width="150" height="30" rx="6"/><text class="sub" x="95" y="52">retry 1 of X</text>
-  <rect class="box bad" x="200" y="36" width="150" height="30" rx="6"/><text class="sub" x="275" y="52">retry 2 of X</text>
-  <rect class="box bad" x="20" y="90" width="150" height="30" rx="6"/><text class="sub" x="95" y="106">shard 0: counts X</text>
-  <rect class="box bad" x="200" y="90" width="150" height="30" rx="6"/><text class="sub" x="275" y="106">shard 1: counts X too</text>
-  <path class="flow" d="M95,66 L95,90"/><path class="flow" d="M275,66 L275,90"/>
-  <text class="sub" x="400" y="106">double counted</text>
-
-  <text class="lbl" x="20" y="150" text-anchor="start">Sub-key by hash(user_id): both retries carry the same user U</text>
-  <rect class="box acc" x="20" y="166" width="150" height="30" rx="6"/><text class="sub" x="95" y="182">retry 1 of X, user U</text>
-  <rect class="box acc" x="200" y="166" width="150" height="30" rx="6"/><text class="sub" x="275" y="182">retry 2 of X, user U</text>
-  <rect class="box acc" x="110" y="210" width="150" height="26" rx="6"/><text class="sub" x="185" y="223">shard = hash(U): counts X once</text>
-  <path class="flowacc" d="M95,196 L185,210"/><path class="flowacc" d="M275,196 L185,210"/>
-</svg>
-```
+[Round-robin double-counts; sub-key by user_id does not](/diagram/ad-click-aggregation?figure=sub-key)
 
 #### Making a replay a no-op
 A checkpoint restore replays the last few seconds of events through the aggregation job. Nothing about that replay should change a number that was already correct. How do you get that property without a heavier transaction protocol?
@@ -4191,30 +3502,7 @@ A bug in the aggregation logic overcharged one advertiser vertical for three wee
 
 **Great: recompute into a new, numbered run, and freeze what is already invoiced.** **Nightly recompute** reads the immutable **S3 Parquet archive** for the affected range, applies the corrected logic, and writes the result as a new `run_id` rather than overwriting the old one in place. The **Billing system** already invoiced the earlier run, so the corrected rows do not silently change a shipped number. They post as an adjustment against the affected advertisers, with a credit or charge that carries its own record, because a changed historical total that has already been invoiced is an accounting event, not a data update.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A timeline of run_id 0 from the stream, run_id 2 from the nightly recompute overwriting the served table, and an adjustment posted once a period is already invoiced">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;marker-end:url(#ah)}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <line x1="40" y1="90" x2="720" y2="90" stroke="currentColor" stroke-opacity=".3"/>
-  <rect class="box" x="40" y="60" width="140" height="30" rx="6"/><text class="sub" x="110" y="76">run_id 0: stream</text>
-  <rect class="box acc" x="220" y="60" width="140" height="30" rx="6"/><text class="sub" x="290" y="76">run_id 2: recompute</text>
-  <rect class="box" x="420" y="20" width="150" height="30" rx="6"/><text class="sub" x="495" y="36">period closed, invoiced</text>
-  <rect class="box acc" x="420" y="120" width="180" height="30" rx="6"/><text class="sub" x="510" y="136">bug found, 3 weeks later</text>
-  <rect class="box acc" x="620" y="60" width="120" height="30" rx="6"/><text class="lbl" x="680" y="76" fill="var(--accent)">adjustment</text>
-  <path class="flow" d="M180,75 L220,75"/>
-  <path class="flow" d="M495,50 L495,60"/>
-  <path class="flow" d="M510,120 L510,90"/>
-  <path class="flow" d="M360,75 L620,75"/>
-  <text class="sub" x="510" y="160">the invoiced run is never overwritten in place; the fix posts as a credit or charge</text>
-</svg>
-```
+[A recompute posts an adjustment, never a rewrite](/diagram/ad-click-aggregation?figure=restatement)
 
 #### The invoice day depends on a clock nobody controls
 A click happens at 11:59:50pm from a phone that stays offline until 12:15am. Which invoice day does it belong to?
@@ -4349,28 +3637,7 @@ Rooms inside a class are interchangeable, and an unsold room-night is gone forev
 
 **Great: split the row into two columns with two separate owners.** `sold` is written only by the booking path, incremented by confirmations and decremented only by compensations and cancellations. `allowance` is written only by the nightly forecast job, physical capacity plus a deliberate oversell, and it is simply overwritten, never read-modified. The booking path enforces `sold < allowance` and never looks at how that number was derived; the forecast job never looks at `sold` to decide what to write. Neither writer needs the other's value, so the race disappears by construction rather than by locking around it.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A single available_count column forces the forecast job to read live sales before writing, racing bookings; splitting into sold and allowance columns gives each writer its own column with nothing to read from the other">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .bad{stroke-opacity:.55}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="24" text-anchor="start">One column: available_count</text>
-  <rect class="box bad" x="20" y="40" width="260" height="34" rx="6"/><text class="sub" x="150" y="61">available_count = 9</text>
-  <text class="sub" x="150" y="94">booking path decrements it, forecast job reads it, then writes a new value: race</text>
-  <path class="flow" d="M60,74 L60,100"/><path class="flow" d="M240,74 L240,100"/>
-
-  <text class="lbl" x="20" y="140" text-anchor="start">Two columns, two owners, no shared read</text>
-  <rect class="box acc" x="20" y="156" width="180" height="34" rx="6"/><text class="sub" x="110" y="177">sold = 109 (booking path)</text>
-  <rect class="box acc" x="220" y="156" width="180" height="34" rx="6"/><text class="sub" x="310" y="177">allowance = 131 (forecast job)</text>
-  <text class="sub" x="310" y="204">booking checks sold &lt; allowance; forecast overwrites allowance; neither reads the other's write</text>
-</svg>
-```
+[One shared column races; two owned columns don't](/diagram/hotel-reservation?figure=sold-allowance)
 
 #### One statement, ordered by date
 A three-night stay must reserve every night or none. Two overlapping stays contend on the shared nights. How do you get both properties from one write?
@@ -4395,7 +3662,7 @@ RETURNING date;
 Fewer rows returned than nights requested means at least one night is unavailable, and the whole transaction rolls back, returning every lock it briefly held. The all-or-nothing property comes free from that rollback. Deadlock avoidance is a side effect of the primary key rather than a rule anyone has to remember: a range predicate over `(hotel_id, room_type_id, date)` forces an ascending index scan, so two overlapping stays, say the 10th to 12th and the 11th to 13th, both visit the shared nights of the 11th and 12th in the same order, and the second transaction simply waits rather than deadlocking.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Two overlapping stays both acquire locks in ascending date order, so the later transaction waits on the shared nights instead of deadlocking">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="Two overlapping stays both acquire locks in ascending date order, so the later transaction waits on the shared nights instead of deadlocking">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
@@ -4403,15 +3670,16 @@ Fewer rows returned than nights requested means at least one night is unavailabl
     .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">Stay A: 10th, 11th, 12th</text>
-  <rect class="box acc" x="20" y="34" width="80" height="30" rx="5"/><text class="sub" x="60" y="49">10th</text>
-  <rect class="box acc" x="110" y="34" width="80" height="30" rx="5"/><text class="sub" x="150" y="49">11th</text>
-  <rect class="box acc" x="200" y="34" width="80" height="30" rx="5"/><text class="sub" x="240" y="49">12th</text>
-  <text class="lbl" x="20" y="100" text-anchor="start">Stay B: 11th, 12th, 13th</text>
-  <rect class="box" x="110" y="114" width="80" height="30" rx="5"/><text class="sub" x="150" y="129">11th</text>
-  <rect class="box" x="200" y="114" width="80" height="30" rx="5"/><text class="sub" x="240" y="129">12th</text>
-  <rect class="box" x="290" y="114" width="80" height="30" rx="5"/><text class="sub" x="330" y="129">13th</text>
-  <text class="sub" x="400" y="90">both scans visit 11th before 12th: A locks first, B waits, nobody deadlocks</text>
+  <text class="lbl" x="8" y="16" text-anchor="start">Stay A: 10th, 11th, 12th</text>
+  <rect class="box acc" x="8" y="26" width="90" height="30" rx="5"/><text class="sub" x="53" y="41">10th</text>
+  <rect class="box acc" x="106" y="26" width="90" height="30" rx="5"/><text class="sub" x="151" y="41">11th</text>
+  <rect class="box acc" x="204" y="26" width="90" height="30" rx="5"/><text class="sub" x="249" y="41">12th</text>
+  <text class="lbl" x="8" y="88" text-anchor="start">Stay B: 11th, 12th, 13th</text>
+  <rect class="box" x="106" y="98" width="90" height="30" rx="5"/><text class="sub" x="151" y="113">11th</text>
+  <rect class="box" x="204" y="98" width="90" height="30" rx="5"/><text class="sub" x="249" y="113">12th</text>
+  <rect class="box" x="302" y="98" width="90" height="30" rx="5"/><text class="sub" x="347" y="113">13th</text>
+  <text class="sub" x="8" y="156">both scans visit 11th before 12th:</text>
+  <text class="sub" x="8" y="172">A locks first, B waits, nobody deadlocks</text>
 </svg>
 ```
 
@@ -4561,30 +3829,7 @@ SMTP gives exactly one bit at the door, and it cannot be taken back either way. 
 
 **Great: refuse only on evidence with a near-certain false-positive rate, and accept everything else for asynchronous sorting.** **on_connect** drops known-bad IPs before any bytes cross the wire. **on_rcpt** refuses an address that does not resolve locally, because accepting for an unknown user and bouncing later sends that bounce to a forged return path, which turns the recipient into an abuser. **on_data_end** refuses only a DMARC failure against a policy the sending domain itself published, because that refusal is authorised by the party who can actually fix it. Everything else gets a `250` and an asynchronous, reversible verdict.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="A refusal at the SMTP boundary is permanent and unappealable; an accepted message's label can be changed in either direction later">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;marker-end:url(#ah)}
-    .flowacc{fill:none;stroke:var(--accent);stroke-width:1.8;marker-end:url(#ah)}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="80" width="160" height="40" rx="7"/><text class="sub" x="100" y="100">SMTP transaction</text>
-  <rect class="box" x="240" y="30" width="180" height="40" rx="7"/><text class="sub" x="330" y="50">5xx refuse</text>
-  <text class="sub" x="330" y="10">near-certain evidence only</text>
-  <rect class="box acc" x="240" y="130" width="180" height="40" rx="7"/><text class="sub" x="330" y="150" fill="var(--accent)">250 accept</text>
-  <rect class="box" x="520" y="10" width="200" height="40" rx="7"/><text class="sub" x="620" y="30">gone, no recall, no signal learned</text>
-  <rect class="box acc" x="520" y="100" width="200" height="76" rx="7"/><text class="sub" x="620" y="122">labelled INBOX or SPAM</text><text class="sub" x="620" y="140">relabel either way later</text><text class="sub" x="620" y="158">feedback trains the model</text>
-  <path class="flow" d="M180,90 L240,50"/>
-  <path class="flowacc" d="M180,100 L240,150"/>
-  <path class="flow" d="M420,50 L520,30"/>
-  <path class="flowacc" d="M420,150 L520,138"/>
-</svg>
-```
+[A refusal is gone; an acceptance is reversible](/diagram/email-service?figure=accept-refuse)
 
 Everything on the reversible side keeps a property the door cannot offer: a wrong verdict is recoverable, and the message itself becomes training data the next time a human corrects it.
 
@@ -4625,27 +3870,7 @@ Deduplication requires that identical content produce identical stored bytes. A 
 
 **Great: derive the encryption key from the content itself, and wrap it separately per recipient.** **Acceptance writer** hashes the body, derives a data key from that hash, so the same content always produces the same key and therefore the same ciphertext, and content addressing still works. That data key is then wrapped separately under each recipient's own key-encryption key. Deduplication survives because the ciphertext is deterministic; per-user erasure survives because revoking one recipient's wrapping key ends their access without touching anyone else's copy.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A data key derived from the content hash produces one deterministic ciphertext; that data key is wrapped separately under each recipient's own key, so revoking one recipient's key does not affect any other copy">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="20" width="160" height="34" rx="6"/><text class="sub" x="100" y="37">plaintext body</text>
-  <rect class="box acc" x="230" y="20" width="160" height="34" rx="6"/><text class="sub" x="310" y="37">SHA-256 → data key</text>
-  <rect class="box acc" x="440" y="20" width="180" height="34" rx="6"/><text class="sub" x="530" y="37">one ciphertext, stored once</text>
-  <path class="flow" d="M180,37 L230,37"/><path class="flow" d="M390,37 L440,37"/>
-  <rect class="box" x="440" y="90" width="130" height="30" rx="5"/><text class="sub" x="505" y="105">wrapped: user A</text>
-  <rect class="box" x="440" y="130" width="130" height="30" rx="5"/><text class="sub" x="505" y="145">wrapped: user B</text>
-  <rect class="box" x="590" y="90" width="130" height="30" rx="5"/><text class="sub" x="655" y="105">wrapped: user C</text>
-  <path class="flow" d="M420,45 L510,90"/><path class="flow" d="M420,45 L510,130"/><path class="flow" d="M420,45 L655,90"/>
-  <text class="sub" x="505" y="170">revoke B's key: B loses access, A and C keep theirs, the ciphertext is untouched</text>
-</svg>
-```
+[One ciphertext, wrapped separately per recipient](/diagram/email-service?figure=convergent-key)
 
 The cost this concedes: because the data key is derived purely from content, anyone who can write to the store can test whether a specific plaintext already exists by computing its hash, a real weakness for low-entropy content like a template with one field changed.
 
@@ -4771,20 +3996,22 @@ Every candidate answer starts with "Reed-Solomon 6+3, tolerates 3 losses". That 
 **Great: recognise that the gap between seventeen nines and eleven nines is the actual engineering problem.** Independent disk failure is not the binding term. Correlated failure, software defects and operator error are, by roughly a million times. That is why S3's storage layer was rewritten with an executable specification checked by property tests rather than given a wider code: widening the code improves a term that was never the bottleneck.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Independent disk failure gives roughly seventeen nines of durability; the published figure is eleven nines; the six orders of magnitude between them come from correlated failure, software defects and operator error, not from the code word">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Independent disk failure gives roughly seventeen nines of durability; the published figure is eleven nines; the six orders of magnitude between them come from correlated failure, software defects and operator error, not from the code word">
   <style>
     .bar{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.5}
     .bar2{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="28">Independent disk failure alone</text>
-  <rect class="bar2" x="20" y="42" width="18" height="24" rx="3"/>
-  <text class="sub" x="46" y="59">~10⁻¹⁸ annual loss probability, ~seventeen nines</text>
-  <text class="lbl" x="20" y="110">Published durability</text>
-  <rect class="bar" x="20" y="124" width="600" height="24" rx="3"/>
-  <text class="sub" x="20" y="168">~10⁻¹¹ annual loss probability, eleven nines: six orders of magnitude worse</text>
-  <text class="sub" x="20" y="186">the gap is correlated failure, software defects and operator error, not the code word</text>
+  <text class="lbl" x="8" y="16">Independent disk failure alone</text>
+  <rect class="bar2" x="8" y="26" width="10" height="22" rx="3"/>
+  <text class="sub" x="8" y="66">~10⁻¹⁸ annual loss probability,</text>
+  <text class="sub" x="8" y="82">~seventeen nines</text>
+  <text class="lbl" x="8" y="116">Published durability</text>
+  <rect class="bar" x="8" y="126" width="384" height="22" rx="3"/>
+  <text class="sub" x="8" y="168">~10⁻¹¹ annual loss probability, eleven</text>
+  <text class="sub" x="8" y="184">nines: six orders of magnitude worse</text>
+  <text class="sub" x="8" y="204">gap = correlated failure + software + operator error, not the code word</text>
 </svg>
 ```
 
@@ -4801,25 +4028,7 @@ An object looks like it should need the same locking machinery as any mutable re
 
 **Great: write fresh, immutable pieces that nobody has read yet, then commit a single pointer.** The **Erasure coder** writes new fragments to **Storage nodes** with no coordination required, because nothing has ever read them. Only then does the **Metadata service** atomically swap the `(bucket, key)` pointer in the **Manifest store** to point at the new manifest. An in-flight `GET` that already resolved the old manifest keeps reading valid bytes to completion, because that manifest is immutable and cannot be edited out from under it: snapshot isolation the design gets for free rather than one it has to implement.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="A reader who resolved the old manifest keeps reading it safely to completion; a new writer commits a new manifest and swaps the pointer; both manifests are immutable so neither reader nor writer ever races the other">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="20" width="180" height="34" rx="6"/><text class="sub" x="110" y="41">manifest v1 (immutable)</text>
-  <rect class="box acc" x="260" y="20" width="180" height="34" rx="6"/><text class="sub" x="350" y="41">manifest v2 (immutable)</text>
-  <rect class="box" x="20" y="100" width="220" height="34" rx="6"/><text class="sub" x="130" y="121">reader: resolved v1, still reading it</text>
-  <rect class="box acc" x="500" y="100" width="220" height="34" rx="6"/><text class="lbl" x="610" y="121" fill="var(--accent)">pointer now → v2</text>
-  <path class="flow" d="M110,54 L110,100"/>
-  <path class="flow" d="M350,54 L610,100"/>
-  <text class="sub" x="380" y="160">the reader finishes safely against v1; nothing edits v1 out from under it; the pointer alone moved</text>
-</svg>
-```
+[A reader keeps its manifest; a writer swaps the pointer](/diagram/object-storage?figure=pointer-swap)
 
 This is also why S3 could add strong read-after-write consistency in December 2020 with no data-plane change: the bytes were already consistent, and only the pointer *read* had been served from a cache that could lag the commit.
 
@@ -4967,25 +4176,25 @@ An index on score makes top-100 trivial in almost any database. It does nothing 
 **Great: a skip list that carries a count on every pointer.** The **Sorted set primary** stores each board as a skip list paired with a hash table. Every forward pointer in the skip list carries a span, the number of nodes it jumps over. Rank is computed by descending from the top level and accumulating spans on the way down, so it costs the same O(log N) as the lookup the structure was already doing, with no separate counting pass.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="Descending a skip list tower accumulates the span at each level; the sum of spans passed on the way down is the player's rank, with no separate count of everyone above them">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Descending a skip list tower accumulates the span at each level; the sum of spans passed on the way down is the player's rank, with no separate count of everyone above them">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">Level 3</text>
-  <rect class="box" x="60" y="10" width="600" height="24" rx="4"/><text class="sub" x="360" y="22">span 40 → target</text>
-  <text class="lbl" x="20" y="70" text-anchor="start">Level 2</text>
-  <rect class="box" x="60" y="60" width="300" height="24" rx="4"/><text class="sub" x="210" y="72">span 12</text>
-  <rect class="box" x="380" y="60" width="280" height="24" rx="4"/><text class="sub" x="520" y="72">span 20</text>
-  <text class="lbl" x="20" y="120" text-anchor="start">Level 1</text>
-  <rect class="box" x="60" y="110" width="150" height="24" rx="4"/><text class="sub" x="135" y="122">4</text>
-  <rect class="box" x="220" y="110" width="150" height="24" rx="4"/><text class="sub" x="295" y="122">3</text>
-  <rect class="box acc" x="380" y="110" width="150" height="24" rx="4"/><text class="sub" x="455" y="122" fill="var(--accent)">span 5 → player</text>
-  <text class="sub" x="360" y="170">rank = 12 (level 2) + 5 (level 1) = 17th place, no scan of everyone above</text>
+  <text class="lbl" x="8" y="14" text-anchor="start">Level 3</text>
+  <rect class="box" x="40" y="6" width="352" height="22" rx="4"/><text class="sub" x="216" y="18">span 40 → target</text>
+  <text class="lbl" x="8" y="58" text-anchor="start">Level 2</text>
+  <rect class="box" x="40" y="50" width="170" height="22" rx="4"/><text class="sub" x="125" y="62">span 12</text>
+  <rect class="box" x="222" y="50" width="170" height="22" rx="4"/><text class="sub" x="307" y="62">span 20</text>
+  <text class="lbl" x="8" y="102" text-anchor="start">Level 1</text>
+  <rect class="box" x="40" y="94" width="80" height="22" rx="4"/><text class="sub" x="80" y="106">4</text>
+  <rect class="box" x="128" y="94" width="80" height="22" rx="4"/><text class="sub" x="168" y="106">3</text>
+  <rect class="box acc" x="222" y="94" width="170" height="22" rx="4"/><text class="sub" x="307" y="106" fill="var(--accent)">span 5 → player</text>
+  <text class="sub" x="8" y="150">rank = 12 (level 2) + 5 (level 1)</text>
+  <text class="sub" x="8" y="166">= 17th place, no scan of everyone above</text>
 </svg>
 ```
 
@@ -5016,20 +4225,22 @@ Two players finish with identical scores. Something has to order them, and the o
 **Great: encode the tiebreaker directly into the score.** `packed = points × 2³¹ + (2³¹ − 1 − t)`, where `t` is seconds since a fixed epoch. Points take 20 bits, the inverted time takes 31, for 51 bits total, inside the 53 bits of exact integer precision an IEEE-754 double carries. Earlier finishers at the same point total naturally rank higher, computed entirely within the one field the structure already sorts on.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 150" role="img" aria-label="A packed score fits 20 bits of points and 31 bits of inverted time into 51 bits, inside the 53 bits of exact integer precision a double carries; a third field would not fit">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 165" role="img" aria-label="A packed score fits 20 bits of points and 31 bits of inverted time into 51 bits, inside the 53 bits of exact integer precision a double carries; a third field would not fit">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <rect class="box acc" x="20" y="40" width="220" height="34" rx="4"/><text class="sub" x="130" y="61" fill="var(--accent)">points, 20 bits</text>
-  <rect class="box" x="240" y="40" width="340" height="34" rx="4"/><text class="sub" x="410" y="61">inverted time t, 31 bits</text>
-  <rect class="box" x="580" y="40" width="60" height="34" rx="4" stroke-dasharray="4 3"/><text class="sub" x="610" y="61">unused</text>
-  <text class="sub" x="300" y="20">53 bits of exact integer precision in a double</text>
-  <text class="sub" x="300" y="105">51 bits used: earlier finishers at equal points rank higher, no second field to read</text>
-  <text class="sub" x="300" y="125">a third tiebreak level does not fit; past 53 bits the encoding rounds silently</text>
+  <text class="sub" x="8" y="14" text-anchor="start">53 bits of exact integer precision in a double</text>
+  <rect class="box acc" x="8" y="24" width="116" height="30" rx="4"/><text class="sub" x="66" y="43" fill="var(--accent)">points, 20b</text>
+  <rect class="box" x="124" y="24" width="180" height="30" rx="4"/><text class="sub" x="214" y="43">inverted time t, 31b</text>
+  <rect class="box" x="304" y="24" width="32" height="30" rx="4" stroke-dasharray="4 3"/><text class="sub" x="320" y="43">2b</text>
+  <text class="sub" x="8" y="82">51 bits used: earlier finishers at equal</text>
+  <text class="sub" x="8" y="98">points rank higher, no second field to read</text>
+  <text class="sub" x="8" y="122">a third tiebreak level does not fit; past 53</text>
+  <text class="sub" x="8" y="138">bits the encoding rounds silently</text>
 </svg>
 ```
 
@@ -5167,25 +4378,7 @@ A crashed workflow needs to know exactly how far it got before it can safely res
 
 **Great: commit each recovery point in the same transaction as the work it describes.** The **Idempotency store** row and the step's own effect land together or neither lands. A resumed workflow reading `risk_scored` knows risk scoring definitely ran and knows nothing about authorize, which is precisely the right amount of doubt: recorded progress can lag reality but can never lead it.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="Five steps in sequence; the recovery point marker sits at or behind the last step whose work actually committed, never ahead of it, because each step's work and its recovery-point write commit in the same transaction">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box acc" x="20" y="60" width="120" height="34" rx="5"/><text class="sub" x="80" y="81">started</text>
-  <rect class="box acc" x="160" y="60" width="120" height="34" rx="5"/><text class="sub" x="220" y="81">risk_scored</text>
-  <rect class="box acc" x="300" y="60" width="140" height="34" rx="5"/><text class="sub" x="370" y="81">psp_authorized</text>
-  <rect class="box" x="460" y="60" width="140" height="34" rx="5"/><text class="sub" x="530" y="81">ledger_recorded</text>
-  <rect class="box" x="620" y="60" width="120" height="34" rx="5"/><text class="sub" x="680" y="81">captured</text>
-  <path class="acc" d="M370,50 L370,110" stroke-width="2"/>
-  <text class="lbl" x="370" y="30">recovery point reads here</text>
-  <text class="sub" x="370" y="130">psp_authorized committed; ledger_recorded has not, so the resumed workflow knows exactly this much and no more</text>
-</svg>
-```
+[The recovery point never lies ahead of the work](/diagram/payment-system?figure=recovery-point)
 
 The gap this cannot close is the external call itself: the orchestrator can die between the PSP responding and the commit landing, which is why the client's own idempotency key is passed through to the PSP, so a repeated authorize returns the first result instead of creating a second hold.
 
@@ -5200,28 +4393,7 @@ Capture times out after 4 seconds. The request may never have arrived, may have 
 
 **Great: move the charge to a genuine verification state, and ask the processor directly.** **Payment orchestrator** hands the charge to a **Verification worker**, which queries the **PSP** by the same idempotency key rather than guessing. Only once that answer comes back does the workflow confirm the charge or compensate it.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="A capture timeout branches into three indistinguishable possibilities; rather than guessing, the charge enters a verification state and queries the PSP by idempotency key before confirming or compensating">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="70" width="140" height="40" rx="6"/><text class="sub" x="90" y="90">capture timeout</text>
-  <rect class="box" x="220" y="10" width="150" height="30" rx="5"/><text class="sub" x="295" y="25">never arrived</text>
-  <rect class="box" x="220" y="75" width="150" height="30" rx="5"/><text class="sub" x="295" y="90">arrived, succeeded</text>
-  <rect class="box" x="220" y="140" width="150" height="30" rx="5"/><text class="sub" x="295" y="155">succeeded, ack lost</text>
-  <path class="flow" d="M160,88 L220,25"/><path class="flow" d="M160,90 L220,90"/><path class="flow" d="M160,92 L220,155"/>
-  <rect class="box acc" x="450" y="75" width="150" height="30" rx="5"/><text class="lbl" x="525" y="90" fill="var(--accent)">verification state</text>
-  <path class="flow" d="M370,25 L450,85"/><path class="flow" d="M370,90 L450,90"/><path class="flow" d="M370,155 L450,95"/>
-  <rect class="box" x="650" y="75" width="90" height="30" rx="5"/><text class="sub" x="695" y="90">confirm or compensate</text>
-  <path class="flow" d="M600,90 L650,90"/>
-  <text class="sub" x="400" y="175">only one query, against the PSP itself, replaces three guesses</text>
-</svg>
-```
+[One query replaces three guesses](/diagram/payment-system?figure=verification)
 
 Running a compensation straight after a timeout, without this step, risks trying to void a charge the PSP already captured, which it rejects, leaving the workflow wedged with real money on one side and a permanently failing compensation on the other.
 
@@ -5369,23 +4541,7 @@ Alice has $100 and fires two transfers for $80 and $70 at the same instant. Both
 
 **Great: put the check inside the write itself, as one statement.** `UPDATE accounts SET available = available - 80, reserved = reserved + 80 WHERE user_id = alice AND available >= 80`. There is no gap between checking and deducting because there is only one statement. When the second transfer runs, `available` is already $20, the predicate fails, zero rows update, and the transfer fails cleanly with nothing to unwind.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Two concurrent transfers against a $100 balance; the first conditional update succeeds and leaves $20 available; the second finds the predicate false and updates zero rows, failing cleanly with no overdraw">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .bad{stroke-opacity:.5}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">available = $100</text>
-  <rect class="box acc" x="20" y="40" width="320" height="34" rx="5"/><text class="sub" x="180" y="61">UPDATE ... -80 WHERE available &gt;= 80 → 1 row, available = $20</text>
-  <rect class="box bad" x="20" y="100" width="320" height="34" rx="5"/><text class="sub" x="180" y="121">UPDATE ... -70 WHERE available &gt;= 70 → 0 rows, predicate false</text>
-  <text class="sub" x="180" y="155">no read-then-write gap exists for a second request to land in</text>
-</svg>
-```
+[One conditional UPDATE, no gap to race into](/diagram/digital-wallet?figure=one-statement)
 
 This needs no explicit lock and no coordination between the two requests, because the database engine itself guarantees the check and the deduction happen as one indivisible operation.
 
@@ -5426,25 +4582,7 @@ An orchestrator stalls between Try and Confirm. The sweeper cancels the expired 
 
 **Great: tag every reservation with the orchestrator's lease id, and make Confirm conditional on it.** **Reservation sweeper** cancels only leases it can prove are expired. **Transfer orchestrator**'s Confirm runs `WHERE reservation_id = ? AND lease_id = ?`. If the sweeper already cancelled the reservation, that predicate matches zero rows, and the stale orchestrator's Confirm fails cleanly into the transfer's failure path instead of half-applying.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="A stalled orchestrator wakes after its reservation's TTL has expired and the sweeper has already cancelled it; the lease id in its Confirm no longer matches, so the update touches zero rows instead of half-applying">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <line x1="40" y1="90" x2="720" y2="90" stroke="currentColor" stroke-opacity=".3"/>
-  <rect class="box" x="40" y="60" width="140" height="30" rx="5"/><text class="sub" x="110" y="76">Try, lease=L1</text>
-  <rect class="box acc" x="260" y="60" width="160" height="30" rx="5"/><text class="sub" x="340" y="76">TTL expires, sweeper cancels</text>
-  <rect class="box" x="500" y="60" width="200" height="30" rx="5"/><text class="sub" x="600" y="76">orchestrator wakes, Confirm lease=L1</text>
-  <path class="flow" d="M180,75 L260,75"/><path class="flow" d="M420,75 L500,75"/>
-  <text class="sub" x="600" y="115">WHERE reservation_id = ? AND lease_id = L1 matches zero rows: reservation is gone</text>
-  <text class="sub" x="600" y="135">Confirm fails into the transfer's failure path rather than crediting against returned funds</text>
-</svg>
-```
+[A stale Confirm matches zero rows instead of half-applying](/diagram/digital-wallet?figure=lease-fencing)
 
 The losing side of this race fails loudly by design. A Confirm that silently succeeds against a stale lease would be indistinguishable from a correct one until an audit found the extra money months later.
 
@@ -5581,25 +4719,7 @@ The throughput this gives up is real and small: roughly 500,000 operations a sec
 
 **Great: push every time-dependent and external input through the sequenced log itself.** Time enters as sequenced tick events the **Sequencer** emits at a fixed cadence, so every timer-based rule reads those instead of a clock. Books use intrusive lists with explicit ordering rather than hash-map iteration. Memory pools are preallocated at startup so every run has identical layout. Reference data changes only via a sequenced control message on the same **Sequenced input log**, never a config push that bypasses it.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Four inputs that must never reach the engine outside the log: the wall clock, randomness or hash iteration order, allocator-dependent memory layout, and external configuration lookups; each is instead carried as a sequenced message on the same log">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="20" width="150" height="30" rx="5"/><text class="sub" x="95" y="35">wall clock</text>
-  <rect class="box" x="200" y="20" width="150" height="30" rx="5"/><text class="sub" x="275" y="35">hash iteration order</text>
-  <rect class="box" x="380" y="20" width="150" height="30" rx="5"/><text class="sub" x="455" y="35">on-demand allocation</text>
-  <rect class="box" x="560" y="20" width="180" height="30" rx="5"/><text class="sub" x="650" y="35">external config lookup</text>
-  <path class="flow" d="M95,50 L300,110"/><path class="flow" d="M275,50 L320,110"/><path class="flow" d="M455,50 L340,110"/><path class="flow" d="M650,50 L360,110"/>
-  <rect class="box acc" x="260" y="110" width="120" height="34" rx="6"/><text class="lbl" x="320" y="128" fill="var(--accent)">sequenced log</text>
-  <text class="sub" x="320" y="165">ticks, control messages: every replay reads the same values in the same order</text>
-</svg>
-```
+[Four inputs the engine must never read directly](/diagram/stock-exchange?figure=deterministic-inputs)
 
 The consequence of getting this wrong is not a crash. It is an engine that appears to work correctly for months and then produces a replay that disagrees with what actually happened, at precisely the moment someone needed the two to match.
 
@@ -5629,27 +4749,7 @@ The primary matching engine for a symbol crashes mid-session. A standby needs to
 
 The fencing step exists for one specific danger: two engines that both believe they are primary would each emit trades against the same sequence numbers with different order ids, which market data subscribers would both accept as real. A deliberate sub-second pause while the controller fences the old primary is the accepted cost of never risking that.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="Without fencing, a recovering primary and a promoted standby can both publish trades under the same sequence numbers at once; fencing revokes the old primary's ability to publish before the standby is promoted, so only one engine is ever live">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .bad{stroke-opacity:.55}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">No fencing: both engines publish</text>
-  <rect class="box bad" x="20" y="36" width="220" height="30" rx="5"/><text class="sub" x="130" y="52">recovering primary: still publishing</text>
-  <rect class="box bad" x="280" y="36" width="220" height="30" rx="5"/><text class="sub" x="390" y="52">promoted standby: also publishing</text>
-  <text class="sub" x="255" y="90">two trades, same sequence number, different order ids: subscribers accept both</text>
-
-  <text class="lbl" x="20" y="130" text-anchor="start">Fencing: revoke, then promote</text>
-  <rect class="box" x="20" y="146" width="220" height="30" rx="5" stroke-dasharray="4 3"/><text class="sub" x="130" y="162">old primary: fenced, cannot publish</text>
-  <rect class="box acc" x="280" y="146" width="220" height="30" rx="5"/><text class="lbl" x="390" y="162" fill="var(--accent)">standby: promoted, sole publisher</text>
-</svg>
-```
+[Fencing revokes before the standby is promoted](/diagram/stock-exchange?figure=fencing)
 
 #### Snapshots bound cold start, they are not durability
 The venue keeps periodic snapshots of each order book. It would be easy to lean on them as the actual recovery mechanism. Why is that the wrong way to think about them?
@@ -5769,20 +4869,20 @@ A flat follower-count threshold is the standard answer. At this skew it puts a l
 **Great: decide per relationship, on active follower count, filtered by recent reader activity.** **Fan-out service** checks `active_followers(author) < ~1M` and pushes only to followers who opened the app in the last 7 days. That combination lifts the effective cut by an order of magnitude, because the binding constraint is the fan-out pool's per-tweet burst budget, 200k appends/s against a 5-second SLO, which caps any single tweet's push at roughly 1M entries.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="A tweet's push is bounded by the fan-out pool's burst rate times the freshness SLO: 200,000 appends a second for 5 seconds caps any single tweet's push at roughly 1 million entries, which is where the cut is derived from rather than picked">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 175" role="img" aria-label="A tweet's push is bounded by the fan-out pool's burst rate times the freshness SLO: 200,000 appends a second for 5 seconds caps any single tweet's push at roughly 1 million entries, which is where the cut is derived from rather than picked">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="28">200,000 appends/s per-tweet burst budget</text>
-  <rect class="box acc" x="20" y="44" width="600" height="26" rx="4"/>
-  <text class="lbl" x="20" y="100">x 5s freshness SLO</text>
-  <rect class="box" x="20" y="116" width="24" height="26" rx="4"/>
-  <text class="sub" x="340" y="130">= ~1,000,000 entries is the most one tweet can push inside budget</text>
-  <text class="sub" x="340" y="155">the cut is derived from this ceiling, not chosen as a round number</text>
+  <text class="lbl" x="8" y="16">200,000 appends/s burst budget</text>
+  <rect class="box acc" x="8" y="26" width="384" height="24" rx="4"/>
+  <text class="lbl" x="8" y="72">x 5s freshness SLO</text>
+  <rect class="box" x="8" y="82" width="16" height="24" rx="4"/>
+  <text class="sub" x="8" y="130">= ~1,000,000 entries is the most one</text>
+  <text class="sub" x="8" y="146">tweet can push inside budget</text>
+  <text class="sub" x="8" y="166">the cut is derived from this ceiling, not a round number</text>
 </svg>
 ```
 
@@ -5812,27 +4912,7 @@ A timeline read has to stay under a 300ms budget while merging content from a pr
 
 **Great: store ids, fetch all above-cut followees in one pipelined multi-get, and merge sorted lists.** **Timeline service** reads the reader's prebuilt block from **Timeline + recent caches**, resolves the small **Follow graph**-maintained fetch-path set, and issues one pipelined multi-get for every above-cut followee at once rather than one call per author. Because both sources are already sorted by Snowflake id, merging them is a k-way merge of sorted integer lists, and duplicate `retweet_of` entries collapse during that same pass.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="During a cascade the same original tweet arrives from many followees at once through the k-way merge; a hash set over the candidate window keeps the first occurrence and folds the rest into an attribution count instead of repeating the tweet in the visible feed">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="20" width="150" height="26" rx="4"/><text class="sub" x="95" y="35">followee A: tweet X</text>
-  <rect class="box" x="20" y="55" width="150" height="26" rx="4"/><text class="sub" x="95" y="70">followee B: tweet X</text>
-  <rect class="box" x="20" y="90" width="150" height="26" rx="4"/><text class="sub" x="95" y="105">followee C: tweet X</text>
-  <rect class="box" x="20" y="125" width="150" height="26" rx="4"/><text class="sub" x="95" y="140">followee D: tweet Y</text>
-  <path class="flow" d="M170,33 L280,80"/><path class="flow" d="M170,68 L280,80"/><path class="flow" d="M170,103 L280,90"/><path class="flow" d="M170,138 L280,120"/>
-  <rect class="box acc" x="280" y="60" width="200" height="70" rx="6"/>
-  <text class="sub" x="380" y="82">X kept once, "and 2 others"</text>
-  <text class="sub" x="380" y="102">Y kept once</text>
-  <text class="sub" x="500" y="95" text-anchor="start">visible feed: 2 rows, not 4</text>
-</svg>
-```
+[The k-way merge dedupes a cascade in one pass](/diagram/twitter?figure=cascade-dedupe)
 
 The step that scales with the graph is exactly that fan-in width. Everything else in the read path, the merge, the dedupe, the ranking, the hydration, is bounded by the page size and costs the same whether a reader follows five accounts or five thousand.
 
@@ -5980,19 +5060,20 @@ Every viewer of a post needs a size that fits their device. Generating every siz
 **Great: pre-encode a fixed ladder once, asynchronously, off the read path entirely.** **Transcode workers** decode the source once and encode a small, fixed set of rungs in parallel, writing each to the **Variant store** before the post is ever readable. Every subsequent view is a pure cache read through the **Multi-tier CDN**, with zero compute on the request path regardless of how many times the post is viewed.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Pre-encoding spends roughly 2,300 cores continuously in a background queue where latency is invisible; on-demand resizing at a 95 percent hit ratio still needs roughly 4,500 cores directly on the read path, nearly twice as many, because every cache miss becomes a compute-bound resize a waiting user can feel">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Pre-encoding spends roughly 2,300 cores continuously in a background queue where latency is invisible; on-demand resizing at a 95 percent hit ratio still needs roughly 4,500 cores directly on the read path, nearly twice as many, because every cache miss becomes a compute-bound resize a waiting user can feel">
   <style>
     .bar{fill:currentColor;fill-opacity:.15;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .bar2{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.5}
-    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="28">Pre-encode: background queue, latency invisible</text>
-  <rect class="bar" x="20" y="44" width="230" height="26" rx="4"/>
-  <text class="sub" x="20" y="88">~2,300 cores continuous</text>
-  <text class="lbl" x="20" y="128">On-demand: sits on the request path a user is waiting on</text>
-  <rect class="bar2" x="20" y="144" width="450" height="26" rx="4"/>
-  <text class="sub" x="20" y="182">~4,500 cores at a 95% hit ratio, nearly double, and every one of them is latency-critical</text>
+  <text class="lbl" x="8" y="16">Pre-encode: background, latency invisible</text>
+  <rect class="bar" x="8" y="26" width="120" height="24" rx="4"/>
+  <text class="sub" x="8" y="66">~2,300 cores continuous</text>
+  <text class="lbl" x="8" y="104">On-demand: sits on the path a user is waiting on</text>
+  <rect class="bar2" x="8" y="114" width="240" height="24" rx="4"/>
+  <text class="sub" x="8" y="156">~4,500 cores at a 95% hit ratio,</text>
+  <text class="sub" x="8" y="172">nearly double, and latency-critical</text>
 </svg>
 ```
 
@@ -6022,25 +5103,7 @@ Queue delivery is at-least-once, and mobile clients retry aggressively on flaky 
 
 **Great: deterministic keys plus a compare-and-swap status transition.** Every stage keys off the `post_id` the API minted, and variant keys are deterministic, `{post_id}/{rung}.{codec}`, so **Transcode workers** writing the same **Variant store** location twice is a harmless overwrite. The **Post metadata** update is a compare-and-swap from `processing` to `ready` specifically, so a second worker finishing the same work is a no-op rather than a race.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="Two deliveries of the same ObjectCreated event both write to the same deterministic variant keys, harmlessly overwriting identical bytes, and both attempt the same compare-and-swap from processing to ready; only the first succeeds, the second is a no-op">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="20" width="160" height="30" rx="5"/><text class="sub" x="100" y="35">worker A: delivery 1</text>
-  <rect class="box" x="20" y="60" width="160" height="30" rx="5"/><text class="sub" x="100" y="75">worker B: delivery 2 (retry)</text>
-  <rect class="box acc" x="280" y="40" width="200" height="30" rx="5"/><text class="sub" x="380" y="55">same key: {post_id}/med.avif</text>
-  <path class="flow" d="M180,35 L280,50"/><path class="flow" d="M180,75 L280,58"/>
-  <rect class="box" x="560" y="15" width="170" height="30" rx="5"/><text class="lbl" x="645" y="30" fill="currentColor">CAS wins: ready</text>
-  <rect class="box" x="560" y="65" width="170" height="30" rx="5"/><text class="sub" x="645" y="80">CAS fails: no-op</text>
-  <path class="flow" d="M480,45 L560,30"/><path class="flow" d="M480,52 L560,80"/>
-</svg>
-```
+[Deterministic keys plus a CAS close both failure modes](/diagram/instagram?figure=retry-cas)
 
 Without both properties together, deterministic keys alone still leaves a status race, and a compare-and-swap alone still leaves orphaned objects; only the pair closes both failure modes at once.
 
@@ -6174,29 +5237,7 @@ Retrieval ranks by embedding proximity; ranking scores by predicted engagement. 
 
 **Great: a content-only tower, plus a separate, explicitly budgeted exploration channel.** The video tower is architecturally forbidden from consuming engagement counts, so its output exists the moment transcoding finishes and is inserted into the **ANN index** before the video is feed-eligible. **Union + safety + explore** reserves a fixed one-in-ten slot share for videos under a set impression count, a separate retrieval channel whose spend can be read directly off a dashboard rather than inferred from a score distribution.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="An embedding seeded from engagement has no value for a video with zero impressions, so the video is unreachable; an embedding seeded from content and creator features exists from the moment transcoding finishes, independent of any views">
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .bad{stroke-opacity:.55}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.3;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">Seeded from engagement</text>
-  <rect class="box bad" x="20" y="36" width="180" height="30" rx="5"/><text class="sub" x="110" y="52">new video: 0 impressions</text>
-  <path class="flow" d="M110,66 L110,100"/>
-  <rect class="box bad" x="20" y="100" width="180" height="30" rx="5"/><text class="sub" x="110" y="116">no embedding: unreachable forever</text>
-
-  <text class="lbl" x="420" y="20" text-anchor="start">Seeded from content</text>
-  <rect class="box acc" x="420" y="36" width="200" height="30" rx="5"/><text class="sub" x="520" y="52">pixels, audio, creator, tags</text>
-  <path class="flow" d="M520,66 L520,100"/>
-  <rect class="box acc" x="420" y="100" width="200" height="30" rx="5"/><text class="lbl" x="520" y="116" fill="var(--accent)">real position, zero views needed</text>
-  <text class="sub" x="380" y="160">a feature-only embedding is a prior, not a measurement; it competes for the explicit exploration quota next</text>
-</svg>
-```
+[Content-seeded embeddings exist before any views](/diagram/tiktok?figure=embedding-seed)
 
 The unavoidable cost this accepts: a feature-only embedding is a prior about what a video resembles, not a measurement of whether it's actually good, so two videos with near-identical audio and visuals can genuinely differ several-fold in completion rate for reasons the tower's inputs cannot see.
 
@@ -6238,19 +5279,20 @@ An exploration slot and an organic slot occupy the same feed, but not the same p
 **Great: log the slot index on every event, and divide out a trained position-bias propensity.** **Interaction event log** records `slot_index` on every row, and **Model training** fits a separate position-bias model from it, correcting the completion-rate label before it feeds the promotion decision inside **Union + safety + explore**.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="The same video shown at slot 3 completes at a much higher rate than shown at slot 40, purely from session fatigue; comparing raw completion rates without dividing out that position effect makes every exploration video look worse than an organic one, ratcheting the promotion threshold upward until exploration silently stops promoting anything">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 195" role="img" aria-label="The same video shown at slot 3 completes at a much higher rate than shown at slot 40, purely from session fatigue; comparing raw completion rates without dividing out that position effect makes every exploration video look worse than an organic one, ratcheting the promotion threshold upward until exploration silently stops promoting anything">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
     .lbl{fill:currentColor;font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">Same video, two positions in the same session</text>
-  <rect class="box acc" x="20" y="36" width="300" height="30" rx="5"/><text class="sub" x="170" y="52">slot 3: high completion rate</text>
-  <rect class="box" x="20" y="80" width="300" height="30" rx="5"/><text class="sub" x="170" y="96">slot 40: low completion rate, same video</text>
-  <text class="sub" x="170" y="128">raw comparison blames the video for what session fatigue actually caused</text>
-  <text class="sub" x="170" y="150">dividing out the slot's trained propensity restores the true signal</text>
+  <text class="lbl" x="8" y="16">Same video, two positions, one session</text>
+  <rect class="box acc" x="8" y="26" width="200" height="28" rx="5"/><text class="sub" x="16" y="44">slot 3: high completion rate</text>
+  <rect class="box" x="8" y="66" width="384" height="28" rx="5"/><text class="sub" x="16" y="84">slot 40: low completion rate, same video</text>
+  <text class="sub" x="8" y="120">raw comparison blames the video for what</text>
+  <text class="sub" x="8" y="136">session fatigue actually caused</text>
+  <text class="sub" x="8" y="160">dividing out the slot's trained propensity</text>
+  <text class="sub" x="8" y="176">restores the true signal</text>
 </svg>
 ```
 
@@ -6373,32 +5415,7 @@ The picture above shows the **Matching Service** scoring candidates and **Offer 
 
 Worked example. Two ride requests near Union Square both score driver D-449 as their best candidate, a few milliseconds apart. Dispatcher A attempts `CAS(driver[D-449], expect=AVAILABLE, set=OFFERED(reqA, +15s))` and it lands first, so it succeeds. Dispatcher B's identical attempt now finds the record already `OFFERED`, so it fails. Dispatcher B does not retry D-449; it moves to its second-ranked candidate and attempts that write instead. The rider on the losing side never learns anything happened, they are a few milliseconds slower to their first offer.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Two dispatch attempts race for the same driver record; one conditional write succeeds, the other fails and falls to the next candidate">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
-    .dash{stroke-dasharray:5 4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="120" y="24" text-anchor="start">Dispatcher A</text>
-  <text class="lbl" x="120" y="150" text-anchor="start">Dispatcher B</text>
-  <rect class="box acc" x="300" y="80" width="200" height="60" rx="9"/>
-  <text class="lbl" x="400" y="100">driver[D-449]</text>
-  <text class="sub" x="400" y="118">AVAILABLE → OFFERED</text>
-  <path class="flow acc" d="M120,40 L390,86"/>
-  <text class="sub" x="230" y="52" text-anchor="start">CAS expect=AVAILABLE ✓ wins</text>
-  <path class="flow dash" d="M120,160 L390,134"/>
-  <text class="sub" x="230" y="185" text-anchor="start">CAS expect=AVAILABLE ✗ rejected</text>
-  <path class="flow dash" d="M500,120 L680,170"/>
-  <text class="sub" x="560" y="205" text-anchor="start">falls to 2nd candidate, D-512</text>
-  <text class="sub" x="400" y="230">the store accepts exactly one write per driver; the loser never retries the same key</text>
-</svg>
-```
+[Racing for a driver: one CAS wins, the loser cascades](/diagram/ride-hailing?figure=driver-race)
 
 #### Claiming the request, not just the driver
 Holding a driver is necessary and not sufficient. If a request gets a second offer, because the first driver went silent, two drivers can tap accept within milliseconds of each other.
@@ -6438,31 +5455,31 @@ Ordinarily the top-ranked candidate's lease succeeds almost every time and this 
 Worked example: a stadium empties, 10,000 people leave, and roughly 3,000 of them open the app inside a minute in one area holding about 300 free cars. The first 300 requests take the available drivers; the remaining 2,700 find nothing. Left unbounded, each of those 2,700 requests walks all ~50 candidates and retries every 2 seconds for a minute: 2,700 × 50 × 30 ≈ **4 million conditional writes** in that one minute, roughly 67,000/s aimed at a few hundred hot keys, against a normal global load of ~2,900/s. Capping the walk at five attempts drops that to 2,700 × 5 × 30 ≈ **405,000**, and the growing backoff interval takes a further factor off it. This is not a performance tweak; it is the difference between a shortage that degrades and one that takes the whole city's dispatch tier down with it.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="A bounded walk: five candidate attempts, each a conditional write, then a widened radius and a growing backoff before the next pass">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A bounded walk: five candidate attempts fail at 2km, then the radius widens to 3km and backoff grows before the next pass">
   <style>
     .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .fail{fill:currentColor;fill-opacity:.14}
     .ok{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="b" x="20" y="24">one request, five leases attempted, all fail: 2km radius</text>
-  <g transform="translate(20,40)">
-    <rect class="r fail" x="0" y="0" width="90" height="34" rx="6"/><text class="t" x="45" y="17" text-anchor="middle">#1 ✗</text>
-    <rect class="r fail" x="100" y="0" width="90" height="34" rx="6"/><text class="t" x="145" y="17" text-anchor="middle">#2 ✗</text>
-    <rect class="r fail" x="200" y="0" width="90" height="34" rx="6"/><text class="t" x="245" y="17" text-anchor="middle">#3 ✗</text>
-    <rect class="r fail" x="300" y="0" width="90" height="34" rx="6"/><text class="t" x="345" y="17" text-anchor="middle">#4 ✗</text>
-    <rect class="r fail" x="400" y="0" width="90" height="34" rx="6"/><text class="t" x="445" y="17" text-anchor="middle">#5 ✗</text>
+  <text class="b" x="8" y="14" text-anchor="start">2km radius: 5 leases attempted, all fail</text>
+  <g transform="translate(8,24)">
+    <rect class="r fail" x="0" y="0" width="66" height="30" rx="6"/><text class="t" x="33" y="15">#1 ✗</text>
+    <rect class="r fail" x="74" y="0" width="66" height="30" rx="6"/><text class="t" x="107" y="15">#2 ✗</text>
+    <rect class="r fail" x="148" y="0" width="66" height="30" rx="6"/><text class="t" x="181" y="15">#3 ✗</text>
+    <rect class="r fail" x="222" y="0" width="66" height="30" rx="6"/><text class="t" x="255" y="15">#4 ✗</text>
+    <rect class="r fail" x="296" y="0" width="66" height="30" rx="6"/><text class="t" x="329" y="15">#5 ✗</text>
   </g>
-  <text class="t" x="20" y="100">back off 2s, widen radius to 3km, retry with a larger candidate set</text>
-  <g transform="translate(20,116)">
-    <rect class="r fail" x="0" y="0" width="90" height="30" rx="6"/><text class="t" x="45" y="15" text-anchor="middle">#1 ✗</text>
-    <rect class="r fail" x="100" y="0" width="90" height="30" rx="6"/><text class="t" x="145" y="15" text-anchor="middle">#2 ✗</text>
-    <rect class="ok" x="200" y="0" width="90" height="30" rx="6"/><text class="t" x="245" y="15" text-anchor="middle">#3 ✓</text>
+  <text class="t" x="8" y="76" text-anchor="start">back off 2s, widen to 3km, retry</text>
+  <g transform="translate(8,86)">
+    <rect class="r fail" x="0" y="0" width="90" height="30" rx="6"/><text class="t" x="45" y="15">#1 ✗</text>
+    <rect class="r fail" x="98" y="0" width="90" height="30" rx="6"/><text class="t" x="143" y="15">#2 ✗</text>
+    <rect class="ok" x="196" y="0" width="90" height="30" rx="6"/><text class="t" x="241" y="15">#3 ✓</text>
   </g>
-  <text class="b" x="20" y="180">unbounded: 2,700 riders × 50 candidates × 30 retries/min ≈ 4,000,000 writes/min</text>
-  <text class="b" x="20" y="200">bounded: 2,700 riders × 5 candidates × 30 retries/min ≈ 405,000 writes/min</text>
+  <text class="b" x="8" y="150" text-anchor="start">unbounded: 2,700×50×30/min ≈ 4,000,000 writes</text>
+  <text class="b" x="8" y="172" text-anchor="start">bounded: 2,700×5×30/min ≈ 405,000 writes</text>
 </svg>
 ```
 
@@ -6605,34 +5622,7 @@ Booking a range means taking several row locks at once, and taking several locks
 
 Worked example: guest A requests June 14 to 16, guest B requests June 15 to 17, arriving a few milliseconds apart. Both lock in ascending order, so both attempt June 14 or 15 first depending on their range, but crucially neither ever holds a later row while waiting for an earlier one. A simply waits for B, or B waits for A, and whichever is second sees `held` on the shared night and returns cleanly rather than deadlocking.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Without ordering, two overlapping bookings can deadlock; locking rows in ascending date order turns the deadlock into a wait">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
-    .dash{stroke-dasharray:5 4}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="24" text-anchor="start">unordered: cycle, one transaction killed</text>
-  <rect class="box" x="20" y="40" width="90" height="34" rx="6"/><text class="sub" x="65" y="57">Jun 14</text>
-  <rect class="box" x="130" y="40" width="90" height="34" rx="6"/><text class="sub" x="175" y="57">Jun 15</text>
-  <rect class="box" x="240" y="40" width="90" height="34" rx="6"/><text class="sub" x="285" y="57">Jun 16</text>
-  <rect class="box" x="130" y="90" width="90" height="34" rx="6"/><text class="sub" x="175" y="107">Jun 15</text>
-  <rect class="box" x="240" y="90" width="90" height="34" rx="6"/><text class="sub" x="285" y="107">Jun 16</text>
-  <rect class="box" x="350" y="90" width="90" height="34" rx="6"/><text class="sub" x="395" y="107">Jun 17</text>
-  <path class="flow acc" d="M110,57 L128,57"/><text class="sub" x="119" y="30">A holds 14, waits 15</text>
-  <path class="flow dash" d="M330,107 L348,107"/><text class="sub" x="290" y="130">B holds 16, waits 15 → deadlock</text>
-  <text class="lbl" x="20" y="180" text-anchor="start">ordered ascending: B simply waits for A</text>
-  <rect class="box acc" x="20" y="196" width="90" height="34" rx="6"/><text class="sub" x="65" y="213">Jun 14 ✓A</text>
-  <rect class="box acc" x="130" y="196" width="90" height="34" rx="6"/><text class="sub" x="175" y="213">Jun 15 ✓A</text>
-  <rect class="box" x="240" y="196" width="90" height="34" rx="6"/><text class="sub" x="285" y="213">Jun 16 ✓A, B waits</text>
-  <text class="sub" x="380" y="240" text-anchor="start">B's June 15 request queues, never reversed</text>
-</svg>
-```
+[Ascending lock order turns overlap into a queue, not a cycle](/diagram/booking-platform?figure=lock-order)
 
 #### Payment outside the lock
 Once the hold commits, the question is where the card authorisation happens, and it turns out that decision alone sets how many database connections the system needs.
@@ -6648,26 +5638,26 @@ Once the hold commits, the question is where the card authorisation happens, and
 Worked example: at 120 commits/s with payment inside a 2-second transaction, the connection pool needs roughly 240 concurrent connections doing nothing but waiting on a card network, and a slow afternoon at the payment provider becomes an outage in the booking database. Moving payment outside the lock cuts the time a lock is held by a factor of about 1,000, from 2 seconds to 2 milliseconds, and the pool never sees the payment provider at all. The price is a real `held` state, a night that looks taken but is not yet sold, which needs its own release mechanism.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A 2ms row lock compared to a 2 second payment authorisation drawn to the same timeline; the lock never spans the payment call">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="A 2ms row lock compared to a 2 second payment authorisation drawn to the same timeline; the lock never spans the payment call">
   <style>
     .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .lock{fill:var(--accent);fill-opacity:.35;stroke:var(--accent);stroke-width:1.5}
     .pay{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.6;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{dominant-baseline:middle}
   </style>
-  <text class="b" x="20" y="24">bad: payment inside the transaction</text>
-  <rect class="r" x="20" y="40" width="700" height="30" rx="6"/>
-  <rect class="lock" x="20" y="40" width="4" height="30"/>
-  <rect class="pay" x="24" y="40" width="680" height="30"/>
-  <text class="t" x="380" y="86">row lock + connection held for the full ~2s p99 payment call</text>
-  <text class="b" x="20" y="130">great: two short transactions, payment in between, no lock held</text>
-  <rect class="r" x="20" y="146" width="700" height="30" rx="6"/>
-  <rect class="lock" x="20" y="146" width="4" height="30"/>
-  <rect class="pay" x="26" y="146" width="670" height="30" fill-opacity="0"/>
-  <rect class="lock" x="694" y="146" width="4" height="30"/>
-  <text class="t" x="380" y="192">~2ms hold · payment runs with zero locks held · ~2ms confirm</text>
+  <text class="b" x="8" y="16">bad: payment inside the transaction</text>
+  <rect class="r" x="8" y="28" width="368" height="26" rx="6"/>
+  <rect class="lock" x="8" y="28" width="3" height="26"/>
+  <rect class="pay" x="11" y="28" width="362" height="26"/>
+  <text class="t" x="8" y="70">row lock + connection held for the full ~2s p99 call</text>
+  <text class="b" x="8" y="104">great: two short transactions, payment between</text>
+  <rect class="r" x="8" y="116" width="368" height="26" rx="6"/>
+  <rect class="lock" x="8" y="116" width="3" height="26"/>
+  <rect class="pay" x="11" y="116" width="362" height="26" fill-opacity="0"/>
+  <rect class="lock" x="373" y="116" width="3" height="26"/>
+  <text class="t" x="8" y="160">~2ms hold · payment runs lock-free · ~2ms confirm</text>
 </svg>
 ```
 
@@ -6833,24 +5823,24 @@ The placement controller's output looks, at first glance, like a list of popular
 Worked example: two appliances in the same country, one behind an ISP serving mostly connected TVs, one behind an ISP serving mostly prepaid mobile plans. Both hold the same top 400 titles by predicted popularity, but the TV-heavy appliance's segment groups skew toward 1080p and 4K HEVC, while the mobile-heavy appliance's skew toward 480p and 720p H.264. A title-level placement scheme would push identical bytes to both and waste roughly a third of each appliance's capacity on renditions its subscribers will never request.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 240" role="img" aria-label="Two appliances holding the same titles but different segment groups, split by the device mix behind each one">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Two appliances holding the same titles but different segment groups, split by the device mix behind each one">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
     .dim{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="190" y="24">OCA behind a TV-heavy ISP</text>
-  <rect class="dim" x="20" y="40" width="340" height="24" rx="4"/><text class="sub" x="190" y="56">480p / 720p H.264 — small slice</text>
-  <rect class="acc" x="20" y="70" width="340" height="24" rx="4"/><text class="sub" x="190" y="86">1080p / 4K HEVC, AV1 — most of the box</text>
-  <text class="lbl" x="570" y="24">OCA behind a mobile-heavy ISP</text>
-  <rect class="acc" x="400" y="40" width="340" height="24" rx="4"/><text class="sub" x="570" y="56">480p / 720p H.264 — most of the box</text>
-  <rect class="dim" x="400" y="70" width="340" height="24" rx="4"/><text class="sub" x="570" y="86">1080p / 4K HEVC, AV1 — small slice</text>
-  <text class="sub" x="380" y="140">same top 400 titles, different segment groups per appliance</text>
-  <text class="sub" x="380" y="164">a title-level scheme pushes identical bytes to both, wasting roughly a third of each box</text>
-  <text class="sub" x="380" y="200">granularity: (title, codec, rung, audio track), not (title)</text>
+  <text class="lbl" x="8" y="14">OCA behind a TV-heavy ISP</text>
+  <rect class="dim" x="8" y="24" width="94" height="22" rx="4"/>
+  <rect class="acc" x="106" y="24" width="286" height="22" rx="4"/>
+  <text class="sub" x="8" y="62">480p/720p H.264 — small slice</text>
+  <text class="sub" x="8" y="78">1080p/4K HEVC, AV1 — most of the box</text>
+  <text class="lbl" x="8" y="108">OCA behind a mobile-heavy ISP</text>
+  <rect class="acc" x="8" y="118" width="286" height="22" rx="4"/>
+  <rect class="dim" x="298" y="118" width="94" height="22" rx="4"/>
+  <text class="sub" x="8" y="156">480p/720p H.264 — most of the box</text>
+  <text class="sub" x="8" y="172">1080p/4K HEVC, AV1 — small slice</text>
+  <text class="sub" x="8" y="196">same top 400 titles; granularity is (title, codec, rung, track)</text>
 </svg>
 ```
 
@@ -6868,26 +5858,26 @@ The resident set the controller builds has to survive contact with an ordinary c
 Worked example: a global launch sends tens of millions of plays at one title within an hour, all requesting segments that were pre-positioned days earlier. Under plain LRU, that flood of requests for other appliances' popular content could push the pre-positioned bytes for a less-hot title out of a shared cache; here, because the pre-positioned set is pinned, none of it moves, and the flood simply reads what was already there. The failure a plain cache would introduce is the pre-positioned set arriving late through the expensive peer-and-origin path, which is precisely the traffic the whole programme exists to avoid.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="Plain LRU evicts pre-positioned bytes under a launch-day flood; pinning keeps the placed set and runs LRU only on the leftover space">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="Plain LRU evicts pre-positioned bytes under a launch-day flood; pinning keeps the placed set and runs LRU only on the leftover space">
   <style>
     .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .pin{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .lru{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.55;stroke-width:1.5}
     .gone{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.5;stroke-dasharray:4 3}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{dominant-baseline:middle}
   </style>
-  <text class="b" x="20" y="24">bad: plain LRU, 200 TB disk</text>
-  <rect class="r" x="20" y="40" width="700" height="30" rx="6"/>
-  <rect class="pin" x="20" y="40" width="460" height="30"/><text class="t" x="240" y="59" text-anchor="middle">pre-positioned set</text>
-  <rect class="gone" x="480" y="40" width="240" height="30"/><text class="t" x="600" y="59" text-anchor="middle">evicted by launch-day flood</text>
-  <text class="t" x="20" y="90">launch traffic for other titles pushes out bytes placed days earlier</text>
-  <text class="b" x="20" y="140">great: pinned set, LRU only on the remainder</text>
-  <rect class="r" x="20" y="156" width="700" height="30" rx="6"/>
-  <rect class="pin" x="20" y="156" width="460" height="30"/><text class="t" x="240" y="175" text-anchor="middle">pinned, never evicted</text>
-  <rect class="lru" x="480" y="156" width="240" height="30"/><text class="t" x="600" y="175" text-anchor="middle">unpinned, ordinary LRU</text>
-  <text class="t" x="20" y="206">the launch flood only ever competes for the unpinned remainder</text>
+  <text class="b" x="8" y="14">bad: plain LRU, 200 TB disk</text>
+  <rect class="r" x="8" y="24" width="376" height="28" rx="6"/>
+  <rect class="pin" x="8" y="24" width="242" height="28"/><text class="t" x="18" y="42" text-anchor="start">pre-positioned</text>
+  <rect class="gone" x="252" y="24" width="132" height="28"/><text class="t" x="262" y="42" text-anchor="start">evicted</text>
+  <text class="t" x="8" y="66" text-anchor="start">launch traffic pushes out bytes placed days earlier</text>
+  <text class="b" x="8" y="100">great: pinned set, LRU only on the remainder</text>
+  <rect class="r" x="8" y="110" width="376" height="28" rx="6"/>
+  <rect class="pin" x="8" y="110" width="242" height="28"/><text class="t" x="18" y="128" text-anchor="start">pinned, never evicted</text>
+  <rect class="lru" x="252" y="110" width="132" height="28"/><text class="t" x="262" y="128" text-anchor="start">ordinary LRU</text>
+  <text class="t" x="8" y="152" text-anchor="start">the flood only ever competes for the unpinned remainder</text>
 </svg>
 ```
 
@@ -7061,28 +6051,27 @@ Search inherits the same tenancy question, but its physical constraints push the
 Worked example: the top 2% of workspaces by size, roughly 15,000 of them, justify a dedicated index; the remaining 735,000 share physical indices behind the routing key. That threshold is not a policy choice, it falls directly out of the arithmetic: a shard is comfortable at around 50 million documents, and 20 messages a day for five years crosses that line at almost exactly the 98th percentile of workspace size, so the split tracks the size distribution rather than fighting it.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="750,000 workspaces at one index each need about 1,000 mostly empty nodes; a hybrid splits the top 2% into dedicated indices and packs the rest onto shared ones">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 180" role="img" aria-label="750,000 workspaces at one index each need about 1,000 mostly empty nodes; a hybrid splits the top 2% into dedicated indices and packs the rest onto shared ones">
   <style>
-    .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .full{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
     .empty{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.4;stroke-width:1.5;stroke-dasharray:3 3}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
   </style>
-  <text class="b" x="20" y="24">bad: 750,000 tenants, one index each</text>
-  <g transform="translate(20,40)">
-    <rect class="empty" x="0" y="0" width="80" height="30" rx="5"/><rect class="empty" x="90" y="0" width="80" height="30" rx="5"/>
-    <rect class="empty" x="180" y="0" width="80" height="30" rx="5"/><rect class="empty" x="270" y="0" width="80" height="30" rx="5"/>
-    <rect class="empty" x="360" y="0" width="80" height="30" rx="5"/><rect class="empty" x="450" y="0" width="80" height="30" rx="5"/>
+  <text class="b" x="8" y="14">bad: 750,000 tenants, one index each</text>
+  <g transform="translate(8,24)">
+    <rect class="empty" x="0" y="0" width="56" height="26" rx="5"/><rect class="empty" x="62" y="0" width="56" height="26" rx="5"/>
+    <rect class="empty" x="124" y="0" width="56" height="26" rx="5"/><rect class="empty" x="186" y="0" width="56" height="26" rx="5"/>
+    <rect class="empty" x="248" y="0" width="56" height="26" rx="5"/><rect class="empty" x="310" y="0" width="56" height="26" rx="5"/>
   </g>
-  <text class="t" x="20" y="94">~1,000 nodes, most holding a median of ~110MB in a 15GB shard</text>
-  <text class="b" x="20" y="130">great: top 2% dedicated, the rest packed onto shared indices</text>
-  <g transform="translate(20,146)">
-    <rect class="full" x="0" y="0" width="80" height="30" rx="5"/>
-    <rect class="full" x="90" y="0" width="230" height="30" rx="5"/><text class="t" x="205" y="19" text-anchor="middle">shared index, thousands of tenants</text>
+  <text class="t" x="8" y="68">~1,000 nodes, most holding ~110MB in a 15GB shard</text>
+  <text class="b" x="8" y="98">great: top 2% dedicated, rest packed onto shared</text>
+  <g transform="translate(8,108)">
+    <rect class="full" x="0" y="0" width="66" height="28" rx="5"/>
+    <rect class="full" x="74" y="0" width="302" height="28" rx="5"/>
   </g>
-  <text class="t" x="20" y="204">left box: a dedicated index for a top-2% tenant, ~50M+ documents</text>
+  <text class="t" x="8" y="154">left: dedicated index for a top-2% tenant, 50M+ docs</text>
+  <text class="t" x="8" y="170">right: shared index, thousands of tenants</text>
 </svg>
 ```
 
@@ -7112,25 +6101,7 @@ Loading an 800-reply thread inside a channel holding four million messages looks
 
 Worked example: an 800-reply thread in a four-million-message channel loads as a single partition read on the second table, returning exactly its 800 rows regardless of how large the surrounding channel is. The extra write on send is nearly free, since it hits the same cluster and commit path as the first write, while the alternative, filtering the channel timeline for a parent id, degrades linearly as the channel grows and never gets better.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A reply is written once to the channel timeline and once to a table partitioned by channel and thread parent, so loading a thread never scans the channel">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box acc" x="300" y="20" width="160" height="46" rx="9"/><text class="lbl" x="380" y="43">thread reply</text>
-  <rect class="box" x="60" y="120" width="260" height="60" rx="9"/><text class="lbl" x="190" y="140">channel timeline</text><text class="sub" x="190" y="160">4,000,000 rows, sorted by message id</text>
-  <rect class="box acc" x="440" y="120" width="260" height="60" rx="9"/><text class="lbl" x="570" y="140">(channel, thread_parent)</text><text class="sub" x="570" y="160">800 rows for this thread</text>
-  <path class="flow" d="M340,66 L200,120"/><text class="sub" x="230" y="95">write 1: scroll order</text>
-  <path class="flow acc" d="M420,66 L560,120"/><text class="sub" x="520" y="95">write 2: thread order</text>
-  <text class="sub" x="380" y="205">loading the thread reads the right box only: one partition, 800 rows, not 4,000,000</text>
-</svg>
-```
+[Write once to the timeline, once to the thread's own partition](/diagram/slack?figure=thread-write)
 
 #### One home for a channel two companies share
 When two organisations share a channel, each has its own tenancy boundary, and the message log cannot obey both at once.
@@ -7269,32 +6240,21 @@ The first fork in this design is not a detail, it is which of three fundamentall
 Worked example: an 8-person call under mesh needs 56 total streams and 7 simultaneous encoder instances per device, which is why phones overheat out of mesh calls before the network ever becomes the limiting factor. The same call under a relay costs each sender one 2.5 Mbps upload regardless of how many people are on the call, and the relay's own cost per meeting stays roughly a tenth of a CPU core, because it is forwarding packets, not compositing pixels.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Mesh uplink grows with participant count; relay uplink stays flat regardless of how many people are on the call">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 330" role="img" aria-label="Mesh uplink grows with participant count; relay uplink stays flat regardless of how many people are on the call">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .mesh{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
     .relay{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.55;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">uplink cost per participant, 720p mesh vs flat relay</text>
-  <line class="ax" x1="60" y1="220" x2="720" y2="220"/>
-  <line class="ax" x1="60" y1="40" x2="60" y2="220"/>
-  <g transform="translate(90,0)">
-    <rect class="mesh" x="0"   y="205" width="26" height="15"/><text class="t" x="13" y="238">N=2</text>
-    <rect class="mesh" x="70"  y="175" width="26" height="45"/><text class="t" x="83" y="238">N=3</text>
-    <rect class="mesh" x="140" y="145" width="26" height="75"/><text class="t" x="153" y="238">N=4</text>
-    <rect class="mesh" x="210" y="115" width="26" height="105"/><text class="t" x="223" y="238">N=5</text>
-    <rect class="mesh" x="280" y="55"  width="26" height="165"/><text class="t" x="293" y="238">N=8</text>
-    <rect class="relay" x="0"   y="182" width="26" height="38"/>
-    <rect class="relay" x="70"  y="182" width="26" height="38"/>
-    <rect class="relay" x="140" y="182" width="26" height="38"/>
-    <rect class="relay" x="210" y="182" width="26" height="38"/>
-    <rect class="relay" x="280" y="182" width="26" height="38"/>
-  </g>
-  <text class="t" x="30" y="55" text-anchor="start">accent = mesh (N-1) × 1.5 Mbps · grey = relay, flat 2.5 Mbps</text>
-  <text class="t" x="30" y="75" text-anchor="start">crossover at N=3 · hopeless by N=5 · N(N-1) total flows</text>
+  <text class="b" x="8" y="14">uplink per participant: mesh vs flat relay</text>
+  <text class="t" x="8" y="30">N=2</text><rect class="mesh" x="8" y="36" width="43" height="11"/><rect class="relay" x="8" y="51" width="71" height="11"/>
+  <text class="t" x="8" y="84">N=3</text><rect class="mesh" x="8" y="90" width="86" height="11"/><rect class="relay" x="8" y="105" width="71" height="11"/>
+  <text class="t" x="8" y="138">N=4</text><rect class="mesh" x="8" y="144" width="129" height="11"/><rect class="relay" x="8" y="159" width="71" height="11"/>
+  <text class="t" x="8" y="192">N=5</text><rect class="mesh" x="8" y="198" width="171" height="11"/><rect class="relay" x="8" y="213" width="71" height="11"/>
+  <text class="t" x="8" y="246">N=8</text><rect class="mesh" x="8" y="252" width="300" height="11"/><rect class="relay" x="8" y="267" width="71" height="11"/>
+  <text class="t" x="8" y="298">accent = mesh (N-1)×1.5 Mbps · grey = relay, flat 2.5 Mbps</text>
+  <text class="t" x="8" y="316">crossover at N=3 · hopeless by N=5 · N(N-1) flows</text>
 </svg>
 ```
 
@@ -7325,31 +6285,28 @@ Choosing a layer is not free the instant it changes, and the cost of switching t
 Worked example: a 50-person call where the active speaker changes and dozens of receivers want the new speaker's 720p layer inside the same 100ms window. Without coalescing, each triggers its own picture loss indication and the sender answers every one, a burst of oversized keyframes that produces exactly the congestion the upgrade was meant to escape. With a 500ms floor, the sender emits one keyframe and every waiting receiver's upgrade is served from it, turning dozens of oversized frames into one.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="Without coalescing, many receivers each trigger their own oversized keyframe within 100ms; coalesced behind a 500ms floor, one keyframe serves them all">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="Without coalescing, many receivers each trigger their own oversized keyframe within 100ms; coalesced behind a 500ms floor, one keyframe serves them all">
   <style>
-    .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .big{fill:currentColor;fill-opacity:.16;stroke:currentColor;stroke-opacity:.55;stroke-width:1.5}
     .one{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
   </style>
-  <text class="b" x="20" y="24">bad: every PLI answered, dozens of keyframes in 100ms</text>
-  <g transform="translate(20,40)">
-    <rect class="big" x="0"   y="0" width="46" height="30" rx="5"/>
-    <rect class="big" x="56"  y="0" width="46" height="30" rx="5"/>
-    <rect class="big" x="112" y="0" width="46" height="30" rx="5"/>
-    <rect class="big" x="168" y="0" width="46" height="30" rx="5"/>
-    <rect class="big" x="224" y="0" width="46" height="30" rx="5"/>
-    <rect class="big" x="280" y="0" width="46" height="30" rx="5"/>
-    <text class="t" x="360" y="20">...dozens more, each 5-10x a normal frame</text>
+  <text class="b" x="8" y="14">bad: every PLI answered, dozens of keyframes</text>
+  <g transform="translate(8,24)">
+    <rect class="big" x="0"   y="0" width="46" height="28" rx="5"/>
+    <rect class="big" x="56"  y="0" width="46" height="28" rx="5"/>
+    <rect class="big" x="112" y="0" width="46" height="28" rx="5"/>
+    <rect class="big" x="168" y="0" width="46" height="28" rx="5"/>
+    <rect class="big" x="224" y="0" width="46" height="28" rx="5"/>
+    <rect class="big" x="280" y="0" width="46" height="28" rx="5"/>
   </g>
-  <text class="t" x="20" y="100">great: coalesced behind a 500ms floor, one keyframe serves every pending upgrade</text>
-  <g transform="translate(20,116)">
-    <rect class="one" x="0" y="0" width="46" height="30" rx="5"/>
-    <text class="t" x="66" y="20" text-anchor="start">one keyframe, all waiting receivers switch off it</text>
-  </g>
-  <text class="t" x="20" y="180">the bottom layer keeps flowing to everyone always, so a downgrade never needs a keyframe at all</text>
+  <text class="t" x="8" y="68">...dozens more, each 5-10x a normal frame</text>
+  <text class="b" x="8" y="98">great: coalesced behind a 500ms floor</text>
+  <g transform="translate(8,108)"><rect class="one" x="0" y="0" width="46" height="28" rx="5"/></g>
+  <text class="t" x="8" y="152">one keyframe, all waiting receivers switch off it</text>
+  <text class="t" x="8" y="170">bottom layer stays on for everyone: a downgrade</text>
+  <text class="t" x="8" y="186">needs no keyframe at all</text>
 </svg>
 ```
 
@@ -7505,26 +6462,24 @@ There are two operations, writing the origin and mutating the cache, and two way
 Worked example: two requests edit the same profile within milliseconds of each other. Under write-then-overwrite, request A's commit could land first in the origin but its cache SET could land second, after request B's, leaving the cache holding A's older value while the origin holds B's newer one, with only the TTL able to fix it. Under write-then-delete, both writers simply delete the same key, in either order, and the next reader repopulates it from whichever commit landed last in the origin, which is always the correct one.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="Delete-then-write leaves a window where a reader caches the pre-write value; write-then-delete has no such window because deletes commute">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Delete-then-write leaves a window where a reader caches the pre-write value; write-then-delete has no such window because deletes commute">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
     .bad{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle}
   </style>
-  <text class="lbl" x="20" y="24" text-anchor="start">bad: delete cache, then write origin</text>
-  <rect class="box" x="20" y="40" width="150" height="34" rx="6"/><text class="sub" x="95" y="57">DELETE cache</text>
-  <rect class="bad" x="190" y="40" width="220" height="34" rx="6"/><text class="sub" x="300" y="57">window: reader misses, caches pre-write value</text>
-  <rect class="box" x="430" y="40" width="150" height="34" rx="6"/><text class="sub" x="505" y="57">write origin commits</text>
-  <text class="lbl" x="20" y="130" text-anchor="start">great: write origin, then delete cache</text>
-  <rect class="box acc" x="20" y="146" width="150" height="34" rx="6"/><text class="sub" x="95" y="163">write origin commits</text>
-  <rect class="box acc" x="190" y="146" width="150" height="34" rx="6"/><text class="sub" x="265" y="163">DELETE cache</text>
-  <text class="sub" x="380" y="200">no window: a reader either sees the old value and misses later, or already misses</text>
-  <text class="sub" x="380" y="224">deletes commute, so two concurrent writers never leave a worse state than either alone</text>
+  <text class="lbl" x="8" y="14">bad: delete cache, then write origin</text>
+  <rect class="box" x="8" y="24" width="376" height="24" rx="5"/><text class="sub" x="16" y="36">1. DELETE cache</text>
+  <rect class="bad" x="8" y="54" width="376" height="30" rx="5"/><text class="sub" x="16" y="69">2. window: reader misses,</text><text class="sub" x="16" y="82">caches the pre-write value</text>
+  <rect class="box" x="8" y="90" width="376" height="24" rx="5"/><text class="sub" x="16" y="102">3. write origin commits</text>
+  <text class="lbl" x="8" y="142">great: write origin, then delete cache</text>
+  <rect class="box acc" x="8" y="152" width="376" height="24" rx="5"/><text class="sub" x="16" y="164">1. write origin commits</text>
+  <rect class="box acc" x="8" y="182" width="376" height="24" rx="5"/><text class="sub" x="16" y="194">2. DELETE cache</text>
+  <text class="sub" x="8" y="222">no window: reader sees old value or already misses</text>
+  <text class="sub" x="8" y="240">deletes commute: concurrent writers never leave a worse state</text>
 </svg>
 ```
 
@@ -7568,28 +6523,25 @@ A single popular key cannot be sharded further, because a key lives entirely on 
 Worked example: a trending list can sit behind an in-process L1 with a 1-second TTL, because being a second stale changes nothing anyone will notice. A price or an entitlement flag cannot, because a stale L1 has no path back to it, a delete simply cannot reach 10,000 process heaps, so it gets key-level replication instead, which keeps delete working at the cost of dividing rather than eliminating its load. The choice between the two is exactly the staleness budget for that key class, not a performance question.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="One hot key saturates a single shard's NIC at 16 Gbps while 59 other shards sit near idle at 1.3 Gbps each">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="One hot key saturates a single shard's NIC at 16 Gbps while 59 other shards sit near idle at 1.3 Gbps each">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .hot{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .idle{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <line class="ax" x1="60" y1="180" x2="720" y2="180"/>
-  <line class="ax" x1="60" y1="20" x2="60" y2="180"/>
-  <rect class="hot" x="90" y="30" width="30" height="150"/><text class="t" x="105" y="200">shard 1</text>
-  <text class="t" x="105" y="20">~16 Gbps</text>
-  <g transform="translate(150,0)">
-    <rect class="idle" x="0" y="168" width="26" height="12"/><rect class="idle" x="34" y="168" width="26" height="12"/><rect class="idle" x="68" y="168" width="26" height="12"/>
-    <rect class="idle" x="102" y="168" width="26" height="12"/><rect class="idle" x="136" y="168" width="26" height="12"/><rect class="idle" x="170" y="168" width="26" height="12"/>
-    <rect class="idle" x="204" y="168" width="26" height="12"/><rect class="idle" x="238" y="168" width="26" height="12"/><rect class="idle" x="272" y="168" width="26" height="12"/>
-    <rect class="idle" x="306" y="168" width="26" height="12"/><rect class="idle" x="340" y="168" width="26" height="12"/><rect class="idle" x="374" y="168" width="26" height="12"/>
-    <rect class="idle" x="408" y="168" width="26" height="12"/><rect class="idle" x="442" y="168" width="26" height="12"/><rect class="idle" x="476" y="168" width="26" height="12"/>
+  <text class="b" x="8" y="14" text-anchor="start">one key, one shard, whatever the cluster's capacity</text>
+  <rect class="hot" x="30" y="30" width="34" height="120"/>
+  <text class="t" x="47" y="24">~16 Gbps</text>
+  <text class="t" x="47" y="166">shard 1</text>
+  <g transform="translate(90,158)">
+    <rect class="idle" x="0" y="0" width="22" height="10"/><rect class="idle" x="26" y="0" width="22" height="10"/><rect class="idle" x="52" y="0" width="22" height="10"/>
+    <rect class="idle" x="78" y="0" width="22" height="10"/><rect class="idle" x="104" y="0" width="22" height="10"/><rect class="idle" x="130" y="0" width="22" height="10"/>
+    <rect class="idle" x="156" y="0" width="22" height="10"/><rect class="idle" x="182" y="0" width="22" height="10"/><rect class="idle" x="208" y="0" width="22" height="10"/>
+    <rect class="idle" x="234" y="0" width="22" height="10"/>
   </g>
-  <text class="t" x="400" y="205">...59 other shards, each ~1.3 Gbps</text>
-  <text class="t" x="380" y="35" text-anchor="middle">one key, one shard, whatever the cluster's total capacity</text>
+  <text class="t" x="90" y="184" text-anchor="start">...59 other shards, each ~1.3 Gbps</text>
 </svg>
 ```
 
@@ -7685,29 +6637,7 @@ The whole design is decided by five numbers, so derive them before drawing anyth
 
 > **The numbers to carry.** ~1,000 correctness acquires/s against ~9,000 best-effort/s · peak correctness load is ~68% of a single consensus cluster's ceiling · a 20x to 30x latency gap between consensus and a single in-memory store · a 35-second pause against a naively sized 20-second lease is exactly the failure this design exists to survive.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="A 35 second pause outlasts a 20 second lease; a second holder acquires and writes while the first is still paused, then resumes and is fenced out on arrival">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
-    .lease{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .pause{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.5;stroke-dasharray:4 3}
-    .ok{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
-    .bad{fill:none;stroke:currentColor;stroke-width:1.5;stroke-dasharray:3 3}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle}
-  </style>
-  <line class="ax" x1="40" y1="220" x2="740" y2="220"/>
-  <text class="t" x="40" y="240">t=0</text><text class="t" x="235" y="240">t=20 lease expires</text><text class="t" x="330" y="240">t=22</text><text class="t" x="660" y="240">t=35</text>
-  <rect class="lease" x="40" y="40" width="200" height="34" rx="5"/><text class="t" x="140" y="57" text-anchor="middle">holder A: 20s lease, token 33</text>
-  <rect class="pause" x="40" y="80" width="620" height="34" rx="5"/><text class="t" x="350" y="97" text-anchor="middle">holder A paused (GC), 35s, no notification of expiry</text>
-  <rect class="ok" x="330" y="130" width="200" height="34" rx="5"/><text class="t" x="430" y="147" text-anchor="middle">holder B acquires + writes, token 34</text>
-  <rect class="bad" x="660" y="170" width="70" height="34" rx="5"/><text class="t" x="695" y="187" text-anchor="middle">A wakes</text>
-  <path class="ax" d="M695,204 L695,220" marker-end="url(#ah)"/>
-  <text class="b" x="695" y="245" text-anchor="middle">writes token 33, resource fence rejects it</text>
-</svg>
-```
+[A 35s pause outlasts a 20s lease: the fence catches the stale write](/diagram/distributed-lock?figure=lease-race)
 
 #### Two mechanisms: the grant and the enforcement
 It is worth separating, explicitly, the two jobs this design does, because conflating them is the single most common way a distributed lock ships unsafe. One mechanism decides who currently owns a key. A completely different mechanism decides whether a write from that owner is still allowed to land.
@@ -7780,22 +6710,23 @@ Even with a correct token, the way the resource evaluates it can quietly reopen 
 Worked example: a worker's write carrying token 33 arrives after a resource has already accepted token 34. Under a single-statement compare-and-write, that write's predicate, `fence_token < 33`, does not match the row's stored value of 34, so zero rows are affected and the caller sees a clean rejection. Under a read-then-write split, the same worker could have read `max_seen_token = 34`, correctly concluded it was stale, and then paused before deciding not to write, but a differently timed worker performing the identical read-then-decide sequence with a slightly older snapshot could write successfully in the gap, which is precisely the race a single statement removes by construction.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 240" role="img" aria-label="Read-then-write leaves a pause window between the check and the write; a single compare-and-write statement has no such window">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="Read-then-write leaves a pause window between the check and the write; a single compare-and-write statement has no such window">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{stroke:var(--accent)}
     .bad{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{dominant-baseline:middle}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">bad: read, then decide, then write</text>
-  <rect class="box" x="20" y="40" width="140" height="34" rx="6"/><text class="t" x="90" y="57">read max_seen</text>
-  <rect class="bad" x="180" y="40" width="220" height="34" rx="6"/><text class="t" x="290" y="57">pause here: a newer grant can land</text>
-  <rect class="box" x="420" y="40" width="140" height="34" rx="6"/><text class="t" x="490" y="57">write, unguarded</text>
-  <text class="b" x="20" y="130" text-anchor="start">great: compare and write, one statement</text>
-  <rect class="box acc" x="20" y="146" width="380" height="34" rx="6"/><text class="t" x="210" y="163">UPDATE ... WHERE fence_token &lt; :token</text>
-  <text class="t" x="380" y="200">no separate read to pause after: the store evaluates the predicate and the write together</text>
+  <text class="b" x="8" y="14">bad: read, then decide, then write</text>
+  <rect class="box" x="8" y="24" width="376" height="24" rx="5"/><text class="t" x="16" y="36">1. read max_seen</text>
+  <rect class="bad" x="8" y="54" width="376" height="24" rx="5"/><text class="t" x="16" y="66">2. pause: a newer grant can land</text>
+  <rect class="box" x="8" y="84" width="376" height="24" rx="5"/><text class="t" x="16" y="96">3. write, unguarded</text>
+  <text class="b" x="8" y="128">great: compare and write, one statement</text>
+  <rect class="box acc" x="8" y="138" width="376" height="24" rx="5"/><text class="t" x="16" y="150">UPDATE ... WHERE fence_token &lt; :token</text>
+  <text class="t" x="8" y="180">no separate read to pause after: the store</text>
+  <text class="t" x="8" y="196">evaluates the predicate and the write together</text>
 </svg>
 ```
 
@@ -7964,24 +6895,25 @@ The scheduler does two things on every fire, insert a run row and advance the jo
 Worked example: two scheduler processes both briefly believe they lead during a leadership handoff and both tick the same due job within milliseconds of each other. One's transaction commits first, inserting the run row and advancing `next_run_at`. The second's insert then conflicts with the existing row and its update's guard no longer matches the now-advanced value, so its entire transaction does nothing, cleanly, with the second scheduler aware it accomplished nothing rather than silently producing a duplicate.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 240" role="img" aria-label="Advancing next_run_at before inserting the run row can skip an occurrence forever; inserting first can wedge the job; one transaction with a guard closes both gaps at once">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Advancing next_run_at before inserting the run row can skip an occurrence forever; inserting first can wedge the job; one transaction with a guard closes both gaps at once">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{stroke:var(--accent)}
     .bad{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{dominant-baseline:middle}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">bad: advance, then insert</text>
-  <rect class="box" x="20" y="40" width="160" height="34" rx="6"/><text class="t" x="100" y="57">advance next_run_at</text>
-  <rect class="bad" x="200" y="40" width="200" height="34" rx="6"/><text class="t" x="300" y="57">crash here: occurrence skipped forever, no error</text>
-  <text class="b" x="20" y="110" text-anchor="start">bad: insert, then advance</text>
-  <rect class="box" x="20" y="126" width="160" height="34" rx="6"/><text class="t" x="100" y="143">insert run row</text>
-  <rect class="bad" x="200" y="126" width="200" height="34" rx="6"/><text class="t" x="300" y="143">crash here: every retry conflicts, job stalls</text>
-  <text class="b" x="20" y="180" text-anchor="start">great: one transaction, both or neither</text>
-  <rect class="box acc" x="20" y="196" width="180" height="34" rx="6"/><text class="t" x="110" y="213">insert + advance, guarded, COMMIT</text>
-  <text class="t" x="450" y="213">a crash before commit leaves neither change; the next tick simply retries cleanly</text>
+  <text class="b" x="8" y="14">bad: advance, then insert</text>
+  <rect class="box" x="8" y="24" width="376" height="22" rx="5"/><text class="t" x="16" y="36">1. advance next_run_at</text>
+  <rect class="bad" x="8" y="50" width="376" height="22" rx="5"/><text class="t" x="16" y="62">2. crash: occurrence skipped forever</text>
+  <text class="b" x="8" y="100">bad: insert, then advance</text>
+  <rect class="box" x="8" y="110" width="376" height="22" rx="5"/><text class="t" x="16" y="122">1. insert run row</text>
+  <rect class="bad" x="8" y="136" width="376" height="22" rx="5"/><text class="t" x="16" y="148">2. crash: every retry conflicts, stalls</text>
+  <text class="b" x="8" y="186">great: one transaction, both or neither</text>
+  <rect class="box acc" x="8" y="196" width="376" height="22" rx="5"/><text class="t" x="16" y="208">insert + advance, guarded, COMMIT</text>
+  <text class="t" x="8" y="234">a crash before commit leaves neither change;</text>
+  <text class="t" x="8" y="250">the next tick simply retries cleanly</text>
 </svg>
 ```
 
@@ -8038,26 +6970,22 @@ Handing a due run from the scheduler to a worker can be built with an extra dura
 Worked example: this design's midnight window runs at roughly 4,200 dispatches/s across a fleet that autoscales past a thousand workers, comfortably over the claim table's practical ceiling, which is why a durable queue and its sweeper are worth the added complexity here. A smaller internal scheduler running at a few hundred dispatches a second with a few dozen workers sits well under that line, where the claim table's single-datastore simplicity, easier consistent backups and complete absence of a commit-then-publish ordering hazard make it the genuinely better design, not merely the simpler one.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="2.5 million runs nominally due in one second at midnight; a stable per-job jitter spreads them across a 600 second window instead">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="2.5 million runs nominally due in one second at midnight; a stable per-job jitter spreads them across a 600 second window instead">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .spike{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .spread{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
   </style>
-  <line class="ax" x1="60" y1="170" x2="720" y2="170"/>
-  <rect class="spike" x="110" y="30" width="14" height="140"/>
-  <text class="t" x="117" y="20">2.5M at 00:00:00</text>
-  <g transform="translate(220,0)">
-    <rect class="spread" x="0" y="150" width="16" height="20"/><rect class="spread" x="30" y="150" width="16" height="20"/><rect class="spread" x="60" y="150" width="16" height="20"/>
-    <rect class="spread" x="90" y="150" width="16" height="20"/><rect class="spread" x="120" y="150" width="16" height="20"/><rect class="spread" x="150" y="150" width="16" height="20"/>
-    <rect class="spread" x="180" y="150" width="16" height="20"/><rect class="spread" x="210" y="150" width="16" height="20"/><rect class="spread" x="240" y="150" width="16" height="20"/>
-    <rect class="spread" x="270" y="150" width="16" height="20"/><rect class="spread" x="300" y="150" width="16" height="20"/><rect class="spread" x="330" y="150" width="16" height="20"/>
-    <rect class="spread" x="360" y="150" width="16" height="20"/><rect class="spread" x="390" y="150" width="16" height="20"/><rect class="spread" x="420" y="150" width="16" height="20"/>
+  <text class="t" x="8" y="16">2.5M at 00:00:00</text>
+  <rect class="spike" x="40" y="24" width="14" height="110"/>
+  <g transform="translate(110,118)">
+    <rect class="spread" x="0" y="0" width="10" height="16"/><rect class="spread" x="16" y="0" width="10" height="16"/><rect class="spread" x="32" y="0" width="10" height="16"/>
+    <rect class="spread" x="48" y="0" width="10" height="16"/><rect class="spread" x="64" y="0" width="10" height="16"/><rect class="spread" x="80" y="0" width="10" height="16"/>
+    <rect class="spread" x="96" y="0" width="10" height="16"/><rect class="spread" x="112" y="0" width="10" height="16"/><rect class="spread" x="128" y="0" width="10" height="16"/>
+    <rect class="spread" x="144" y="0" width="10" height="16"/><rect class="spread" x="160" y="0" width="10" height="16"/><rect class="spread" x="176" y="0" width="10" height="16"/>
   </g>
-  <text class="t" x="440" y="20">jittered: ~4,200/s across 600s, cron line still reads "0 0 * * *"</text>
+  <text class="t" x="8" y="160">jittered: ~4,200/s across a 600s window</text>
+  <text class="t" x="8" y="176">cron line still reads "0 0 * * *"</text>
 </svg>
 ```
 
@@ -8174,24 +7102,23 @@ The server half of this protocol is the half everyone describes. The client half
 Worked example: a client has one unacknowledged local insert sitting in its pending buffer when a remote delete arrives. Skipping the second transform means the buffer still refers to a position calculated before the delete happened; the client believes it is level with the server the moment its next acknowledgement lands, but the two documents actually differ by exactly the operations that were never rebased. The symptom reported by users is a single character sitting in the wrong place, permanently, with nothing anywhere that self-corrects it, because nothing in the protocol noticed the rebase was skipped.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="A remote operation must be transformed against the pending buffer to apply correctly, and the pending buffer must be transformed against the remote operation so both sides share the same premise afterward">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="A remote operation must be transformed against the pending buffer to apply correctly, and the pending buffer must be transformed against the remote operation so both sides share the same premise afterward">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
     .miss{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{dominant-baseline:middle}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">good, incomplete: only the screen gets fixed</text>
-  <rect class="box" x="20" y="40" width="200" height="34" rx="6"/><text class="t" x="120" y="57">remote' = T(remote, pending) → screen</text>
-  <rect class="miss" x="240" y="40" width="260" height="34" rx="6"/><text class="t" x="370" y="57">pending buffer left unrebased</text>
-  <text class="b" x="20" y="120" text-anchor="start">great: both directions transformed</text>
-  <rect class="box acc" x="20" y="136" width="220" height="34" rx="6"/><text class="t" x="130" y="153">remote' = T(remote, pending) → screen</text>
-  <rect class="box acc" x="260" y="136" width="220" height="34" rx="6"/><text class="t" x="370" y="153">pending' = T(pending, remote)</text>
-  <text class="t" x="380" y="200">next server transform now runs from a premise both sides actually share</text>
+  <text class="b" x="8" y="14">good, incomplete: only the screen gets fixed</text>
+  <rect class="box" x="8" y="24" width="376" height="24" rx="5"/><text class="t" x="16" y="36">remote' = T(remote, pending) → screen</text>
+  <rect class="miss" x="8" y="52" width="376" height="24" rx="5"/><text class="t" x="16" y="64">pending buffer left unrebased</text>
+  <text class="b" x="8" y="104">great: both directions transformed</text>
+  <rect class="box acc" x="8" y="114" width="376" height="24" rx="5"/><text class="t" x="16" y="126">remote' = T(remote, pending) → screen</text>
+  <rect class="box acc" x="8" y="142" width="376" height="24" rx="5"/><text class="t" x="16" y="154">pending' = T(pending, remote)</text>
+  <text class="t" x="8" y="182">next server transform now runs from a premise</text>
+  <text class="t" x="8" y="198">both sides actually share</text>
 </svg>
 ```
 
@@ -8248,21 +7175,22 @@ Deciding how operations get their order, one dedicated process per document or a
 Worked example: at 2 operations/s per editor, two concurrent editors collide on roughly 4% of conditional appends to a shared log, a tolerable retry rate. Twenty concurrent editors, this design's own p99 for a single document, collide on roughly half of all appends, and 50% retries at 5 to 20ms each destroys most of a 200ms latency budget precisely on the documents where real-time collaboration matters most. A pinned owner avoids that curve entirely, at the cost of needing a coordination service and accepting a brief read-only window during failover.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="Conditional-append retry rate against a shared log climbs sharply with concurrent editors on one document, from about 4 percent at two editors to about 50 percent at twenty">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Conditional-append retry rate against a shared log climbs sharply with concurrent editors on one document, from about 4 percent at two editors to about 50 percent at twenty">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .bar{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">conditional-append retry rate on a shared log, by concurrent editors on one document</text>
-  <line class="ax" x1="60" y1="180" x2="700" y2="180"/>
-  <line class="ax" x1="60" y1="40" x2="60" y2="180"/>
-  <rect class="bar" x="110" y="172" width="60" height="8"/><text class="t" x="140" y="200">2 editors, ~4%</text>
-  <rect class="bar" x="270" y="140" width="60" height="40"/><text class="t" x="300" y="200">5 editors, ~15%</text>
-  <rect class="bar" x="430" y="100" width="60" height="80"/><text class="t" x="460" y="200">10 editors, ~30%</text>
-  <rect class="bar" x="590" y="60" width="60" height="120"/><text class="t" x="620" y="200">20 editors, ~50%</text>
+  <text class="b" x="8" y="14" text-anchor="start">retry rate by concurrent editors, one shared log</text>
+  <rect class="bar" x="31" y="162" width="34" height="8"/>
+  <rect class="bar" x="127" y="136" width="34" height="34"/>
+  <rect class="bar" x="223" y="102" width="34" height="68"/>
+  <rect class="bar" x="319" y="60" width="34" height="110"/>
+  <text class="t" x="48" y="184">2 editors</text><text class="t" x="48" y="198">~4%</text>
+  <text class="t" x="144" y="184">5 editors</text><text class="t" x="144" y="198">~15%</text>
+  <text class="t" x="240" y="184">10 editors</text><text class="t" x="240" y="198">~30%</text>
+  <text class="t" x="336" y="184">20 editors</text><text class="t" x="336" y="198">~50%</text>
 </svg>
 ```
 
@@ -8392,21 +7320,23 @@ The order the four funnel stages run in looks like an implementation detail and 
 Worked example: a new user with almost no swipe history and a three-year power user with tens of thousands of swipes both hit the ranker with the same fixed cardinality, roughly 1,500 candidates, because exclusion has already done its work before ranking starts. Under rank-then-exclude, the power user's request would need to fetch and score a far larger initial pool just to yield the same 20 usable results, silently making the most engaged users the most expensive ones to serve, exactly backwards from what a healthy system wants.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="The funnel narrows from 10,000 candidates after geo to 3,000 after preferences to 1,500 after exclusion; only then does the expensive ranker run, over a fixed cardinality regardless of how depleted the user's pool is">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="The funnel narrows from 10,000 candidates after geo to 3,000 after preferences to 1,500 after exclusion; only then does the expensive ranker run, over a fixed cardinality regardless of how depleted the user's pool is">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .bar{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .rank{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{text-anchor:middle}
   </style>
-  <line class="ax" x1="60" y1="170" x2="700" y2="170"/>
-  <rect class="bar" x="90" y="30" width="70" height="140"/><text class="t" x="125" y="190">geo: 10,000</text>
-  <rect class="bar" x="250" y="87" width="70" height="83"/><text class="t" x="285" y="190">prefs: 3,000</text>
-  <rect class="bar" x="410" y="128" width="70" height="42"/><text class="t" x="445" y="190">exclude: 1,500</text>
-  <rect class="rank" x="570" y="128" width="70" height="42"/><text class="t" x="605" y="190">ranker sees 1,500, fixed</text>
-  <text class="b" x="20" y="20" text-anchor="start">the ranker's cost never depends on how much of the pool this user has already spent</text>
+  <text class="b" x="8" y="14" text-anchor="start">funnel narrows before the ranker ever runs</text>
+  <rect class="bar" x="8" y="30" width="70" height="140"/>
+  <rect class="bar" x="100" y="128" width="70" height="42"/>
+  <rect class="bar" x="192" y="149" width="70" height="21"/>
+  <rect class="rank" x="284" y="149" width="70" height="21"/>
+  <text class="t" x="43" y="186">geo: 10,000</text>
+  <text class="t" x="135" y="186">prefs: 3,000</text>
+  <text class="t" x="227" y="186">exclude: 1,500</text>
+  <text class="t" x="319" y="186">ranker: 1,500</text>
 </svg>
 ```
 
@@ -8463,20 +7393,22 @@ It is tempting to treat a single daily impression cap as the answer to popularit
 Worked example: in a metro where the mean profile is shown roughly 32 times a day, a decaying multiplier beginning around 320 impressions a day, ten times that mean, gently reduces an increasingly popular profile's future ranking score well before it ever approaches the 50,000-impression circuit breaker. Applying the decay at the scoring stage rather than by removing budget-exhausted profiles from the candidate set entirely is what keeps a small pool from suddenly losing a chunk of its candidates the moment a popular profile crosses the threshold.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="Mean profile exposure is about 32 impressions a day; the fairness multiplier begins decaying around 320, ten times the mean; the hard cap sits at 50,000, about 1,500 times the mean, and exists only to protect a database partition">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 224" role="img" aria-label="Mean profile exposure is about 32 impressions a day; the fairness multiplier begins decaying around 320, ten times the mean; the hard cap sits at 50,000, about 1,500 times the mean, and exists only to protect a database partition">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .mean{fill:currentColor;fill-opacity:.3;stroke:currentColor;stroke-width:1.5}
     .decay{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .cap{fill:none;stroke:currentColor;stroke-width:1.5;stroke-dasharray:4 3}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    text{text-anchor:middle}
   </style>
-  <line class="ax" x1="60" y1="170" x2="700" y2="170"/>
-  <rect class="mean" x="90" y="160" width="18" height="10"/><text class="t" x="99" y="190">mean, ~32/day</text>
-  <rect class="decay" x="270" y="120" width="18" height="50"/><text class="t" x="279" y="190">decay starts, ~320/day (10x mean)</text>
-  <rect class="cap" x="560" y="30" width="18" height="140"/><text class="t" x="569" y="190">hard cap, 50,000/day (~1,500x mean)</text>
-  <text class="t" x="380" y="20">the cap protects a partition; the decay is what actually redistributes attention</text>
+  <text class="t" x="30" y="14" text-anchor="start">mean, decay start, and the hard cap</text>
+  <rect class="mean" x="30" y="162" width="14" height="8"/>
+  <rect class="decay" x="170" y="120" width="14" height="50"/>
+  <rect class="cap" x="330" y="30" width="14" height="140"/>
+  <text class="t" x="37" y="184">mean</text><text class="t" x="37" y="198">~32/day</text>
+  <text class="t" x="177" y="184">decay starts</text><text class="t" x="177" y="198">~320/day (10x)</text>
+  <text class="t" x="337" y="184">hard cap</text><text class="t" x="337" y="198">50,000/day</text>
+  <text class="t" x="8" y="216" text-anchor="start">cap protects a partition; decay redistributes attention</text>
 </svg>
 ```
 
@@ -8606,22 +7538,20 @@ The single decision the rest of this design depends on is whether repositories l
 Worked example: a diff, blame or merge on a large, busy repository can touch roughly 50,000 objects scattered through a packfile. On local NVMe that is about 4 seconds of I/O; on a network filesystem at 500 microseconds to a millisecond per read, the identical operation costs 25 to 50 seconds, a gap that stays roughly constant regardless of how much caching sits in front of it, because the working set of a genuinely busy repository does not fit in any shared cache tier that also has to serve everyone else's repositories.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="50,000 random reads for one git operation cost about 4 seconds on local NVMe against 25 to 50 seconds on a network filesystem, a gap caching cannot close">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 206" role="img" aria-label="50,000 random reads for one git operation cost about 4 seconds on local NVMe against 25 to 50 seconds on a network filesystem, a gap caching cannot close">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .fast{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .slow{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{text-anchor:middle}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">50,000 random reads, one busy-repository operation</text>
-  <line class="ax" x1="60" y1="160" x2="700" y2="160"/>
-  <rect class="fast" x="140" y="140" width="80" height="20"/><text class="t" x="180" y="175">local NVMe, ~4s</text>
-  <rect class="slow" x="380" y="40" width="80" height="120"/><text class="t" x="420" y="175">network FS, 25-50s</text>
-  <text class="t" x="580" y="100">not closable by caching:</text>
-  <text class="t" x="580" y="120">busy repo's working set</text>
-  <text class="t" x="580" y="140">exceeds any shared cache tier</text>
+  <text class="b" x="8" y="14" text-anchor="start">50,000 random reads, one busy-repo operation</text>
+  <rect class="fast" x="40" y="140" width="60" height="20"/>
+  <rect class="slow" x="180" y="40" width="60" height="120"/>
+  <text class="t" x="70" y="176">local NVMe, ~4s</text>
+  <text class="t" x="210" y="176">network FS, 25-50s</text>
+  <text class="t" x="8" y="196" text-anchor="start">not closable by caching: working set exceeds any cache tier</text>
 </svg>
 ```
 
@@ -8678,22 +7608,21 @@ Millions of forks of the same popular project is the case that decides whether f
 Worked example: a project with roughly 10,000 forks, each notionally a full 5GB repository, would cost roughly 50TB stored independently. Sharing one object pool across the whole fork network costs roughly 5GB for the shared history plus a small amount of storage per fork for its own unique commits, on the order of a thousandfold reduction, concentrated on precisely the largest and most-forked repositories where storage pressure is highest.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="10,000 independent fork copies of a 5GB project cost 50TB; one shared object pool with per-fork refs costs about 5GB plus small per-fork divergence">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 180" role="img" aria-label="10,000 independent fork copies of a 5GB project cost 50TB; one shared object pool with per-fork refs costs about 5GB plus small per-fork divergence">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .acc{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
     .dim{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle}
   </style>
-  <text class="lbl" x="190" y="24">bad: 10,000 independent copies</text>
-  <rect class="dim" x="20" y="40" width="340" height="34" rx="5"/><text class="sub" x="190" y="61">10,000 x 5GB = ~50TB</text>
-  <text class="lbl" x="570" y="24">great: one shared pool</text>
-  <rect class="acc" x="400" y="40" width="340" height="34" rx="5"/><text class="sub" x="570" y="61">~5GB shared history + per-fork divergence</text>
-  <text class="sub" x="380" y="120">each fork owns only its own refs and any objects unique to it</text>
-  <text class="sub" x="380" y="145">the shared history behind those refs is mounted once, as a git alternate</text>
-  <text class="sub" x="380" y="170">roughly a 1,000x reduction, concentrated on the most-forked repositories</text>
+  <text class="lbl" x="8" y="14">bad: 10,000 independent copies</text>
+  <rect class="dim" x="8" y="24" width="376" height="28" rx="5"/><text class="sub" x="196" y="38" text-anchor="middle">10,000 x 5GB = ~50TB</text>
+  <text class="lbl" x="8" y="76">great: one shared pool</text>
+  <rect class="acc" x="8" y="86" width="376" height="28" rx="5"/><text class="sub" x="196" y="100" text-anchor="middle">~5GB shared + per-fork divergence</text>
+  <text class="sub" x="8" y="134">each fork owns only its own refs + unique objects</text>
+  <text class="sub" x="8" y="150">shared history mounted once, as a git alternate</text>
+  <text class="sub" x="8" y="166">roughly 1,000x reduction on the most-forked repos</text>
 </svg>
 ```
 
@@ -8822,22 +7751,20 @@ The decision to fetch a track as one file rather than as adaptive segments looks
 Worked example: a 160kbps four-minute track is 4.8MB, and on a 5Mbps connection the whole file lands in under 8 seconds, comfortably inside the first 15 seconds of playback that follows first audio at around 120 milliseconds. A two-hour video title at 5 to 15GB has no equivalent moment where the whole object could reasonably be pre-fetched, which is precisely why the two products' delivery designs diverge despite looking superficially similar.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A 4.8MB track downloads whole in under 8 seconds on a 5 Mbps connection; a 5 to 15GB video file has no equivalent moment where downloading the whole object is reasonable">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 206" role="img" aria-label="A 4.8MB track downloads whole in under 8 seconds on a 5 Mbps connection; a 5 to 15GB video file has no equivalent moment where downloading the whole object is reasonable">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .track{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .video{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{text-anchor:middle}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">object size, drawn to a compressed scale</text>
-  <line class="ax" x1="60" y1="160" x2="700" y2="160"/>
-  <rect class="track" x="90" y="150" width="20" height="10"/><text class="t" x="100" y="180">track, ~4.8MB, whole in &lt;8s</text>
-  <rect class="video" x="300" y="40" width="20" height="120"/><text class="t" x="310" y="180">video, 5-15GB, chunked and adapted</text>
-  <text class="t" x="560" y="90">the threshold sits near 25MB,</text>
-  <text class="t" x="560" y="110">well above a lossy track,</text>
-  <text class="t" x="560" y="130">well below any video file</text>
+  <text class="b" x="8" y="14" text-anchor="start">object size, drawn to a compressed scale</text>
+  <rect class="track" x="40" y="150" width="20" height="10"/>
+  <rect class="video" x="220" y="40" width="20" height="120"/>
+  <text class="t" x="50" y="176">track, ~4.8MB, &lt;8s</text>
+  <text class="t" x="230" y="176">video, 5-15GB, chunked</text>
+  <text class="t" x="8" y="200" text-anchor="start">threshold ~25MB: above a track, below any video</text>
 </svg>
 ```
 
@@ -8855,18 +7782,18 @@ Every ranked feed a candidate has built treats a listener's history as something
 Worked example: for the large majority of listeners, their realistic universe of saved library, playlists and followed artists' recent releases is a few hundred kilobytes of rows, comfortably scanned and scored directly rather than requiring anything resembling a retrieval pipeline. That single sizing decision is what keeps the bulk of the recommendation tier at a few hundred hosts rather than the few thousand a full retrieval-and-ranking funnel over the entire catalogue would need, because that heavier funnel only ever needs to run for the roughly one-fifth of plays that are genuinely unfamiliar.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Roughly 81 percent of plays are repeats served from a listener's own under-10,000-track history with no model; roughly 19 percent are first hears served from a small set of dedicated discovery surfaces">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 120" role="img" aria-label="Roughly 81 percent of plays are repeats served from a listener's own under-10,000-track history with no model; roughly 19 percent are first hears served from a small set of dedicated discovery surfaces">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
     .repeat{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
     .novel{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.55;stroke-width:1.5}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .lbl{fill:currentColor;font:600 11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.75;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle}
   </style>
-  <rect class="repeat" x="20" y="60" width="590" height="50" rx="6"/><text class="lbl" x="315" y="90">~81% repeat: scan under 10,000 own tracks, no model</text>
-  <rect class="novel" x="610" y="60" width="130" height="50" rx="6"/><text class="sub" x="675" y="90">~19% first hear</text>
-  <text class="sub" x="380" y="140">the funnel most candidates spend the whole session drawing only ever decides this narrow slice</text>
+  <rect class="repeat" x="8" y="20" width="305" height="36" rx="5"/><text class="lbl" x="160" y="42" text-anchor="middle">~81% repeat: scan &lt;10k tracks, no model</text>
+  <rect class="novel" x="313" y="20" width="71" height="36" rx="5"/>
+  <text class="sub" x="348" y="72" text-anchor="middle">~19% first hear</text>
+  <text class="sub" x="8" y="100" text-anchor="start">the funnel most candidates use only decides this slice</text>
 </svg>
 ```
 
@@ -9049,21 +7976,23 @@ Once ticks and rules share a process, the next question is how that process avoi
 Worked example: 500,000 rules parked on one instrument during an earnings surprise, scanned as a flat list against a burst of 1,000 ticks/s, would need roughly 500 million comparisons a second, several fully saturated cores doing nothing but comparing thresholds. The same rules held in a threshold-sorted index mean an 8% jump touches only the rules whose thresholds actually sit inside that 8% band, typically a tiny fraction of the half million, turning an unworkable scan into single-digit-millisecond evaluation.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="A flat scan of 500,000 rules against a 1,000 ticks per second burst needs roughly 500 million comparisons a second; a threshold-sorted index touches only the rules whose trigger sits inside the moved price interval">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 175" role="img" aria-label="A flat scan of 500,000 rules against a 1,000 ticks per second burst needs roughly 500 million comparisons a second; a threshold-sorted index touches only the rules whose trigger sits inside the moved price interval">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .bad{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .good{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{text-anchor:middle}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">bad: flat scan, all 500,000 rules, every tick</text>
-  <rect class="bad" x="20" y="40" width="720" height="30" rx="5"/><text class="t" x="380" y="60">~500M comparisons/s during an earnings burst</text>
-  <text class="b" x="20" y="110" text-anchor="start">great: threshold index, only the moved interval</text>
-  <rect class="ax" x="20" y="145" width="720" height="1"/>
-  <rect class="good" x="360" y="130" width="30" height="30" rx="5"/><text class="t" x="375" y="180">rules with a trigger inside [prev, now]</text>
-  <text class="t" x="120" y="180">unmoved rules, never touched</text>
+  <text class="b" x="8" y="14" text-anchor="start">bad: flat scan, all 500,000 rules, every tick</text>
+  <rect class="bad" x="8" y="24" width="376" height="28" rx="5"/><text class="t" x="196" y="42">~500M comparisons/s during an earnings burst</text>
+  <text class="b" x="8" y="90" text-anchor="start">great: threshold index, only the moved interval</text>
+  <line x1="8" y1="120" x2="384" y2="120" stroke="currentColor" stroke-opacity=".35"/>
+  <rect class="good" x="185" y="106" width="18" height="28"/>
+  <text class="t" x="194" y="148">rules with trigger inside</text>
+  <text class="t" x="194" y="162">[prev, now]</text>
+  <text class="t" x="8" y="148" text-anchor="start">unmoved rules,</text>
+  <text class="t" x="8" y="162" text-anchor="start">never touched</text>
 </svg>
 ```
 
@@ -9094,27 +8023,22 @@ Deciding exactly when a rule has been satisfied looks trivial and is the single 
 Worked example: a gap-open move from $199.00 straight to $201.00, with no tick ever touching exactly $200, still correctly fires a rule set at $200, because the crossing condition evaluates against the interval between the two consecutive prices rather than requiring any single tick to land precisely on the threshold. A level test would either miss this crossing entirely, since no tick ever equalled $200, or require a separate range check bolted on as a special case, which is exactly the kind of extra correctness surface the interval-based definition avoids needing at all.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="A level test price greater than or equal to 200 fires on every tick above 200; a crossing test prev less than 200 less than or equal to price fires exactly once, and still fires when a tick jumps clean over the threshold with none landing on it">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 194" role="img" aria-label="A level test price greater than or equal to 200 fires on every tick above 200; a crossing test prev less than 200 less than or equal to price fires exactly once, and still fires when a tick jumps clean over the threshold with none landing on it">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .bad{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .good{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">bad: price &gt;= 200, refires on every tick after the level</text>
-  <g transform="translate(20,40)">
-    <rect class="bad" x="0" y="0" width="60" height="30" rx="4"/><rect class="bad" x="70" y="0" width="60" height="30" rx="4"/>
-    <rect class="bad" x="140" y="0" width="60" height="30" rx="4"/><rect class="bad" x="210" y="0" width="60" height="30" rx="4"/>
-    <text class="t" x="130" y="50">every one of these fires again</text>
-  </g>
-  <text class="b" x="20" y="120" text-anchor="start">great: prev &lt; 200 &lt;= price, fires exactly once</text>
-  <g transform="translate(20,136)">
-    <rect class="ax" x="0" y="14" width="300" height="1"/>
-    <rect class="good" x="140" y="0" width="20" height="30" rx="4"/>
-    <text class="t" x="150" y="50">fires here only, even on a gap from 199 to 201</text>
-  </g>
+  <text class="b" x="8" y="14">bad: price &gt;= 200, refires on every tick after</text>
+  <rect class="bad" x="8" y="24" width="56" height="28" rx="4"/><rect class="bad" x="72" y="24" width="56" height="28" rx="4"/>
+  <rect class="bad" x="136" y="24" width="56" height="28" rx="4"/><rect class="bad" x="200" y="24" width="56" height="28" rx="4"/>
+  <text class="t" x="8" y="68">every one of these fires again</text>
+  <text class="b" x="8" y="100">great: prev &lt; 200 &lt;= price, fires exactly once</text>
+  <line x1="8" y1="140" x2="384" y2="140" stroke="currentColor" stroke-opacity=".35"/>
+  <rect class="good" x="180" y="126" width="20" height="28" rx="4"/>
+  <text class="t" x="8" y="168">fires here only, even on a gap</text>
+  <text class="t" x="8" y="182">from 199 to 201</text>
 </svg>
 ```
 
@@ -9258,20 +8182,21 @@ Deciding how price levels are stored looks like a routine data-structure choice,
 Worked example: a $190 equity on a penny tick, banded at plus or minus 20%, needs roughly 7,600 levels, about 486KB, cheap enough to keep dense for the top 500 symbols at roughly 243MB total. An options contract on a $0.0001 tick over a $0 to $500 range needs roughly 5 million levels, around 320MB for that single contract alone, which makes the identical dense scheme unaffordable the moment the tick range widens, and is exactly why the rule of thumb sits at roughly 100,000 ticks per book as the crossover point.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="A dense array costs about 486KB per book for a normal equity; dense-banding the top 500 symbols costs about 243MB; dense-banding all 10,000 listed instruments would cost about 4.9GB, mostly empty">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A dense array costs about 486KB per book for a normal equity; dense-banding the top 500 symbols costs about 243MB; dense-banding all 10,000 listed instruments would cost about 4.9GB, mostly empty">
   <style>
-    .ax{stroke:currentColor;stroke-opacity:.35;stroke-width:1}
     .small{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .big{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    text{text-anchor:middle}
   </style>
-  <line class="ax" x1="60" y1="170" x2="700" y2="170"/>
-  <rect class="small" x="100" y="160" width="30" height="10"/><text class="t" x="115" y="190">one book, ~486KB</text>
-  <rect class="small" x="300" y="120" width="30" height="50"/><text class="t" x="315" y="190">top 500, ~243MB</text>
-  <rect class="big" x="550" y="30" width="30" height="140"/><text class="t" x="565" y="190">all 10,000 dense, ~4.9GB</text>
-  <text class="b" x="20" y="20" text-anchor="start">density pays off for the hot list; the tree covers the tail</text>
+  <text class="b" x="8" y="14" text-anchor="start">density pays off for the hot list; the tree covers the tail</text>
+  <rect class="small" x="40" y="160" width="30" height="10"/>
+  <rect class="small" x="170" y="120" width="30" height="50"/>
+  <rect class="big" x="300" y="30" width="30" height="140"/>
+  <text class="t" x="55" y="186">one book, ~486KB</text>
+  <text class="t" x="185" y="186">top 500, ~243MB</text>
+  <text class="t" x="315" y="186">10,000, ~4.9GB</text>
 </svg>
 ```
 
@@ -9315,21 +8240,20 @@ An incoming order does not simply "match" a price, it walks a sequence of levels
 Worked example: a buy limit at $190.05 walking down a thin ask side fills fully against the best ask at $190.00, partially against the next level at $190.03, and then finds the level at $190.06 does not cross its own limit price at all, so the walk stops there with a remainder. That remainder, if the order is a day limit, becomes new resting liquidity on the bid side at $190.05; if the order was IOC, FOK, or market, the identical remainder is simply cancelled rather than left resting, with the crossing check itself being what decides where that boundary falls, not a separate quantity check bolted on afterward.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="A marketable order sweeping two price levels touches four cache lines total: two level headers and the two order records at their heads">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A marketable order sweeping two price levels touches four cache lines total: two level headers and the two order records at their heads">
   <style>
-    .line{fill:none;stroke:currentColor;stroke-width:1.5}
     .touch{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
-    text{dominant-baseline:middle;text-anchor:middle}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
   </style>
-  <text class="b" x="20" y="24" text-anchor="start">two levels swept, four 64-byte cache lines touched</text>
-  <rect class="touch" x="30" y="50" width="150" height="40" rx="5"/><text class="t" x="105" y="70">level header, best</text>
-  <rect class="touch" x="200" y="50" width="150" height="40" rx="5"/><text class="t" x="275" y="70">order record, head</text>
-  <rect class="touch" x="410" y="50" width="150" height="40" rx="5"/><text class="t" x="485" y="70">level header, next</text>
-  <rect class="touch" x="580" y="50" width="150" height="40" rx="5"/><text class="t" x="655" y="70">order record, head</text>
-  <text class="t" x="380" y="130">nothing else in the book is read; the rest of both levels stays untouched</text>
-  <text class="t" x="380" y="155">already resident in L1/L2 on an active symbol</text>
+  <text class="b" x="8" y="14">two levels swept, four 64-byte cache lines</text>
+  <rect class="touch" x="8" y="24" width="376" height="24" rx="5"/><text class="t" x="16" y="40">1. level header, best</text>
+  <rect class="touch" x="8" y="52" width="376" height="24" rx="5"/><text class="t" x="16" y="68">2. order record, head</text>
+  <rect class="touch" x="8" y="80" width="376" height="24" rx="5"/><text class="t" x="16" y="96">3. level header, next</text>
+  <rect class="touch" x="8" y="108" width="376" height="24" rx="5"/><text class="t" x="16" y="124">4. order record, head</text>
+  <text class="t" x="8" y="152">nothing else in the book is read; the rest</text>
+  <text class="t" x="8" y="168">of both levels stays untouched, already</text>
+  <text class="t" x="8" y="184">resident in L1/L2 on an active symbol</text>
 </svg>
 ```
 
@@ -9484,45 +8408,7 @@ Once events are in one order, how do you spread them across consumers without br
 
 The figure below shows why the difference matters, not just that it does.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Round-robin scatters one instrument's events across three shards; hashing keeps each instrument on one shard">
-  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;marker-end:url(#ah1)}
-    .flowa{fill:none;stroke:var(--accent);stroke-width:1.6;marker-end:url(#ah1)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">Log order: A1 · B1 · A2 · C1 · A3</text>
-
-  <text class="sub" x="20" y="50" text-anchor="start">Round-robin: A's events scatter</text>
-  <rect class="box" x="20" y="65" width="130" height="34" rx="7"/><text class="sub" x="85" y="82">shard 0</text>
-  <rect class="box" x="170" y="65" width="130" height="34" rx="7"/><text class="sub" x="235" y="82">shard 1</text>
-  <rect class="box" x="320" y="65" width="130" height="34" rx="7"/><text class="sub" x="385" y="82">shard 2</text>
-  <path class="flow" d="M60,40 L85,63"/>
-  <path class="flow" d="M110,40 L235,63"/>
-  <path class="flow" d="M160,40 L385,63"/>
-  <path class="flow" d="M210,40 L85,63"/>
-  <path class="flow" d="M260,40 L235,63"/>
-  <text class="sub" x="235" y="120">A lands on shard 0, then shard 1, then shard 2</text>
-  <text class="sub" x="235" y="138">no shard has A's order; nothing downstream can rebuild it</text>
-
-  <text class="sub" x="20" y="180" text-anchor="start">hash(instrumentId): each book stays put</text>
-  <rect class="box acc" x="20" y="195" width="130" height="34" rx="7"/><text class="sub" x="85" y="212">shard 0 · A</text>
-  <rect class="box" x="170" y="195" width="130" height="34" rx="7"/><text class="sub" x="235" y="212">shard 1 · B</text>
-  <rect class="box" x="320" y="195" width="130" height="34" rx="7"/><text class="sub" x="385" y="212">shard 2 · C</text>
-  <path class="flowa" d="M60,170 L85,193"/>
-  <path class="flow" d="M110,170 L235,193"/>
-  <path class="flowa" d="M160,170 L85,193"/>
-  <path class="flow" d="M210,170 L385,193"/>
-  <path class="flowa" d="M260,170 L85,193"/>
-  <text class="sub" x="235" y="250">A1, A2, A3 arrive at shard 0 in that order, every time</text>
-  <text class="sub" x="235" y="270">one book, one shard, one order: no merge needed downstream</text>
-</svg>
-```
+[Round-robin scatters a book; hashing keeps it on one shard](/diagram/market-data-ingest?figure=shard-by-book)
 
 Skew is the residual problem, and it is solved by placement, not by dispatch. The top 10 instruments carry 30 to 40% of all traffic, and one hot book cannot be split without breaking its order. Shards are assigned by measured load rather than an even hash bucket count, so a whale instrument gets a dedicated core with memory local to it, while an average instrument at 200 messages a second shares comfortably.
 
@@ -9539,37 +8425,7 @@ Under sustained overload, a shard falls behind. What happens to the message wait
 
 Why this is safe: a tick is a fact about right now, and the old value is worthless the moment a new one exists. An order is a fact about intent, and intent does not expire just because the system is busy.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="A tick slot is overwritten in place; an order queue accumulates until backpressure signals the producer">
-  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent);stroke-width:1.8}
-    .dim{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.4;marker-end:url(#ah2)}
-    .flowa{fill:none;stroke:var(--accent);stroke-width:1.6;marker-end:url(#ah2)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <text class="lbl" x="20" y="20" text-anchor="start">TICK: one slot, overwritten</text>
-  <rect class="dim" x="20" y="35" width="90" height="34" rx="6"/><text class="sub" x="65" y="52">187.02</text>
-  <rect class="dim" x="120" y="35" width="90" height="34" rx="6"/><text class="sub" x="165" y="52">187.05</text>
-  <rect class="dim" x="220" y="35" width="90" height="34" rx="6"/><text class="sub" x="265" y="52">187.01</text>
-  <rect class="box acc" x="320" y="35" width="120" height="34" rx="6"/><text class="sub" x="380" y="52">187.08 · latest</text>
-  <text class="sub" x="230" y="88">only the last write survives; nothing was ever queued</text>
-
-  <text class="lbl" x="20" y="140" text-anchor="start">ORDER: queue accumulates, then backs off</text>
-  <rect class="box" x="20" y="155" width="60" height="30" rx="6"/><text class="sub" x="50" y="170">o1</text>
-  <rect class="box" x="86" y="155" width="60" height="30" rx="6"/><text class="sub" x="116" y="170">o2</text>
-  <rect class="box" x="152" y="155" width="60" height="30" rx="6"/><text class="sub" x="182" y="170">o3</text>
-  <rect class="box" x="218" y="155" width="60" height="30" rx="6"/><text class="sub" x="248" y="170">o4</text>
-  <rect class="box" x="284" y="155" width="60" height="30" rx="6" stroke-dasharray="4 3"/><text class="sub" x="314" y="170">bound</text>
-  <path class="flowa" d="M344,170 L440,170"/>
-  <rect class="box acc" x="446" y="150" width="180" height="40" rx="7"/><text class="sub" x="536" y="164">slow producer, or</text><text class="sub" x="536" y="180">NACK: system busy</text>
-  <text class="sub" x="230" y="220">nothing is ever dropped silently; the sender always finds out</text>
-</svg>
-```
+[A tick overwrites its slot; an order queues, then backs off](/diagram/market-data-ingest?figure=tick-vs-order)
 
 #### Filling a hole nobody reported
 Multicast never tells you a packet went missing. How do you even find out, and what do you do while you wait?
@@ -9585,35 +8441,35 @@ Multicast never tells you a packet went missing. How do you even find out, and w
 The recovery ladder runs fastest first: the B copy in tens of microseconds, retransmit at 5 to 50 milliseconds for a bounded hole, then a periodic snapshot refresh, 1 to 30 seconds, for anything larger. Meanwhile, every affected instrument is marked stale and stops publishing its book, because a book known to be missing messages is worse than no book at all.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="The venue's sequence has a hole; our internal sequence, assigned after repair, never does">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 250" role="img" aria-label="The venue's sequence has a hole; our internal sequence, assigned after repair, never does">
   <style>
     .r{fill:none;stroke:currentColor;stroke-opacity:.4;stroke-width:1.2}
     .h{fill:none;stroke:currentColor;stroke-width:1.4;stroke-dasharray:4 3}
     .c{fill:var(--accent)}
     .m{fill:currentColor;fill-opacity:.85}
-    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.75}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.75}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
   </style>
-  <text class="b" x="20" y="24">Venue sequence: a hole at 42</text>
-  <rect class="r" x="20" y="36" width="66" height="30" rx="5"/><text class="t" x="53" y="55">39</text>
-  <rect class="r" x="94" y="36" width="66" height="30" rx="5"/><text class="t" x="127" y="55">40</text>
-  <rect class="r" x="168" y="36" width="66" height="30" rx="5"/><text class="t" x="201" y="55">41</text>
-  <rect class="h" x="242" y="36" width="66" height="30" rx="5"/><text class="t" x="275" y="55">42?</text>
-  <rect class="r" x="316" y="36" width="66" height="30" rx="5"/><text class="t" x="349" y="55">43</text>
-  <rect class="r" x="390" y="36" width="66" height="30" rx="5"/><text class="t" x="423" y="55">44</text>
-  <text class="t" x="470" y="55">43, 44 wait in the reorder buffer</text>
+  <text class="b" x="4" y="16">Venue sequence: a hole at 42</text>
+  <rect class="r" x="4" y="26" width="55" height="26" rx="4"/><text class="t" x="31" y="43" text-anchor="middle">39</text>
+  <rect class="r" x="64" y="26" width="55" height="26" rx="4"/><text class="t" x="91" y="43" text-anchor="middle">40</text>
+  <rect class="r" x="124" y="26" width="55" height="26" rx="4"/><text class="t" x="151" y="43" text-anchor="middle">41</text>
+  <rect class="h" x="184" y="26" width="55" height="26" rx="4"/><text class="t" x="211" y="43" text-anchor="middle">42?</text>
+  <rect class="r" x="244" y="26" width="55" height="26" rx="4"/><text class="t" x="271" y="43" text-anchor="middle">43</text>
+  <rect class="r" x="304" y="26" width="55" height="26" rx="4"/><text class="t" x="331" y="43" text-anchor="middle">44</text>
+  <text class="t" x="4" y="68">43, 44 wait in the reorder buffer</text>
+  <text class="t" x="4" y="86">B copy fills 42 in ~30µs, or retransmit costs 5-50ms</text>
 
-  <text class="t" x="20" y="90">B copy fills 42 in ~30µs, or retransmit costs 5-50ms</text>
-
-  <text class="b" x="20" y="140">Internal sequence: assigned only after repair</text>
-  <rect class="r" x="20" y="152" width="66" height="30" rx="5"/><text class="t" x="53" y="171">501</text>
-  <rect class="r" x="94" y="152" width="66" height="30" rx="5"/><text class="t" x="127" y="171">502</text>
-  <rect class="r" x="168" y="152" width="66" height="30" rx="5"/><text class="t" x="201" y="171">503</text>
-  <rect class="m" x="242" y="152" width="66" height="30" rx="5"/><text class="b" x="275" y="171">504</text>
-  <rect class="r" x="316" y="152" width="66" height="30" rx="5"/><text class="t" x="349" y="171">505</text>
-  <rect class="r" x="390" y="152" width="66" height="30" rx="5"/><text class="t" x="423" y="171">506</text>
-  <text class="t" x="20" y="210">The Sequencer never reserves a number for a message that has not arrived,</text>
-  <text class="t" x="20" y="228">so its own sequence is gap-free no matter how long repair takes.</text>
+  <text class="b" x="4" y="122">Internal sequence: assigned only after repair</text>
+  <rect class="r" x="4" y="132" width="55" height="26" rx="4"/><text class="t" x="31" y="149" text-anchor="middle">501</text>
+  <rect class="r" x="64" y="132" width="55" height="26" rx="4"/><text class="t" x="91" y="149" text-anchor="middle">502</text>
+  <rect class="r" x="124" y="132" width="55" height="26" rx="4"/><text class="t" x="151" y="149" text-anchor="middle">503</text>
+  <rect class="m" x="184" y="132" width="55" height="26" rx="4"/><text class="b" x="211" y="149" text-anchor="middle">504</text>
+  <rect class="r" x="244" y="132" width="55" height="26" rx="4"/><text class="t" x="271" y="149" text-anchor="middle">505</text>
+  <rect class="r" x="304" y="132" width="55" height="26" rx="4"/><text class="t" x="331" y="149" text-anchor="middle">506</text>
+  <text class="t" x="4" y="182">The Sequencer never reserves a number for a</text>
+  <text class="t" x="4" y="198">message that has not arrived, so its own</text>
+  <text class="t" x="4" y="214">sequence is gap-free no matter how long repair takes.</text>
 </svg>
 ```
 
@@ -9745,33 +8601,33 @@ How do you check one track against 35 million stored segments without burning 2,
 The stage 1 correctness argument is short and it is the whole reason this is safe to run sloppy-first: a real effort requires a complete traversal, a complete traversal necessarily passes through the segment's start point, and the start point therefore falls within the corridor width of some track point. So the cell index can shrink 35 million to 9,800 candidates without ever discarding a genuine match.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 260" role="img" aria-label="The funnel narrows 35 million segments to 22 confirmed efforts across four stages, each cheaper than the last">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img" aria-label="The funnel narrows 35 million segments to 22 confirmed efforts across four stages, each cheaper than the last">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
     .fill{fill:currentColor;fill-opacity:.10}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Candidates surviving each stage (log scale, not to scale below ~1k)</text>
+  <text class="lbl" x="4" y="14">Candidates surviving each stage (log scale)</text>
 
-  <rect class="bar fill" x="20" y="40" width="700" height="28" rx="5"/>
-  <text class="sub" x="30" y="54">Stage 0 · every segment</text><text class="sub" x="710" y="54" text-anchor="end">35,000,000</text>
+  <text class="sub" x="4" y="34">Stage 0 · every segment</text><text class="sub" x="396" y="34" text-anchor="end">35,000,000</text>
+  <rect class="bar fill" x="4" y="40" width="384" height="14" rx="4"/>
 
-  <rect class="bar fill" x="20" y="82" width="200" height="28" rx="5"/>
-  <text class="sub" x="30" y="96">Stage 1 · S2 cell prefilter, ~3ms</text><text class="sub" x="230" y="96">~9,800</text>
+  <text class="sub" x="4" y="74">Stage 1 · S2 cell prefilter, ~3ms</text><text class="sub" x="396" y="74" text-anchor="end">~9,800</text>
+  <rect class="bar fill" x="4" y="80" width="110" height="14" rx="4"/>
 
-  <rect class="bar fill" x="20" y="124" width="80" height="28" rx="5"/>
-  <text class="sub" x="30" y="138">Stage 2 · bbox reject, ~1ms</text><text class="sub" x="110" y="138">~1,200</text>
+  <text class="sub" x="4" y="114">Stage 2 · bbox reject, ~1ms</text><text class="sub" x="396" y="114" text-anchor="end">~1,200</text>
+  <rect class="bar fill" x="4" y="120" width="44" height="14" rx="4"/>
 
-  <rect class="bar fill" x="20" y="166" width="30" height="28" rx="5"/>
-  <text class="sub" x="30" y="180" text-anchor="start" dx="0">Stage 3 · corridor test, ~20ms</text><text class="sub" x="60" y="180">~50</text>
+  <text class="sub" x="4" y="154">Stage 3 · corridor test, ~20ms</text><text class="sub" x="396" y="154" text-anchor="end">~50</text>
+  <rect class="bar fill" x="4" y="160" width="17" height="14" rx="4"/>
 
-  <rect class="bar fillacc" x="20" y="208" width="16" height="28" rx="5"/>
-  <text class="lbl" x="46" y="222">Stage 4 · ordered map-match, ~30ms → 22 efforts</text>
+  <text class="sub" x="4" y="194">Stage 4 · map-match, ~30ms</text><text class="sub" x="396" y="194" text-anchor="end">22 efforts</text>
+  <rect class="bar fillacc" x="4" y="200" width="9" height="14" rx="4"/>
 
-  <text class="sub" x="20" y="252">Total ~55ms p50 per upload, against ~35s for a full scan: a ~640x reduction</text>
+  <text class="sub" x="4" y="234">Total ~55ms p50 per upload,</text>
+  <text class="sub" x="4" y="250">against ~35s for a full scan: a ~640x reduction</text>
 </svg>
 ```
 
@@ -9789,34 +8645,34 @@ Once a segment is a candidate, what actually decides whether the athlete travers
 **Great: walk the segment's vertices in order against a cursor into the track that only ever advances.** For each vertex, scan forward from the cursor for the nearest track point within the corridor; if none appears within a bounded look-ahead, the candidate fails outright. Direction falls out for free: a ride on the opposite carriageway generates matching points in descending index order, so the cursor never advances and the walk simply fails, with no separate heading calculation needed. A maximum gap between consecutive matched positions kills the junction case, because a track that crosses the segment, leaves, and returns twenty minutes later cannot be stitched into one contiguous effort.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 240" role="img" aria-label="A junction crossing and an opposite-carriageway ride are both near the segment but neither advances the ordered cursor">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img" aria-label="A junction crossing and an opposite-carriageway ride are both near the segment but neither advances the ordered cursor">
   <defs><marker id="ahm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
   <style>
     .seg{fill:none;stroke:var(--accent);stroke-width:3}
-    .trk{fill:none;stroke:currentColor;stroke-width:1.6;marker-end:url(#ahm)}
+    .trk{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ahm)}
     .dot{fill:currentColor}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
 
-  <text class="lbl" x="20" y="20">A: crosses at a junction, never matches</text>
-  <line class="seg" x1="40" y1="60" x2="280" y2="60"/>
-  <path class="trk" d="M160,10 L160,58"/>
-  <path class="trk" d="M160,62 L160,110"/>
-  <text class="sub" x="290" y="64">segment</text>
-  <text class="sub" x="80" y="45">cursor never sees consecutive segment vertices near the track</text>
+  <text class="lbl" x="4" y="14">A: crosses at a junction, never matches</text>
+  <line class="seg" x1="20" y1="50" x2="280" y2="50"/>
+  <path class="trk" d="M150,20 L150,48"/>
+  <path class="trk" d="M150,52 L150,80"/>
+  <text class="sub" x="290" y="53">segment</text>
+  <text class="sub" x="4" y="96">cursor never sees consecutive segment vertices near the track</text>
 
-  <text class="lbl" x="380" y="20">B: opposite carriageway, close but reversed</text>
-  <line class="seg" x1="400" y1="60" x2="700" y2="60"/>
-  <path class="trk" d="M700,80 L400,80"/>
-  <text class="sub" x="400" y="105">track runs right to left; segment vertices run left to right</text>
-  <text class="sub" x="400" y="122">cursor index would need to go backwards: walk fails</text>
+  <text class="lbl" x="4" y="122">B: opposite carriageway, close but reversed</text>
+  <line class="seg" x1="20" y1="155" x2="280" y2="155"/>
+  <path class="trk" d="M280,172 L20,172"/>
+  <text class="sub" x="4" y="196">track runs right to left; segment vertices run left to right</text>
+  <text class="sub" x="4" y="212">cursor index would need to go backwards: walk fails</text>
 
-  <text class="lbl" x="20" y="170">C: a real effort, cursor only ever advances</text>
-  <line class="seg" x1="40" y1="210" x2="280" y2="210"/>
-  <path class="trk" d="M40,208 L280,208"/>
-  <circle class="dot" cx="90" cy="209" r="3"/><circle class="dot" cx="150" cy="209" r="3"/><circle class="dot" cx="210" cy="209" r="3"/><circle class="dot" cx="260" cy="209" r="3"/>
-  <text class="sub" x="300" y="213">each vertex matched at a higher track index than the last</text>
+  <text class="lbl" x="4" y="238">C: a real effort, cursor only ever advances</text>
+  <line class="seg" x1="20" y1="270" x2="280" y2="270"/>
+  <path class="trk" d="M20,268 L280,268"/>
+  <circle class="dot" cx="60" cy="269" r="3"/><circle class="dot" cx="120" cy="269" r="3"/><circle class="dot" cx="180" cy="269" r="3"/><circle class="dot" cx="240" cy="269" r="3"/>
+  <text class="sub" x="4" y="292">each vertex matched at a higher track index than the last</text>
 </svg>
 ```
 
@@ -9860,25 +8716,25 @@ An athlete wants their morning ride visible without revealing their front door. 
 **Great: truncate by distance travelled along the path, add a uniform random extra distance, and snap the cut point to a road junction other athletes also use.** No visible endpoint carries a fixed radial relationship to the house any more, and the cut lands somewhere plausibly shared rather than somewhere unique to one address.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="A fixed radius leaves every endpoint on a circle around home; path truncation to a shared junction does not">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 320" role="img" aria-label="A fixed radius leaves every endpoint on a circle around home; path truncation to a shared junction does not">
   <style>
     .home{fill:var(--accent)}
     .pt{fill:currentColor}
     .ring{fill:none;stroke:currentColor;stroke-width:1.2;stroke-dasharray:4 3;opacity:.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Fixed radius: every endpoint on one circle</text>
-  <circle class="home" cx="150" cy="110" r="4"/>
-  <circle class="ring" cx="150" cy="110" r="70"/>
-  <circle class="pt" cx="220" cy="110" r="3"/><circle class="pt" cx="105" cy="45" r="3"/><circle class="pt" cx="95" cy="175" r="3"/><circle class="pt" cx="215" cy="60" r="3"/>
-  <text class="sub" x="150" y="205">three points fit the circle; the circle's centre is home</text>
+  <text class="lbl" x="4" y="14">Fixed radius: every endpoint on one circle</text>
+  <circle class="home" cx="150" cy="95" r="4"/>
+  <circle class="ring" cx="150" cy="95" r="60"/>
+  <circle class="pt" cx="210" cy="95" r="3"/><circle class="pt" cx="115" cy="42" r="3"/><circle class="pt" cx="105" cy="148" r="3"/><circle class="pt" cx="195" cy="52" r="3"/>
+  <text class="sub" x="4" y="172">three points fit the circle; the circle's centre is home</text>
 
-  <text class="lbl" x="400" y="20">Path truncation to a shared junction</text>
-  <circle class="home" cx="530" cy="110" r="4"/>
-  <circle class="pt" cx="600" cy="95" r="3"/><circle class="pt" cx="600" cy="95" r="3"/>
-  <circle class="pt" cx="595" cy="130" r="3"/><circle class="pt" cx="600" cy="95" r="3"/>
-  <text class="sub" x="400" y="205">endpoints cluster at a junction many athletes share, not at home</text>
+  <text class="lbl" x="4" y="204">Path truncation to a shared junction</text>
+  <circle class="home" cx="150" cy="255" r="4"/>
+  <circle class="pt" cx="230" cy="240" r="3"/><circle class="pt" cx="232" cy="238" r="3"/>
+  <circle class="pt" cx="228" cy="268" r="3"/><circle class="pt" cx="234" cy="242" r="3"/>
+  <text class="sub" x="4" y="300">endpoints cluster at a junction many athletes share, not at home</text>
 </svg>
 ```
 
@@ -9994,29 +8850,29 @@ How do you check one record against 300 million others without an impossible num
 **Great: group cheaply on a shared key, then score only within a group.** Records sharing a normalised key, the first three title tokens, a folded author surname, a language, fall into a block. Within a block of typically four records, score every pair on weighted evidence: a shared ISBN, title similarity after normalisation, author match after transliteration folding, page count and year within tolerance. Above 0.92, auto-merge. Between 0.75 and 0.92, a human moderator decides. Below that, a new work.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="Blocking groups 300 million records into roughly 80 million small blocks, cutting comparisons from 4.5 times 10 to the 16 down to about 500 million">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Blocking groups 300 million records into roughly 80 million small blocks, cutting comparisons from 4.5 times 10 to the 16 down to about 500 million">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
     .fill{fill:currentColor;fill-opacity:.1}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">300M records, ungrouped</text>
-  <rect class="bar fill" x="20" y="32" width="700" height="28" rx="5"/>
-  <text class="sub" x="30" y="46">every record compared to every other: 4.5 × 10¹⁶ pairs</text>
+  <text class="lbl" x="4" y="14">300M records, ungrouped</text>
+  <rect class="bar fill" x="4" y="22" width="384" height="24" rx="4"/>
+  <text class="sub" x="12" y="38">every record vs every other: 4.5 × 10¹⁶ pairs</text>
 
-  <text class="lbl" x="20" y="90">Blocked by (title tokens, author surname, language)</text>
-  <rect class="bar" x="20" y="102" width="60" height="26" rx="4"/><text class="sub" x="50" y="116">4</text>
-  <rect class="bar" x="90" y="102" width="60" height="26" rx="4"/><text class="sub" x="120" y="116">3</text>
-  <rect class="bar" x="160" y="102" width="60" height="26" rx="4"/><text class="sub" x="190" y="116">5</text>
-  <rect class="bar" x="230" y="102" width="60" height="26" rx="4"/><text class="sub" x="260" y="116">2</text>
-  <text class="sub" x="310" y="116">~80M blocks like these, most with 3-5 members</text>
+  <text class="lbl" x="4" y="80">Blocked by (title tokens, author surname, language)</text>
+  <rect class="bar" x="4" y="90" width="34" height="22" rx="4"/><text class="sub" x="21" y="105" text-anchor="middle">4</text>
+  <rect class="bar" x="44" y="90" width="34" height="22" rx="4"/><text class="sub" x="61" y="105" text-anchor="middle">3</text>
+  <rect class="bar" x="84" y="90" width="34" height="22" rx="4"/><text class="sub" x="101" y="105" text-anchor="middle">5</text>
+  <rect class="bar" x="124" y="90" width="34" height="22" rx="4"/><text class="sub" x="141" y="105" text-anchor="middle">2</text>
+  <text class="sub" x="4" y="130">~80M blocks like these, most with 3-5 members</text>
 
-  <rect class="bar fillacc" x="20" y="150" width="40" height="26" rx="4"/>
-  <text class="lbl" x="70" y="163">Only pairs inside a block are scored: ~500M total</text>
-  <text class="sub" x="20" y="195">eight orders of magnitude fewer than the ungrouped count, minutes of wall clock</text>
+  <rect class="bar fillacc" x="4" y="150" width="22" height="22" rx="4"/>
+  <text class="lbl" x="34" y="165">Only pairs inside a block scored: ~500M total</text>
+  <text class="sub" x="4" y="192">eight orders of magnitude fewer than the</text>
+  <text class="sub" x="4" y="208">ungrouped count; minutes of wall clock</text>
 </svg>
 ```
 
@@ -10062,23 +8918,23 @@ Shelvings has to answer "what are my shelves" and, more rarely, "who shelved thi
 **Great: partition by `user_id`, and keep the book side as counters only.** Even a reader with 30,000 books produces a partition of a few megabytes, comfortably small. The book side gets a per-edition counter for "1.2 million people want to read this", not a member list. Anything that genuinely needs the book-side view, co-occurrence for the recommender, a bulk export, reads a nightly columnar dump instead of the live serving path.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="A user partition stays a few megabytes even at 30,000 books; a book partition can reach hundreds of megabytes at 5 million shelvings">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="A user partition stays a few megabytes even at 30,000 books; a book partition can reach hundreds of megabytes at 5 million shelvings">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="24">Partitioned by user_id: a 30,000-book reader</text>
-  <rect class="bar" x="20" y="36" width="6" height="26" rx="2"/>
-  <text class="sub" x="34" y="49">~3.6MB, one partition, comfortably small</text>
+  <text class="lbl" x="4" y="16">Partitioned by user_id: a 30,000-book reader</text>
+  <rect class="bar" x="4" y="26" width="4" height="22" rx="2"/>
+  <text class="sub" x="14" y="41">~3.6MB, one partition, comfortably small</text>
 
-  <text class="lbl" x="20" y="100">Partitioned by edition_id: the most-shelved book</text>
-  <rect class="bar fillacc" x="20" y="112" width="700" height="26" rx="2"/>
-  <text class="sub" x="30" y="126">~5,000,000 shelvings, ~600MB in one partition, nothing reads it whole</text>
+  <text class="lbl" x="4" y="80">Partitioned by edition_id: the most-shelved book</text>
+  <rect class="bar fillacc" x="4" y="90" width="384" height="22" rx="2"/>
+  <text class="sub" x="10" y="105">~5,000,000 shelvings, ~600MB, nothing reads it whole</text>
 
-  <text class="sub" x="20" y="170">six orders of magnitude apart on the same table, solved by choosing one side and holding the other as counters</text>
+  <text class="sub" x="4" y="146">six orders of magnitude apart on the same table,</text>
+  <text class="sub" x="4" y="162">solved by choosing one side, holding the other as counters</text>
 </svg>
 ```
 
@@ -10205,20 +9061,22 @@ Why does a fleet sized from parameter count and FLOPs run out of capacity at a t
 **Great: compute bytes of KV per token exactly, and treat concurrency as a division.** 2 × layers × KV heads × head dimension × dtype size gives ~320KB per token on this model. A request's KV footprint is that number times its context length, and the pool's concurrency ceiling is simply its size divided by that footprint.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" role="img" aria-label="KV memory per sequence grows with context length, so concurrency on a fixed pool falls thirty-fold from 1.1k to 32k tokens">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="KV memory per sequence grows with context length, so concurrency on a fixed pool falls thirty-fold from 1.1k to 32k tokens">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">KV cost per sequence, and concurrency on a ~452GB pool</text>
-  <rect class="bar" x="20" y="40" width="10" height="26" rx="3"/><text class="sub" x="40" y="53">1.1k tokens: ~350MB → ~1,290 sequences</text>
-  <rect class="bar" x="20" y="76" width="74" height="26" rx="3"/><text class="sub" x="104" y="89">8k tokens: ~2.6GB → ~173 sequences</text>
-  <rect class="bar fillacc" x="20" y="112" width="300" height="26" rx="3"/><text class="sub" x="330" y="125">32k tokens: ~10.5GB → ~43 sequences</text>
-  <text class="sub" x="20" y="170">same 8 GPUs, same weights, thirty times fewer concurrent users,</text>
-  <text class="sub" x="20" y="188">purely because the requests got longer</text>
+  <text class="lbl" x="4" y="14">KV cost per sequence, concurrency on a ~452GB pool</text>
+  <text class="sub" x="4" y="34">1.1k tokens: ~350MB → ~1,290 sequences</text>
+  <rect class="bar" x="4" y="40" width="6" height="20" rx="3"/>
+  <text class="sub" x="4" y="72">8k tokens: ~2.6GB → ~173 sequences</text>
+  <rect class="bar" x="4" y="78" width="40" height="20" rx="3"/>
+  <text class="sub" x="4" y="110">32k tokens: ~10.5GB → ~43 sequences</text>
+  <rect class="bar fillacc" x="4" y="116" width="160" height="20" rx="3"/>
+  <text class="sub" x="4" y="164">same 8 GPUs, same weights, thirty times fewer</text>
+  <text class="sub" x="4" y="180">concurrent users, purely because requests got longer</text>
 </svg>
 ```
 
@@ -10236,26 +9094,26 @@ The naive allocator reserves a flat buffer per sequence up front. Why does that 
 **Great: split KV into fixed 16-token blocks with a per-sequence block table, and let the attention kernel gather across them.** This is PagedAttention: virtual memory for attention. A sequence holds only the blocks it has actually generated, rounded up to 16 tokens, so external fragmentation disappears because every block is the same size, and internal fragmentation is bounded at 15 wasted tokens, under 1.5% of a typical sequence.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="A contiguous reservation wastes most of its space and cannot fill a fragmented hole; fixed blocks are allocated only as needed and never fragment externally">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="A contiguous reservation wastes most of its space and cannot fill a fragmented hole; fixed blocks are allocated only as needed and never fragment externally">
   <style>
-    .used{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.4}
-    .waste{fill:currentColor;fill-opacity:.06;stroke:currentColor;stroke-opacity:.4;stroke-width:1.2;stroke-dasharray:4 3}
-    .block{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.4}
-    .free{fill:none;stroke:currentColor;stroke-opacity:.4;stroke-width:1.2}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .used{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.2}
+    .waste{fill:currentColor;fill-opacity:.06;stroke:currentColor;stroke-opacity:.4;stroke-width:1;stroke-dasharray:4 3}
+    .block{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.2}
+    .free{fill:none;stroke:currentColor;stroke-opacity:.4;stroke-width:1}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Contiguous reservation: max_tokens=8192, 40 generated</text>
-  <rect class="used" x="20" y="34" width="4" height="26"/><rect class="waste" x="24" y="34" width="716" height="26"/>
-  <text class="sub" x="740" y="80" text-anchor="end">2.6GB reserved, 13MB used, the rest unusable by anyone else</text>
+  <text class="lbl" x="4" y="14">Contiguous reservation: max_tokens=8192, 40 generated</text>
+  <rect class="used" x="4" y="24" width="2" height="24"/><rect class="waste" x="6" y="24" width="378" height="24"/>
+  <text class="sub" x="4" y="66">2.6GB reserved, 13MB used, unusable by anyone else</text>
 
-  <text class="lbl" x="20" y="120">Paged: 16-token blocks, allocated as generated</text>
-  <rect class="block" x="20" y="134" width="24" height="26" rx="3"/>
-  <rect class="block" x="48" y="134" width="24" height="26" rx="3"/>
-  <rect class="block" x="76" y="134" width="24" height="26" rx="3"/>
-  <rect class="free" x="108" y="134" width="612" height="26" rx="3" stroke-dasharray="4 3"/>
-  <text class="sub" x="740" y="180" text-anchor="end">3 blocks held (48 tokens of room for 40 used), the rest free for any sequence</text>
+  <text class="lbl" x="4" y="100">Paged: 16-token blocks, allocated as generated</text>
+  <rect class="block" x="4" y="110" width="20" height="24" rx="3"/>
+  <rect class="block" x="28" y="110" width="20" height="24" rx="3"/>
+  <rect class="block" x="52" y="110" width="20" height="24" rx="3"/>
+  <rect class="free" x="76" y="110" width="308" height="24" rx="3" stroke-dasharray="4 3"/>
+  <text class="sub" x="4" y="152">3 blocks held (48 tokens of room for 40 used),</text>
+  <text class="sub" x="4" y="168">the rest free for any sequence</text>
 </svg>
 ```
 
@@ -10409,22 +9267,22 @@ Fifty billion documents will never fit on one machine. What is the actual axis t
 The price of document partitioning is fan-out itself: every machine in the fleet participates in every query, so capacity scales with queries-per-second times shard count, not with queries-per-second alone. That is a real, bounded cost. The network cost of term partitioning is not bounded at all; it grows with the size of the lists a query happens to need combined, and the worst lists are the most common words in the language.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Term partitioning ships a huge posting list across the network per query; document partitioning ships only a small results list, but from every shard">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Term partitioning ships a huge posting list across the network per query; document partitioning ships only a small results list, but from every shard">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="24">Term partitioning: ship the posting list, ~180MB, to intersect it</text>
-  <rect class="bar" x="20" y="38" width="700" height="26" rx="4"/>
-  <text class="sub" x="30" y="52">a few machines touched, but a huge payload moves between them every query</text>
+  <text class="lbl" x="4" y="14">Term partitioning: ship the posting list, ~180MB</text>
+  <rect class="bar" x="4" y="22" width="384" height="22" rx="4"/>
+  <text class="sub" x="10" y="38">a few machines, but a huge payload moves every query</text>
 
-  <text class="lbl" x="20" y="100">Document partitioning: ship only the top 20 from every shard</text>
-  <rect class="bar fillacc" x="20" y="114" width="4" height="26" rx="2"/>
-  <text class="sub" x="34" y="128">~800 bytes per shard, but all 1,000 shards are touched every query</text>
-  <text class="sub" x="20" y="165">document partitioning trades an unbounded network cost for a bounded fan-out cost</text>
+  <text class="lbl" x="4" y="82">Document partitioning: top 20 from every shard</text>
+  <rect class="bar fillacc" x="4" y="90" width="3" height="22" rx="2"/>
+  <text class="sub" x="14" y="106">~800 bytes per shard, but all 1,000 shards touched</text>
+  <text class="sub" x="4" y="148">document partitioning trades an unbounded network</text>
+  <text class="sub" x="4" y="164">cost for a bounded fan-out cost</text>
 </svg>
 ```
 
@@ -10440,27 +9298,26 @@ The price of document partitioning is fan-out itself: every machine in the fleet
 **Great: keep the disjunctive candidate set, but prove most of it cannot win before scoring it.** At index time, store each term's maximum possible score contribution to any document. At query time, track the current 20th-best score as a threshold and walk cursors sorted by document id, summing upper bounds; the first document where that running sum could still beat the threshold becomes a pivot, and everything before it is provably unable to win and is skipped without being read. This is WAND, refined by block-max scoring at 128-posting granularity so the bound is tight locally rather than over an entire list.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Cursors advance by document id; documents before the pivot cannot beat the current threshold and are skipped without being scored">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240" role="img" aria-label="Cursors advance by document id; documents before the pivot cannot beat the current threshold and are skipped without being scored">
   <style>
     .lane{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .doc{fill:currentColor;fill-opacity:.15;stroke:currentColor;stroke-opacity:.5;stroke-width:1.2}
     .skip{fill:currentColor;fill-opacity:.04;stroke:currentColor;stroke-opacity:.25;stroke-width:1;stroke-dasharray:3 3}
-    .pivot{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.8}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .pivot{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.6}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">coffee, shops, brooklyn cursors, sorted by doc id</text>
-  <rect class="lane" x="20" y="34" width="700" height="28" rx="5"/>
-  <rect class="skip" x="24" y="34" width="380" height="28" rx="4"/>
-  <text class="sub" x="200" y="48">skipped: summed upper bounds here can never reach θ</text>
-  <rect class="pivot" x="410" y="30" width="60" height="36" rx="5"/>
-  <text class="sub" x="440" y="80">pivot doc</text>
-  <rect class="doc" x="480" y="34" width="230" height="28" rx="4"/>
-  <text class="sub" x="595" y="48">fully scored, ~5,000 of 750,000</text>
-  <text class="sub" x="20" y="120">θ = current 20th-best score, updated as documents are scored</text>
-  <text class="sub" x="20" y="140">result: same count as strict intersection, but drawn from the whole union,</text>
-  <text class="sub" x="20" y="158">so strong two-term matches survive and weak three-term ones are dropped</text>
+  <text class="lbl" x="4" y="14">coffee, shops, brooklyn cursors, sorted by doc id</text>
+  <rect class="lane" x="4" y="26" width="384" height="26" rx="5"/>
+  <rect class="skip" x="6" y="26" width="200" height="26" rx="4"/>
+  <rect class="pivot" x="212" y="23" width="34" height="32" rx="5"/>
+  <rect class="doc" x="252" y="26" width="130" height="26" rx="4"/>
+  <text class="sub" x="4" y="70">skipped: summed upper bounds here can never reach θ</text>
+  <text class="sub" x="4" y="86">pivot doc, then fully scored: ~5,000 of 750,000</text>
+  <text class="sub" x="4" y="116">θ = current 20th-best score, updated as documents are scored</text>
+  <text class="sub" x="4" y="140">result: same count as strict intersection, but drawn from</text>
+  <text class="sub" x="4" y="156">the whole union, so strong two-term matches survive and</text>
+  <text class="sub" x="4" y="172">weak three-term ones are dropped</text>
 </svg>
 ```
 
@@ -10613,23 +9470,22 @@ The textbook answers to contended writes both exist for a reason. Why do both fa
 **Great: classify each SKU by measured heat and route it to a matching lane.** A conditional update handles the cold 99.99% of the catalogue with no read-then-write step at all, so there is nothing to livelock. Stock split across 32 bucket rows handles the warm middle. A per-SKU log with one consumer handles the genuinely hot handful, serialising writers without making any of them wait on a lock.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="A cold conditional update, a warm 32-bucket split, and a hot single-consumer log each match their lane's write rate; only the log keeps up at 8,000 a second">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A cold conditional update, a warm 32-bucket split, and a hot single-consumer log each match their lane's write rate; only the log keeps up at 8,000 a second">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Cold: one row, &lt;50 reserves/s, one conditional update</text>
-  <rect class="bar" x="20" y="32" width="12" height="24" rx="3"/>
+  <text class="lbl" x="4" y="16">Cold: one row, &lt;50 reserves/s, one conditional update</text>
+  <rect class="bar" x="4" y="24" width="7" height="20" rx="3"/>
 
-  <text class="lbl" x="20" y="80">Warm: 50-1,000/s, split 32 ways, ~31/s per bucket</text>
-  <rect class="bar" x="20" y="92" width="90" height="24" rx="3"/>
+  <text class="lbl" x="4" y="76">Warm: 50-1,000/s, split 32 ways, ~31/s per bucket</text>
+  <rect class="bar" x="4" y="84" width="48" height="20" rx="3"/>
 
-  <text class="lbl" x="20" y="140">Hot: &gt;1,000/s, single consumer at ~50,000 decrements/s</text>
-  <rect class="bar fillacc" x="20" y="152" width="700" height="24" rx="3"/>
-  <text class="sub" x="380" y="168" text-anchor="middle">arrival rate at T+0, ~8,000/s, sits well inside this ceiling</text>
+  <text class="lbl" x="4" y="136">Hot: &gt;1,000/s, single consumer at ~50,000/s</text>
+  <rect class="bar fillacc" x="4" y="144" width="384" height="20" rx="3"/>
+  <text class="sub" x="4" y="180">arrival rate at T+0, ~8,000/s, sits well inside this ceiling</text>
 </svg>
 ```
 
@@ -10647,30 +9503,41 @@ Splitting one hot row into 32 bucket rows fixes contention. What does it break a
 **Great: merge the buckets back into one row once the total falls below a threshold, and promote the SKU to the hot lane.** When `total_remaining < 2N`, a coordinator takes a brief exclusive window across all 32 rows, sums them into one row, and hands the SKU to serialised handling for its final units.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 160" role="img" aria-label="With 5 units spread across 32 buckets, 27 are empty; most buyers land on an empty bucket while stock still exists elsewhere in the row">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 170" role="img" aria-label="With 5 units spread across 32 buckets, 27 are empty; most buyers land on an empty bucket while stock still exists elsewhere in the row">
   <style>
-    .full{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.4}
+    .full{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.2}
     .empty{fill:none;stroke:currentColor;stroke-opacity:.3;stroke-width:1}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">32 buckets, 5 units remaining</text>
-  <g transform="translate(20,32)">
-    <rect class="full" x="0" y="0" width="18" height="18" rx="2"/>
-    <rect class="full" x="150" y="0" width="18" height="18" rx="2"/>
-    <rect class="full" x="330" y="0" width="18" height="18" rx="2"/>
-    <rect class="full" x="480" y="0" width="18" height="18" rx="2"/>
-    <rect class="full" x="620" y="0" width="18" height="18" rx="2"/>
+  <text class="lbl" x="4" y="14">32 buckets, 5 units remaining</text>
+  <g transform="translate(4,24)">
+    <rect class="full" x="0" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="11" y="0" width="9" height="18" rx="2"/><rect class="empty" x="22" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="33" y="0" width="9" height="18" rx="2"/><rect class="empty" x="44" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="55" y="0" width="9" height="18" rx="2"/><rect class="empty" x="66" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="77" y="0" width="9" height="18" rx="2"/>
+    <rect class="full" x="88" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="99" y="0" width="9" height="18" rx="2"/><rect class="empty" x="110" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="121" y="0" width="9" height="18" rx="2"/><rect class="empty" x="132" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="143" y="0" width="9" height="18" rx="2"/><rect class="empty" x="154" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="165" y="0" width="9" height="18" rx="2"/><rect class="empty" x="176" y="0" width="9" height="18" rx="2"/>
+    <rect class="full" x="187" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="198" y="0" width="9" height="18" rx="2"/><rect class="empty" x="209" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="220" y="0" width="9" height="18" rx="2"/><rect class="empty" x="231" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="242" y="0" width="9" height="18" rx="2"/><rect class="empty" x="253" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="264" y="0" width="9" height="18" rx="2"/>
+    <rect class="full" x="275" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="286" y="0" width="9" height="18" rx="2"/><rect class="empty" x="297" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="308" y="0" width="9" height="18" rx="2"/><rect class="empty" x="319" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="330" y="0" width="9" height="18" rx="2"/><rect class="empty" x="341" y="0" width="9" height="18" rx="2"/>
+    <rect class="empty" x="352" y="0" width="9" height="18" rx="2"/>
+    <rect class="full" x="363" y="0" width="9" height="18" rx="2"/>
   </g>
-  <g transform="translate(20,32)" fill="none">
-    <rect class="empty" x="22" y="0" width="18" height="18" rx="2"/><rect class="empty" x="44" y="0" width="18" height="18" rx="2"/>
-    <rect class="empty" x="66" y="0" width="18" height="18" rx="2"/><rect class="empty" x="88" y="0" width="18" height="18" rx="2"/>
-    <rect class="empty" x="110" y="0" width="18" height="18" rx="2"/><rect class="empty" x="132" y="0" width="18" height="18" rx="2"/>
-    <rect class="empty" x="172" y="0" width="18" height="18" rx="2"/><rect class="empty" x="194" y="0" width="18" height="18" rx="2"/>
-    <rect class="empty" x="216" y="0" width="18" height="18" rx="2"/><rect class="empty" x="238" y="0" width="18" height="18" rx="2"/>
-  </g>
-  <text class="sub" x="20" y="76">27 of 32 buckets are empty; a buyer hashed into any of them is wrongly told sold out</text>
-  <text class="sub" x="20" y="98">merging early, at total_remaining &lt; 2N, trades a brief stall for not underselling the tail</text>
+  <text class="sub" x="4" y="66">27 of 32 buckets are empty; a buyer hashed into</text>
+  <text class="sub" x="4" y="82">any of them is wrongly told sold out</text>
+  <text class="sub" x="4" y="106">merging early, at total_remaining &lt; 2N, trades a brief</text>
+  <text class="sub" x="4" y="122">stall for not underselling the tail</text>
 </svg>
 ```
 
@@ -10810,22 +9677,21 @@ Follow one buyer from arrival through to a held seat.
 **Great: publish one shared global watermark, and let the client compute its own position.** The **Admission controller** publishes `now_serving`, roughly 20 bytes, as one cacheable object with a short TTL. Every client already knows its own sort key from its token, so it subtracts locally. Origin load falls to roughly 50 requests a second, and that number does not grow with audience size, because a million extra arrivals still read the same one object.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 160" role="img" aria-label="A per-user position endpoint scales with audience size to 300,000 requests a second; one shared watermark stays flat at about 50 origin requests a second regardless of crowd size">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 180" role="img" aria-label="A per-user position endpoint scales with audience size to 300,000 requests a second; one shared watermark stays flat at about 50 origin requests a second regardless of crowd size">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="24">Per-user position lookup: origin load scales with audience</text>
-  <rect class="bar" x="20" y="38" width="700" height="26" rx="4"/>
-  <text class="sub" x="30" y="52">1.5M clients ÷ 5s poll ≈ 300,000 origin requests a second</text>
+  <text class="lbl" x="4" y="16">Per-user position lookup: scales with audience</text>
+  <rect class="bar" x="4" y="24" width="384" height="22" rx="4"/>
+  <text class="sub" x="10" y="40">1.5M clients ÷ 5s poll ≈ 300,000 origin req/s</text>
 
-  <text class="lbl" x="20" y="100">One shared watermark: origin load is flat</text>
-  <rect class="bar fillacc" x="20" y="114" width="3" height="26" rx="2"/>
-  <text class="sub" x="30" y="128">~100 edge points of presence ÷ 2s TTL ≈ 50 origin requests a second,</text>
-  <text class="sub" x="30" y="146">the same number whether 150,000 or 15,000,000 people are waiting</text>
+  <text class="lbl" x="4" y="84">One shared watermark: origin load is flat</text>
+  <rect class="bar fillacc" x="4" y="92" width="2" height="22" rx="2"/>
+  <text class="sub" x="10" y="132">~100 edge PoPs ÷ 2s TTL ≈ 50 origin req/s,</text>
+  <text class="sub" x="10" y="148">the same whether 150k or 15M people are waiting</text>
 </svg>
 ```
 
@@ -10871,13 +9737,15 @@ How many buyers should the purchase flow admit at once, and how fast should it l
 That refill rule matters more than it looks. If admission ran on a fixed schedule while sessions ran long, say because the payment provider slowed down, the in-flow count would drift past the cap, every remaining seat would end up held by someone, and newly admitted buyers would arrive to a fully grey map, having spent the scarcest resource in the system, an admission slot, on someone who cannot buy anything. Refilling from completions makes the rate self-correct downward exactly when the funnel slows.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 150" role="img" aria-label="Little's law: a 25,000-buyer cap over a 240-second mean session gives roughly 100 admissions a second, refilled only as sessions complete"><style>.box{fill:none;stroke:currentColor;stroke-width:1.4}.fillacc{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.6}.lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}.sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}text{dominant-baseline:middle}</style>
-  <text class="lbl" x="20" y="22">C = 25,000 concurrent buyers (one venue's worth at 2.4 seats/order)</text>
-  <rect class="box" x="20" y="34" width="700" height="24" rx="4"/>
-  <text class="lbl" x="20" y="86">mean session = 240s</text>
-  <rect class="fillacc" x="20" y="98" width="180" height="24" rx="4"/>
-  <text class="sub" x="220" y="110">admission rate = 25,000 ÷ 240 ≈ 100/s</text>
-  <text class="sub" x="20" y="140">refilled by checkout completions, abandonments and TTL expiry, never by a timer</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 170" role="img" aria-label="Little's law: a 25,000-buyer cap over a 240-second mean session gives roughly 100 admissions a second, refilled only as sessions complete">
+  <style>.box{fill:none;stroke:currentColor;stroke-width:1.2}.fillacc{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}.lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}.sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}</style>
+  <text class="lbl" x="4" y="16">C = 25,000 concurrent buyers (one venue's worth)</text>
+  <rect class="box" x="4" y="24" width="384" height="22" rx="4"/>
+  <text class="lbl" x="4" y="76">mean session = 240s</text>
+  <rect class="fillacc" x="4" y="84" width="96" height="22" rx="4"/>
+  <text class="sub" x="108" y="99">admission rate = 25,000 ÷ 240 ≈ 100/s</text>
+  <text class="sub" x="4" y="140">refilled by checkout completions, abandonments</text>
+  <text class="sub" x="4" y="156">and TTL expiry, never by a timer</text>
 </svg>
 ```
 
@@ -10999,22 +9867,22 @@ An embedding finds meaning. It cannot find an error code or a ticket id. What re
 **Great: fuse by rank rather than by score, with reciprocal rank fusion.** Ignore the two scales entirely and use only each chunk's rank in each list: `score(c) = Σ 1/(60 + rank)`. A chunk ranked first by BM25 but fortieth by dense scores lower than a chunk ranked eighth by both, because agreement across two independent retrievers is stronger evidence than one spectacular rank paired with a bad one.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="A chunk ranked eighth by both retrievers outscores one ranked first by BM25 but fortieth by dense, because reciprocal rank fusion rewards agreement over any single spectacular rank">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 195" role="img" aria-label="A chunk ranked eighth by both retrievers outscores one ranked first by BM25 but fortieth by dense, because reciprocal rank fusion rewards agreement over any single spectacular rank">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Chunk A: BM25 rank 1, dense rank 40</text>
-  <rect class="bar" x="20" y="32" width="260" height="24" rx="4"/>
-  <text class="sub" x="290" y="48">1/61 + 1/100 ≈ 0.026</text>
+  <text class="lbl" x="4" y="16">Chunk A: BM25 rank 1, dense rank 40</text>
+  <rect class="bar" x="4" y="24" width="138" height="20" rx="4"/>
+  <text class="sub" x="4" y="60">1/61 + 1/100 ≈ 0.026</text>
 
-  <text class="lbl" x="20" y="90">Chunk B: BM25 rank 8, dense rank 8</text>
-  <rect class="bar fillacc" x="20" y="102" width="290" height="24" rx="4"/>
-  <text class="sub" x="320" y="118">2 × 1/68 ≈ 0.029, B wins</text>
-  <text class="sub" x="20" y="155">two moderate ranks that agree beat one spectacular rank and one bad one</text>
+  <text class="lbl" x="4" y="94">Chunk B: BM25 rank 8, dense rank 8</text>
+  <rect class="bar fillacc" x="4" y="102" width="154" height="20" rx="4"/>
+  <text class="sub" x="4" y="138">2 × 1/68 ≈ 0.029, B wins</text>
+  <text class="sub" x="4" y="164">two moderate ranks that agree beat one spectacular</text>
+  <text class="sub" x="4" y="178">rank and one bad one</text>
 </svg>
 ```
 
@@ -11034,25 +9902,27 @@ Every candidate a user cannot read must never occupy a slot meant for one they c
 That fallback matters because filtered graph search degrades exactly where it is most dangerous to degrade. A user in a twelve-person private space gets an exact scan over a few thousand chunks; a user in the all-company group gets the full filtered graph search over hundreds of millions. Neither path silently returns wrong results, only a slower one when the estimate is wrong.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 190" role="img" aria-label="Filtering after retrieval can leave a narrowly permissioned user with zero usable chunks from a hundred retrieved; filtering inside the search guarantees every candidate returned is already readable">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="Filtering after retrieval can leave a narrowly permissioned user with zero usable chunks from a hundred retrieved; filtering inside the search guarantees every candidate returned is already readable">
   <style>
-    .allow{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.4}
+    .allow{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.2}
     .deny{fill:none;stroke:currentColor;stroke-opacity:.3;stroke-width:1}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Post-filter: retrieve top 100 by relevance alone, then drop what the caller can't read</text>
-  <g transform="translate(20,32)">
-    <rect class="deny" x="0" y="0" width="700" height="20" rx="3"/>
-    <rect class="allow" x="4" y="0" width="6" height="20" rx="1"/>
+  <text class="lbl" x="4" y="14">Post-filter: retrieve top 100, then drop unreadable</text>
+  <g transform="translate(4,22)">
+    <rect class="deny" x="0" y="0" width="384" height="18" rx="3"/>
+    <rect class="allow" x="2" y="0" width="4" height="18" rx="1"/>
   </g>
-  <text class="sub" x="20" y="70">a contractor readable in 0.1% of the corpus keeps roughly 0 of the 100 retrieved</text>
+  <text class="sub" x="4" y="58">a contractor readable in 0.1% of the corpus keeps</text>
+  <text class="sub" x="4" y="74">roughly 0 of the 100 retrieved</text>
 
-  <text class="lbl" x="20" y="110">Pre-filter: the permission check runs inside the ANN and lexical search itself</text>
-  <g transform="translate(20,122)">
-    <rect class="allow" x="0" y="0" width="700" height="20" rx="3"/>
+  <text class="lbl" x="4" y="106">Pre-filter: permission check runs inside the search</text>
+  <g transform="translate(4,114)">
+    <rect class="allow" x="0" y="0" width="384" height="18" rx="3"/>
   </g>
-  <text class="sub" x="20" y="160">every one of the 100 candidates returned was already readable, whatever the caller's access looks like</text>
+  <text class="sub" x="4" y="150">every one of the 100 candidates returned was</text>
+  <text class="sub" x="4" y="166">already readable, whatever the caller's access</text>
 </svg>
 ```
 
@@ -11203,20 +10073,20 @@ A popular object's TTL expires at roughly the same instant on 200 points of pres
 **Great: cascade several cheap coalescers, and serve stale while the real fetch runs in the background.** Single-flight inside each edge server takes the count down by roughly two orders of magnitude on its own. Consistent-hashing a key to one owning server per point of presence, then coalescing again at the mid-tier and again at the origin shield, folds the remaining fan-out down step by step: **1,000,000 → roughly 12,800 → 200 → 20 → 1**. Stale-while-revalidate means every one of those million waiting requests gets the old, still-useful copy immediately, while exactly one real fetch runs in the background.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 230" role="img" aria-label="A million concurrent origin requests collapse through four coalescing stages to a single real fetch, log scale" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240" role="img" aria-label="A million concurrent origin requests collapse through four coalescing stages to a single real fetch, log scale">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <rect class="bar" x="20" y="20" width="700" height="26" rx="4"/><text class="sub" x="30" y="34">requests wanting a fetch: 1,000,000</text>
-  <rect class="bar" x="20" y="58" width="180" height="26" rx="4"/><text class="sub" x="30" y="72">per-server single-flight: ~12,800</text>
-  <rect class="bar" x="20" y="96" width="60" height="26" rx="4"/><text class="sub" x="30" y="110">per-PoP key ownership: 200</text>
-  <rect class="bar" x="20" y="134" width="18" height="26" rx="4"/><text class="sub" x="30" y="148">mid-tier coalescing: 20</text>
-  <rect class="bar fillacc" x="20" y="172" width="4" height="26" rx="2"/><text class="lbl" x="30" y="186">origin shield: 1 real fetch, ~270ms</text>
-  <text class="sub" x="20" y="215">every one of the million waiting requests is served the stale copy meanwhile, at zero added latency</text>
+  <rect class="bar" x="4" y="10" width="384" height="22" rx="4"/><text class="sub" x="10" y="25">requests wanting a fetch: 1,000,000</text>
+  <rect class="bar" x="4" y="42" width="98" height="22" rx="4"/><text class="sub" x="10" y="57">per-server single-flight: ~12,800</text>
+  <rect class="bar" x="4" y="74" width="33" height="22" rx="4"/><text class="sub" x="10" y="89">per-PoP key ownership: 200</text>
+  <rect class="bar" x="4" y="106" width="10" height="22" rx="4"/><text class="sub" x="10" y="121">mid-tier coalescing: 20</text>
+  <rect class="bar fillacc" x="4" y="138" width="2" height="22" rx="2"/><text class="lbl" x="10" y="153">origin shield: 1 fetch, ~270ms</text>
+  <text class="sub" x="4" y="188">every one of the million waiting requests is</text>
+  <text class="sub" x="4" y="204">served stale meanwhile, at zero added latency</text>
 </svg>
 ```
 
@@ -11258,21 +10128,23 @@ Two properties are what make this safe without acknowledgements at all: the oper
 **Great: store the tag's generation at fetch time on every cached object, and purge by bumping one counter.** The **Tag generation table** holds one counter per tag, globally replicated. Purging a tag is a single, tiny write, roughly 40 bytes, pushed everywhere. On the next read, a server compares the generation stored on the cached object against the current generation for that tag, and any mismatch is treated as a miss.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="Each cached object records the tag generation at fetch time; bumping the global counter for a tag makes every stale object miss on its next read, with no enumeration" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="Each cached object records the tag generation at fetch time; bumping the global counter for a tag makes every stale object miss on its next read, with no enumeration">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .box{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="20" y="20">Objects, each stamped with the tag generation at fetch time</text>
-  <rect class="box" x="20" y="34" width="140" height="30" rx="5"/><text class="sub" x="90" y="52">obj A · gen 7</text>
-  <rect class="box" x="180" y="34" width="140" height="30" rx="5"/><text class="sub" x="250" y="52">obj B · gen 7</text>
-  <rect class="box" x="340" y="34" width="140" height="30" rx="5"/><text class="sub" x="410" y="52">obj C · gen 7</text>
-  <text class="sub" x="20" y="88">purge tag "product-1234": one counter bump, ~40B, pushed everywhere</text>
-  <rect class="box fillacc" x="20" y="100" width="180" height="30" rx="5"/><text class="lbl" x="110" y="118">tag "product-1234" → gen 8</text>
-  <text class="sub" x="20" y="150">on next read: object gen 7 &lt; tag gen 8 → treated as a miss, no scan, no enumeration</text>
+  <text class="lbl" x="4" y="14" text-anchor="start">Objects, stamped with tag generation at fetch time</text>
+  <rect class="box" x="4" y="24" width="120" height="28" rx="5"/><text class="sub" x="64" y="40">obj A · gen 7</text>
+  <rect class="box" x="132" y="24" width="120" height="28" rx="5"/><text class="sub" x="192" y="40">obj B · gen 7</text>
+  <rect class="box" x="260" y="24" width="120" height="28" rx="5"/><text class="sub" x="320" y="40">obj C · gen 7</text>
+  <text class="sub" x="4" y="76" text-anchor="start">purge tag "product-1234": one counter bump,</text>
+  <text class="sub" x="4" y="92" text-anchor="start">~40B, pushed everywhere</text>
+  <rect class="box fillacc" x="4" y="102" width="150" height="28" rx="5"/><text class="lbl" x="79" y="118">tag → gen 8</text>
+  <text class="sub" x="4" y="156" text-anchor="start">on next read: object gen 7 &lt; tag gen 8 →</text>
+  <text class="sub" x="4" y="172" text-anchor="start">treated as a miss, no scan, no enumeration</text>
 </svg>
 ```
 
@@ -11401,19 +10273,19 @@ Every verified request could, in principle, ask the issuer whether the token is 
 **Great: a self-contained token with a short lifetime, backed by a recallable handle behind it.** Verification stays local and fast. The long-lived authority moves into a refresh token, checked on every use, which happens once every several minutes per session rather than once per request, roughly a 300-fold reduction in lookup volume.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="Logins run at roughly 5,000 a second; verifications run at roughly 500,000 a second, a hundredfold gap that decides where network calls are affordable">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 180" role="img" aria-label="Logins run at roughly 5,000 a second; verifications run at roughly 500,000 a second, a hundredfold gap that decides where network calls are affordable">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Logins: ~5,000/s, can afford ~170ms and a network round trip</text>
-  <rect class="bar" x="20" y="32" width="7" height="26" rx="2"/>
-  <text class="lbl" x="20" y="90">Verifications: ~500,000/s, must be local or the design collapses</text>
-  <rect class="bar fillacc" x="20" y="102" width="700" height="26" rx="4"/>
-  <text class="sub" x="20" y="150">a network call here is not a slower version of the design, it is a different, unaffordable one</text>
+  <text class="lbl" x="4" y="16">Logins: ~5,000/s, can afford ~170ms + network</text>
+  <rect class="bar" x="4" y="24" width="4" height="22" rx="2"/>
+  <text class="lbl" x="4" y="76">Verifications: ~500,000/s, must be local</text>
+  <rect class="bar fillacc" x="4" y="84" width="384" height="22" rx="4"/>
+  <text class="sub" x="4" y="128">a network call here is not a slower version of the</text>
+  <text class="sub" x="4" y="144">design, it is a different, unaffordable one</text>
 </svg>
 ```
 
@@ -11457,22 +10329,24 @@ The refresh token is the thing that actually carries long-lived authority. What 
 **Great: rotate within a tracked family, and treat any reuse of an already-superseded token as proof of compromise.** Because a valid token is used exactly once, a second presentation of one that has already been rotated past means two parties are holding the same lineage. There is no way to tell attacker from legitimate client from that fact alone, so the safe response is to kill the entire family, forcing everyone holding any token in it to re-authenticate.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="A stolen refresh token used after the legitimate client already rotated past it triggers reuse detection, killing the whole token family" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="A stolen refresh token used after the legitimate client already rotated past it triggers reuse detection, killing the whole token family">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .box{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="20" y="20">family_id F, legitimate client rotates normally</text>
-  <rect class="box" x="20" y="32" width="140" height="28" rx="5"/><text class="sub" x="90" y="49">rotation 1 (used)</text>
-  <rect class="box" x="180" y="32" width="140" height="28" rx="5"/><text class="sub" x="250" y="49">rotation 2 (used)</text>
-  <rect class="box" x="340" y="32" width="140" height="28" rx="5"/><text class="sub" x="410" y="49">rotation 3 (current)</text>
-  <text class="lbl" x="20" y="100">attacker replays the copied rotation 1 token later</text>
-  <rect class="box fillacc" x="20" y="112" width="140" height="28" rx="5"/><text class="sub" x="90" y="129">rotation 1 presented again</text>
-  <text class="sub" x="180" y="129">→ already superseded: family F killed, both parties re-authenticate</text>
-  <text class="sub" x="20" y="165">a short grace window absorbs an honest client's lost-response retry without treating it as reuse</text>
+  <text class="lbl" x="4" y="14" text-anchor="start">family_id F, legitimate client rotates normally</text>
+  <rect class="box" x="4" y="24" width="120" height="26" rx="5"/><text class="sub" x="64" y="39">rotation 1 (used)</text>
+  <rect class="box" x="132" y="24" width="120" height="26" rx="5"/><text class="sub" x="192" y="39">rotation 2 (used)</text>
+  <rect class="box" x="260" y="24" width="120" height="26" rx="5"/><text class="sub" x="320" y="39">rotation 3 (now)</text>
+  <text class="lbl" x="4" y="78" text-anchor="start">attacker replays the copied rotation 1 token later</text>
+  <rect class="box fillacc" x="4" y="88" width="180" height="28" rx="5"/><text class="sub" x="94" y="104">rotation 1 presented again</text>
+  <text class="sub" x="4" y="136" text-anchor="start">→ already superseded: family F killed,</text>
+  <text class="sub" x="4" y="152" text-anchor="start">both parties re-authenticate</text>
+  <text class="sub" x="4" y="184" text-anchor="start">a short grace window absorbs an honest client's</text>
+  <text class="sub" x="4" y="200" text-anchor="start">lost-response retry without treating it as reuse</text>
 </svg>
 ```
 
@@ -11756,7 +10630,6 @@ Read it back through the three numbers. 1.4M distinct keys a minute and a day th
 **Why is the grid 7 × 32,768 and not 3 × 1,000,000, which is more memory?** *w* sets the error size, *d* sets the probability the bound holds. Three rows gives δ = e⁻³ ≈ 5%: one estimate in twenty is outside the bound entirely, ~1,600 candidates a minute with no guarantee. And it costs 13× the memory.
 
 **Two regions each count their own traffic. How do you produce one global list without shipping events?** Ship sealed tiles built with identical (d, w, seed) and sum them. ~917KB × 60 × 24 × 6 regions ≈ 8GB a day, against 2.1TB a day of events. Pin the seed and dimensions in every tile header; mismatched tiles still add and produce plausible garbage.
-
 ### 54. Design a CI/CD & Code Deployment System
 #### Understanding the problem
 A CI/CD system takes every commit an engineering organisation produces, builds and tests it on a shared farm, and pushes the resulting artifact into production across a large fleet, safely enough that a bad change can be undone in minutes.
@@ -11832,20 +10705,18 @@ Most of the work a build graph describes has already been done before, on some e
 **Great: key every action by a hash of its complete declared inputs, and serve the result from a content-addressed store.** The key covers the command line, the environment, every input file's digest and the toolchain's digest, so two runs only ever share a cache entry when their inputs are provably identical. At an 87% hit rate, most actions return an answer in tens of milliseconds without executing anything at all.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 150" role="img" aria-label="At an 87 percent cache hit rate the fleet needs roughly 3,250 workers; at 70 percent it needs roughly 5,700; uncached it needs roughly 14,300" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 150" role="img" aria-label="At an 87 percent cache hit rate the fleet needs roughly 3,250 workers; at 70 percent it needs roughly 5,700; uncached it needs roughly 14,300">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Uncached: ~14,300 workers</text>
-  <rect class="bar" x="20" y="32" width="700" height="24" rx="4"/>
-  <text class="lbl" x="20" y="76">70% hit rate: ~5,700 workers</text>
-  <rect class="bar" x="20" y="88" width="280" height="24" rx="4"/>
-  <text class="lbl" x="20" y="120">87% hit rate: ~3,250 workers</text>
-  <rect class="bar fillacc" x="20" y="132" width="160" height="10" rx="3"/>
+  <text class="lbl" x="4" y="14">Uncached: ~14,300 workers</text>
+  <rect class="bar" x="4" y="22" width="384" height="22" rx="4"/>
+  <text class="lbl" x="4" y="66">70% hit rate: ~5,700 workers</text>
+  <rect class="bar" x="4" y="74" width="154" height="22" rx="4"/>
+  <text class="lbl" x="4" y="118">87% hit rate: ~3,250 workers</text>
+  <rect class="bar fillacc" x="4" y="126" width="88" height="10" rx="3"/>
 </svg>
 ```
 
@@ -11876,19 +10747,21 @@ How long should a canary run before its result can be trusted?
 **Great: compute the sample size the detection target actually requires, and bake for at least that long.** Detecting a 0.1% error rate doubling to 0.2% at standard confidence and power needs roughly 23,000 requests per arm. At 100 requests a second that is about 4 minutes, so a 10-minute rung leaves real margin.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 160" role="img" aria-label="Sample size needed grows with the inverse square of the effect size: catching a doubling needs about 23,000 requests per arm, but catching a 20 percent relative rise needs about 431,000" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="Sample size needed grows with the inverse square of the effect size: catching a doubling needs about 23,000 requests per arm, but catching a 20 percent relative rise needs about 431,000">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Catch a doubling (0.1% → 0.2%): ~23,000 req/arm, ~4 min at 100 req/s</text>
-  <rect class="bar fillacc" x="20" y="32" width="38" height="24" rx="4"/>
-  <text class="lbl" x="20" y="90">Catch a 20% relative rise (0.1% → 0.12%): ~431,000 req/arm, ~72 min</text>
-  <rect class="bar" x="20" y="102" width="700" height="24" rx="4"/>
-  <text class="sub" x="20" y="150">the same confidence level costs roughly 19x the samples for a fivefold smaller effect</text>
+  <text class="lbl" x="4" y="14">Catch a doubling (0.1% → 0.2%):</text>
+  <text class="lbl" x="4" y="30">~23,000 req/arm, ~4 min at 100 req/s</text>
+  <rect class="bar fillacc" x="4" y="38" width="21" height="22" rx="4"/>
+  <text class="lbl" x="4" y="96">Catch a 20% relative rise (0.1% → 0.12%):</text>
+  <text class="lbl" x="4" y="112">~431,000 req/arm, ~72 min</text>
+  <rect class="bar" x="4" y="120" width="384" height="22" rx="4"/>
+  <text class="sub" x="4" y="164">the same confidence level costs roughly 19x the</text>
+  <text class="sub" x="4" y="180">samples for a fivefold smaller effect</text>
 </svg>
 ```
 
@@ -11918,23 +10791,7 @@ A schema change and a code deploy both touch production. Why can the schema chan
 
 **Great: expand before contracting, across separate deploys, gated in CI.** A rename becomes four deploys: add the new column and dual-write both, backfill in the background, flip reads to the new column while still writing both, and only weeks later, once nothing depends on the old shape, drop it. A **Schema lint gate** rejects any destructive statement whose expand phase is not already recorded as fully deployed.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 130" role="img" aria-label="Four deploys expand a schema before contracting it; only the last step is irreversible, and by then the change has baked for weeks" >
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
-  </style>
-  <rect class="box" x="20" y="30" width="160" height="30" rx="5"/><text class="sub" x="100" y="49">A: add + dual-write</text>
-  <rect class="box" x="200" y="30" width="160" height="30" rx="5"/><text class="sub" x="280" y="49">B: backfill (background)</text>
-  <rect class="box" x="380" y="30" width="160" height="30" rx="5"/><text class="sub" x="460" y="49">C: read new column</text>
-  <rect class="box fillacc" x="560" y="30" width="180" height="30" rx="5"/><text class="lbl" x="650" y="49">D: drop old column</text>
-  <text class="sub" x="20" y="85">rollback safe through A, B and C: the old column is still there and still correct</text>
-  <text class="sub" x="20" y="105">only D is irreversible, and it runs weeks after A, once nothing depends on the old shape</text>
-</svg>
-```
+[Four deploys expand a schema before contracting it](/diagram/cicd?figure=expand-contract)
 
 #### Where it breaks
 | Layer | Failure | How the design handles it |
@@ -12043,21 +10900,22 @@ Two bidders tap at nearly the same moment, one just before the close and one jus
 **Great: stop comparing to a clock at all, and sequence the close into the auction's own ordered stream.** A `CLOSE` event is inserted into the same per-auction stream as the bids, or equivalently, every bid carries `AND state = 'OPEN'` and the close itself carries `WHERE state = 'OPEN'`. The store's own serialisation order becomes the sequencer. Whichever arrived first in that one ordered stream wins, and nothing anywhere ever measures wall-clock time to decide it.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="Ordinary clock skew across nodes is comparable to the gap between two contested bids, so a wall-clock comparison cannot reliably order them; a single sequenced stream settles it by position instead">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="Ordinary clock skew across nodes is comparable to the gap between two contested bids, so a wall-clock comparison cannot reliably order them; a single sequenced stream settles it by position instead">
   <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .box{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">Node A clock: end_ts reached at T, bid arrives at T-2ms → accepted</text>
-  <text class="lbl" x="20" y="60">Node B clock: end_ts reached at T-6ms, same bid → rejected</text>
-  <rect class="box" x="20" y="30" width="700" height="14" rx="4"/>
-  <rect class="box" x="20" y="70" width="700" height="14" rx="4"/>
-  <text class="sub" x="20" y="105">the disagreement between nodes is bigger than the gap the decision depends on</text>
-  <rect class="fillacc" x="20" y="122" width="700" height="24" rx="4"/>
-  <text class="lbl" x="30" y="139">Sequenced stream: one order, one writer, position decides — no clock read anywhere</text>
+  <text class="lbl" x="4" y="14">Node A: end_ts at T, bid at T-2ms → accepted</text>
+  <rect class="box" x="4" y="22" width="384" height="14" rx="4"/>
+  <text class="lbl" x="4" y="56">Node B: end_ts at T-6ms, same bid → rejected</text>
+  <rect class="box" x="4" y="64" width="384" height="14" rx="4"/>
+  <text class="sub" x="4" y="98">the disagreement between nodes is bigger than</text>
+  <text class="sub" x="4" y="114">the gap the decision depends on</text>
+  <rect class="fillacc" x="4" y="128" width="384" height="40" rx="4"/>
+  <text class="lbl" x="10" y="146">Sequenced stream: position decides,</text>
+  <text class="lbl" x="10" y="162">no clock read anywhere</text>
 </svg>
 ```
 
@@ -12088,26 +10946,31 @@ A bidder authorises a maximum they will pay, and the system bids only enough to 
 Worked example, starting at £10: alice submits a max of £40 and leads at the £10 shown price. bob submits £30; his money clears the display but not alice's hidden £40, so the price becomes £31 and bob is outbid in the very response to his own bid. carol submits £60, genuinely beating alice's £40, and the price becomes £41, one increment above the ceiling she just beat.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 200" role="img" aria-label="Displayed price stays one increment above the second-highest hidden maximum; hidden ceilings never appear on screen until they are beaten" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Displayed price stays one increment above the second-highest hidden maximum; hidden ceilings never appear on screen until they are beaten">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
     .hidden{fill:currentColor;fill-opacity:.06;stroke:currentColor;stroke-opacity:.35;stroke-width:1;stroke-dasharray:3 3}
-    .fillacc{fill:var(--accent);fill-opacity:.26;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .fillacc{fill:var(--accent);fill-opacity:.26;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">alice max £40 (hidden)</text>
-  <rect class="hidden" x="20" y="30" width="400" height="18" rx="3"/>
-  <rect class="fillacc" x="20" y="30" width="100" height="18" rx="3"/><text class="sub" x="430" y="43">shown: £10, alice leads</text>
+  <text class="lbl" x="4" y="14">alice max £40 (hidden)</text>
+  <rect class="hidden" x="4" y="22" width="210" height="16" rx="3"/>
+  <rect class="fillacc" x="4" y="22" width="52" height="16" rx="3"/>
+  <text class="sub" x="4" y="54">shown: £10, alice leads</text>
 
-  <text class="lbl" x="20" y="80">bob max £30, clears £10 but not alice's £40</text>
-  <rect class="hidden" x="20" y="90" width="400" height="18" rx="3"/>
-  <rect class="fillacc" x="20" y="90" width="310" height="18" rx="3"/><text class="sub" x="430" y="103">shown: £31, alice still leads, bob outbid instantly</text>
+  <text class="lbl" x="4" y="82">bob max £30, clears £10 but not alice's £40</text>
+  <rect class="hidden" x="4" y="90" width="210" height="16" rx="3"/>
+  <rect class="fillacc" x="4" y="90" width="163" height="16" rx="3"/>
+  <text class="sub" x="4" y="122">shown: £31, alice still leads,</text>
+  <text class="sub" x="4" y="136">bob outbid instantly</text>
 
-  <text class="lbl" x="20" y="140">carol max £60, genuinely beats alice's £40</text>
-  <rect class="hidden" x="20" y="150" width="600" height="18" rx="3"/>
-  <rect class="fillacc" x="20" y="150" width="410" height="18" rx="3"/><text class="sub" x="20" y="185">shown: £41, one increment above the ceiling carol just beat; alice's £40 is now visible only because she lost</text>
+  <text class="lbl" x="4" y="166">carol max £60, genuinely beats alice's £40</text>
+  <rect class="hidden" x="4" y="174" width="315" height="16" rx="3"/>
+  <rect class="fillacc" x="4" y="174" width="216" height="16" rx="3"/>
+  <text class="sub" x="4" y="206">shown: £41, one increment above the ceiling</text>
+  <text class="sub" x="4" y="220">carol just beat; alice's £40 is now visible</text>
+  <text class="sub" x="4" y="234">only because she lost</text>
 </svg>
 ```
 
@@ -12245,20 +11108,18 @@ The instinct is to size infrastructure for however many devices exist. What shou
 **Great: derive duration from the type of release, and let capacity fall out of it as arithmetic.** A routine release spread over 14 days needs roughly 76Gbps average, an ordinary commercial commitment. A genuine security emergency compressed into 24 hours needs roughly 1.1Tbps, a real but justifiable spend. The artifact set itself is small enough, roughly 17GB, that every edge point of presence holds the whole thing, so this was never a caching problem at all, only an egress one.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="The same 11.5 petabytes of egress is roughly 76 gigabits a second over 14 days, 1.1 terabits a second over 24 hours, or 4.3 terabits a second over 6 hours" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 170" role="img" aria-label="The same 11.5 petabytes of egress is roughly 76 gigabits a second over 14 days, 1.1 terabits a second over 24 hours, or 4.3 terabits a second over 6 hours">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">14 days: ~76Gbps average, an ordinary commitment</text>
-  <rect class="bar fillacc" x="20" y="32" width="12" height="24" rx="3"/>
-  <text class="lbl" x="20" y="80">24 hours: ~1.1Tbps, justifiable only for a genuine emergency</text>
-  <rect class="bar" x="20" y="92" width="175" height="24" rx="3"/>
-  <text class="lbl" x="20" y="140">6 hours: ~4.3Tbps, a research problem, not a purchase order</text>
-  <rect class="bar" x="20" y="152" width="700" height="10" rx="3"/>
+  <text class="lbl" x="4" y="16">14 days: ~76Gbps, an ordinary commitment</text>
+  <rect class="bar fillacc" x="4" y="24" width="7" height="22" rx="3"/>
+  <text class="lbl" x="4" y="76">24 hours: ~1.1Tbps, only for a genuine emergency</text>
+  <rect class="bar" x="4" y="84" width="98" height="22" rx="3"/>
+  <text class="lbl" x="4" y="136">6 hours: ~4.3Tbps, a research problem</text>
+  <rect class="bar" x="4" y="144" width="384" height="10" rx="3"/>
 </svg>
 ```
 
@@ -12289,19 +11150,19 @@ Stopping a rollout sounds like undoing it. What does "halt" actually do to a dev
 **Great: a banded ladder, 0.1% then 1% then 5% then 20% then 100%, each with soak time before the next band opens.** Halting at any rung stops further admission immediately; it changes nothing for devices already admitted, because that is the only lever that exists. The ladder's real job is making sure detection happens while the exposed population is still small: detecting a regression at 0.1% means owning 500,000 broken devices, and detecting it at 5% means owning 25 million.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 150" role="img" aria-label="Devices exposed before detection grows from 500,000 at the 0.1 percent band to 25 million at the 5 percent band; halt only stops the next band from opening" >
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 170" role="img" aria-label="Devices exposed before detection grows from 500,000 at the 0.1 percent band to 25 million at the 5 percent band; halt only stops the next band from opening">
   <style>
-    .bar{fill:none;stroke:currentColor;stroke-width:1.4}
-    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.6}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle}
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
   </style>
-  <text class="lbl" x="20" y="20">0.1% band, detected here: 500,000 devices already broken</text>
-  <rect class="bar fillacc" x="20" y="32" width="7" height="24" rx="3"/>
-  <text class="lbl" x="20" y="80">5% band, detected here instead: 25,000,000 devices already broken</text>
-  <rect class="bar" x="20" y="92" width="350" height="24" rx="3"/>
-  <text class="sub" x="20" y="135">halt at either point stops the next band; neither point removes what already shipped</text>
+  <text class="lbl" x="4" y="14">0.1% band, detected here: 500,000 already broken</text>
+  <rect class="bar fillacc" x="4" y="22" width="4" height="22" rx="3"/>
+  <text class="lbl" x="4" y="70">5% band, detected here: 25,000,000 already broken</text>
+  <rect class="bar" x="4" y="78" width="184" height="22" rx="3"/>
+  <text class="sub" x="4" y="128">halt at either point stops the next band;</text>
+  <text class="sub" x="4" y="144">neither point removes what already shipped</text>
 </svg>
 ```
 

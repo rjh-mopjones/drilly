@@ -704,4 +704,76 @@ export const PAYMENT_SYSTEM: Diagram = {
       },
     },
   ],
+  figures: {
+    "recovery-point": {
+      title: "The recovery point never lies ahead of the work",
+      nodes: [
+        { id: "started", label: "started", kind: "service", col: 0, row: 0 },
+        { id: "risk-scored", label: "risk_scored", kind: "service", col: 0, row: 1 },
+        {
+          id: "psp-authorized",
+          label: "psp_authorized",
+          sub: "recovery point reads here",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The last step whose work and whose recovery-point row committed together, in one transaction.",
+            why: "A resumed workflow reading this value knows authorize definitely ran and knows nothing about ledger_recorded, exactly the amount of doubt a recovery point should leave.",
+          },
+        },
+        {
+          id: "ledger-recorded",
+          label: "ledger_recorded",
+          sub: "not yet committed",
+          kind: "database",
+          col: 0,
+          row: 3,
+        },
+        { id: "captured", label: "captured", kind: "service", col: 0, row: 4 },
+      ],
+      edges: [
+        { id: "e1", from: "started", to: "risk-scored", tier: "hot", step: 1, label: "committed together" },
+        { id: "e2", from: "risk-scored", to: "psp-authorized", tier: "hot", step: 2, label: "committed together" },
+        { id: "e3", from: "psp-authorized", to: "ledger-recorded", tier: "control", label: "not reached yet" },
+        { id: "e4", from: "ledger-recorded", to: "captured", tier: "data", label: "not reached yet" },
+      ],
+    },
+    verification: {
+      title: "One query replaces three guesses",
+      nodes: [
+        { id: "timeout", label: "Capture timeout", kind: "client", col: 0, row: 0 },
+        {
+          id: "possibilities",
+          label: "3 possible outcomes",
+          sub: "never arrived, succeeded, ack lost",
+          kind: "external",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The request never arrived, arrived and succeeded, or arrived, succeeded, and the response was lost in transit.",
+            why: "Nothing at the caller distinguishes these three, and guessing wrong in either direction, assuming failure or assuming success, costs real money.",
+          },
+        },
+        {
+          id: "verify",
+          label: "Verification state",
+          sub: "queries the PSP directly",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "A worker that asks the PSP directly, by the same idempotency key, rather than picking the statistically likelier guess.",
+            why: "This is the only place the ambiguity actually gets resolved, so nothing downstream ever confirms or compensates on a guess.",
+          },
+        },
+        { id: "resolve", label: "Confirm or compensate", kind: "service", col: 0, row: 3 },
+      ],
+      edges: [
+        { id: "e1", from: "timeout", to: "possibilities", tier: "hot", step: 1, label: "ambiguous" },
+        { id: "e2", from: "possibilities", to: "verify", tier: "hot", step: 2, label: "query PSP, don't guess" },
+        { id: "e3", from: "verify", to: "resolve", tier: "hot", step: 3, label: "actual answer" },
+      ],
+    },
+  },
 };

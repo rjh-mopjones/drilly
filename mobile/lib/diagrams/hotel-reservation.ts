@@ -893,4 +893,42 @@ export const HOTEL_RESERVATION: Diagram = {
       },
     },
   ],
+  figures: {
+    "sold-allowance": {
+      title: "One shared column races; two owned columns don't",
+      nodes: [
+        { id: "booking-path", label: "Booking path", sub: "decrements the count", kind: "service", col: 0, row: 0 },
+        { id: "forecast-job", label: "Forecast job", sub: "reads it, then overwrites", kind: "service", col: 1, row: 0 },
+        {
+          id: "sold",
+          label: "sold",
+          sub: "booking path only, no race",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "A column written only by the booking path: incremented on confirmation, decremented only by compensations and cancellations.",
+            why: "The booking path never reads allowance to decide what to write to sold, so it cannot race the forecast job's write.",
+          },
+        },
+        {
+          id: "allowance",
+          label: "allowance",
+          sub: "forecast job only, no race",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "A column written only by the nightly forecast job: physical capacity plus a deliberate oversell, simply overwritten.",
+            why: "The forecast job never reads sold, so a slow forecast run can never silently resurrect or destroy inventory a live booking just changed.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "booking-path", to: "forecast-job", tier: "control", label: "share one count: race" },
+        { id: "e2", from: "booking-path", to: "sold", tier: "hot", step: 1, label: "increments only" },
+        { id: "e3", from: "forecast-job", to: "allowance", tier: "hot", step: 2, label: "overwrites only" },
+      ],
+    },
+  },
 };

@@ -722,4 +722,41 @@ export const TIKTOK: Diagram = {
       },
     },
   ],
+  figures: {
+    "embedding-seed": {
+      title: "Content-seeded embeddings exist before any views",
+      nodes: [
+        { id: "zero-impressions", label: "New video: 0 impressions", kind: "external", col: 0, row: 0 },
+        {
+          id: "unreachable",
+          label: "No embedding",
+          sub: "unreachable forever",
+          kind: "external",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The dead end an engagement-seeded embedding leaves a brand-new video in, with no observed behaviour to derive a starting position from.",
+            why: "Retrieval searches by embedding proximity, so a video with no embedding cannot be found by that channel at all, ever, regardless of how good it is.",
+          },
+        },
+        { id: "content-features", label: "Pixels, audio, creator", kind: "blob", col: 1, row: 0 },
+        {
+          id: "real-position",
+          label: "Real position",
+          sub: "zero views needed",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "An embedding derived only from the video's own content and creator features, computed the moment transcoding finishes.",
+            why: "This is a prior about what the video resembles, not a measurement of whether it's good, so it competes for the explicit exploration quota next rather than being trusted outright.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "zero-impressions", to: "unreachable", tier: "control", label: "no signal to seed from" },
+        { id: "e2", from: "content-features", to: "real-position", tier: "hot", step: 1, label: "exists at transcode time" },
+      ],
+    },
+  },
 };

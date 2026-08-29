@@ -705,4 +705,81 @@ export const MARKET_DATA_INGEST: Diagram = {
       },
     },
   ],
+  figures: {
+    "shard-by-book": {
+      title: "Round-robin scatters a book; hashing keeps it on one shard",
+      nodes: [
+        { id: "log", label: "Log order", sub: "A1 · B1 · A2 · C1 · A3", kind: "queue", col: 0, row: 0 },
+        { id: "rr", label: "Round-robin", sub: "spread evenly", kind: "service", col: 0, row: 1 },
+        {
+          id: "rr-out",
+          label: "A scatters: 0, 1, 2",
+          sub: "no shard holds A's order",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "A's events land on three different shards in arrival order.",
+            why: "Nothing downstream can rebuild A's true order without collecting every shard's output and merging it again, which defeats sequencing in the first place.",
+          },
+        },
+        { id: "hash", label: "hash(instrumentId)", sub: "route by book", kind: "service", col: 0, row: 2 },
+        {
+          id: "hash-out",
+          label: "A stays on shard 0",
+          sub: "A1, A2, A3 in order",
+          kind: "database",
+          col: 1,
+          row: 2,
+          detail: {
+            what: "Every event for instrument A always lands on the same shard, in the sequence order it was stamped.",
+            why: "Ordering only has to hold inside a book, and books are independent, so this turns one global guarantee into many small ones with zero cross-shard coordination.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "log", to: "rr", tier: "hot", step: 1, label: "dispatched" },
+        { id: "e2", from: "rr", to: "rr-out", tier: "hot", step: 2, label: "even spread" },
+        { id: "e3", from: "log", to: "hash", tier: "data", label: "same log" },
+        { id: "e4", from: "hash", to: "hash-out", tier: "hot", step: 3, label: "keeps book together" },
+      ],
+    },
+    "tick-vs-order": {
+      title: "A tick overwrites its slot; an order queues, then backs off",
+      nodes: [
+        { id: "new-tick", label: "New tick", sub: "e.g. 187.08", kind: "external", col: 0, row: 0 },
+        {
+          id: "slot",
+          label: "Conflation slot",
+          sub: "1 per instrument, latest only",
+          kind: "cache",
+          col: 1,
+          row: 0,
+          detail: {
+            what: "One slot per instrument, holding only the freshest unconsumed tick.",
+            why: "A tick is a fact about right now; the old value is worthless the moment a new one exists, so overwriting is free and bounded — nothing is ever queued.",
+          },
+        },
+        { id: "new-order", label: "New order", sub: "intent to trade", kind: "external", col: 0, row: 1 },
+        { id: "order-q", label: "Order queue", sub: "bounded, FIFO", kind: "queue", col: 1, row: 1 },
+        {
+          id: "backoff",
+          label: "Slow producer, or NACK",
+          sub: "busy — never a silent drop",
+          kind: "service",
+          col: 1,
+          row: 2,
+          detail: {
+            what: "Once the bounded order queue fills, the producer is slowed or told explicitly the system is busy.",
+            why: "An order is a fact about intent, and intent does not expire because the system is busy — it can never vanish without telling anyone.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "new-tick", to: "slot", tier: "hot", step: 1, label: "overwrites in place" },
+        { id: "e2", from: "new-order", to: "order-q", tier: "hot", step: 2, label: "enqueues" },
+        { id: "e3", from: "order-q", to: "backoff", tier: "hot", step: 3, label: "queue full" },
+      ],
+    },
+  },
 };

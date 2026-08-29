@@ -844,4 +844,55 @@ export const GOOGLE_DRIVE: Diagram = {
       },
     },
   ],
+  figures: {
+    "three-trees": {
+      title: "Three trees: local, synced, and server",
+      nodes: [
+        {
+          id: "synced",
+          label: "Synced",
+          sub: "last agreed state",
+          kind: "database",
+          col: 0,
+          row: 0,
+          detail: {
+            what: "The third tree: the filesystem state the client and server were last known to agree on.",
+            why: "A path appearing in both diffs against synced is a real conflict; a path in neither was never touched by anyone. Two-tree comparison cannot tell a local creation from a remote deletion, and this is what resolves the ambiguity.",
+          },
+        },
+        { id: "local", label: "Local", sub: "filesystem now", kind: "database", col: 0, row: 1 },
+        { id: "server", label: "Server", sub: "current remote state", kind: "database", col: 1, row: 1 },
+      ],
+      edges: [
+        { id: "e1", from: "local", to: "synced", tier: "hot", step: 1, label: "diff → local changes" },
+        { id: "e2", from: "server", to: "synced", tier: "hot", step: 2, label: "diff → remote changes" },
+      ],
+    },
+    "chunk-handshake": {
+      title: "The chunk handshake: negotiate, then commit",
+      nodes: [
+        { id: "client", label: "Client", sub: "splits + hashes locally", kind: "client", col: 0, row: 0 },
+        {
+          id: "metaserver",
+          label: "Metaserver",
+          kind: "service",
+          col: 1,
+          row: 0,
+          detail: {
+            what: "The service that negotiates which chunks are missing and commits the final version.",
+            why: "Trusting a client's claim of 'I already have chunk h' unconditionally means knowing a hash becomes equivalent to holding the file. A claim of possession must never substitute for proof of it.",
+          },
+        },
+        { id: "blockserver", label: "Block server", kind: "service", col: 0, row: 1 },
+        { id: "hashkv", label: "Hash KV", sub: "chunk existence index", kind: "database", col: 1, row: 1 },
+      ],
+      edges: [
+        { id: "e1", from: "client", to: "metaserver", tier: "hot", step: 1, label: "have_blocks → missing list" },
+        { id: "e2", from: "metaserver", to: "hashkv", tier: "hot", step: 2, label: "lookup hashes" },
+        { id: "e3", from: "client", to: "blockserver", tier: "hot", step: 3, label: "PUT missing chunks" },
+        { id: "e4", from: "blockserver", to: "hashkv", tier: "hot", step: 4, label: "store(h)" },
+        { id: "e5", from: "client", to: "metaserver", tier: "hot", step: 5, label: "commit_file → ack" },
+      ],
+    },
+  },
 };

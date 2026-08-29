@@ -948,4 +948,49 @@ export const METRICS_MONITORING: Diagram = {
       },
     },
   ],
+  figures: {
+    grouping: {
+      title: "200 symptoms collapse to one page",
+      nodes: [
+        {
+          id: "cause",
+          label: "db_down (1 rule)",
+          sub: "the root cause, firing",
+          kind: "external",
+          col: 0,
+          row: 0,
+        },
+        {
+          id: "symptoms",
+          label: "Symptom alerts",
+          sub: "3 rule types, 200 alerts, all true",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "Every dependent service's own alert rule, firing independently because the database underneath all of them is down.",
+            why: "Each one is technically correct on its own. Sent separately they read as 200 unrelated pages instead of one root cause.",
+          },
+        },
+        {
+          id: "router",
+          label: "Alert router",
+          sub: "groups + inhibits downstream",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "Groups alerts sharing a label set into one notification, and suppresses a symptom alert entirely while its known cause is firing.",
+            why: "Grouping alone still sends one notification per distinct rule; inhibition is what removes the 200 known-downstream symptoms rather than just bundling them.",
+          },
+        },
+        { id: "notify", label: "Paging + heartbeat", sub: "1 page to on-call", kind: "external", col: 0, row: 3 },
+      ],
+      edges: [
+        { id: "e1", from: "cause", to: "router", tier: "hot", step: 1, label: "cause fires" },
+        { id: "e2", from: "symptoms", to: "router", tier: "control", label: "200 symptoms, suppressed" },
+        { id: "e3", from: "router", to: "notify", tier: "hot", step: 2, label: "1 grouped notification" },
+      ],
+    },
+  },
 };

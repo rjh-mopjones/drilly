@@ -722,4 +722,63 @@ export const RATE_LIMITER: Diagram = {
       },
     },
   ],
+  figures: {
+    race: {
+      title: "Two nodes race the same key; the shard serializes",
+      nodes: [
+        { id: "node-a", label: "Node A", kind: "client", col: 0, row: 0 },
+        { id: "node-b", label: "Node B", kind: "client", col: 1, row: 0 },
+        {
+          id: "shard",
+          label: "Counter shard",
+          sub: "single-threaded, one at a time",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The shard holding user_42's counter, executing one atomic script at a time.",
+            why: "A shard runs scripts to completion, one after another, on a single thread. While one script runs, nothing else on that shard can see or touch the key, so a second node cannot interleave with the first.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "node-a", to: "shard", tier: "hot", step: 1, label: "reads 99, allows, writes 100" },
+        { id: "e2", from: "node-b", to: "shard", tier: "hot", step: 2, label: "after A: sees 100, denies" },
+      ],
+    },
+    "block-reservation": {
+      title: "Block reservation: one round trip serves twenty requests",
+      nodes: [
+        { id: "client", label: "Requests 1–20", sub: "arrive at the gateway node", kind: "client", col: 0, row: 0 },
+        {
+          id: "gwnode",
+          label: "Gateway node",
+          sub: "spends the block locally",
+          kind: "service",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The node that reserved a block of tokens and spends them without another round trip.",
+            why: "Requests 1 through 20 spend the reserved block with zero round trips; request 21 triggers the next reservation. That turns 20 checks into 1 network call.",
+          },
+        },
+        {
+          id: "store",
+          label: "Counter store",
+          sub: "grants blocks of tokens",
+          kind: "database",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The shared store granting a block of W tokens in one round trip instead of one token per request.",
+            why: "If every one of N nodes reserves a block at once, the worst-case overshoot is bounded at N × W rather than N × limit. At 200 nodes and a block of 20, that bound is 4,000.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "client", to: "gwnode", tier: "data", label: "served locally" },
+        { id: "e2", from: "gwnode", to: "store", tier: "hot", step: 1, label: "reserve 20 tokens, one trip" },
+      ],
+    },
+  },
 };

@@ -979,4 +979,69 @@ export const PROXIMITY_SERVICE: Diagram = {
       },
     },
   ],
+  figures: {
+    "geohash-precision": {
+      title: "Geohash precision vs query cost",
+      nodes: [
+        { id: "len5", label: "geohash len=5", sub: "~5km cell", kind: "database", col: 0, row: 0 },
+        { id: "out5", label: "Over-fetch", sub: "~10x candidates, ~15km covered", kind: "service", col: 1, row: 0 },
+        {
+          id: "len6",
+          label: "geohash len=6",
+          sub: "~600m cell",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The precision level whose cell dimensions actually match a 1km search radius.",
+            why: "Covering radius r from a cell of width w and height h needs (2·ceil(r/w)+1) × (2·ceil(r/h)+1) cells, computed from the cell's shorter dimension, not assumed to be 3×3.",
+          },
+        },
+        {
+          id: "out6",
+          label: "Good match",
+          sub: "~3x candidates, ~1.8km covered",
+          kind: "service",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "The well-balanced outcome: enough neighbouring cells to cover the radius without over-fetching.",
+            why: "A folk answer of one cell plus its eight neighbours is only correct when the cell is at least as wide and tall as the requested radius in both directions, which this precision level satisfies.",
+          },
+        },
+        { id: "len7", label: "geohash len=7", sub: "~150m cell", kind: "database", col: 0, row: 2 },
+        { id: "out7", label: "Under-fetch", sub: "64 cell lookups needed", kind: "service", col: 1, row: 2 },
+      ],
+      edges: [
+        { id: "e1", from: "len5", to: "out5", tier: "data", label: "1km radius search" },
+        { id: "e2", from: "len6", to: "out6", tier: "hot", step: 1, label: "1km radius search" },
+        { id: "e3", from: "len7", to: "out7", tier: "data", label: "1km radius search" },
+      ],
+    },
+    "build-gate-canary": {
+      title: "Build, gate, canary, flip: nothing promoted blind",
+      nodes: [
+        { id: "build", label: "Nightly build", sub: "map + sort by cell", kind: "service", col: 0, row: 0 },
+        { id: "gate", label: "Gate", sub: "1% band + corpus diff", kind: "service", col: 1, row: 0 },
+        { id: "canary", label: "Canary node", sub: "live result-set diff", kind: "service", col: 0, row: 1 },
+        {
+          id: "flip",
+          label: "Fleet pointer flip",
+          sub: "previous artifact stays resident",
+          kind: "blob",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "The atomic switch every serving node makes once a canary has served real traffic against the new artifact.",
+            why: "Any stage failing means the current artifact keeps serving; nothing is ever promoted blind, and the previous version stays resident for an instant rollback.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "build", to: "gate", tier: "hot", step: 1, label: "checksummed artifact" },
+        { id: "e2", from: "gate", to: "canary", tier: "hot", step: 2, label: "passes count + diff check" },
+        { id: "e3", from: "canary", to: "flip", tier: "hot", step: 3, label: "canary result sets agree" },
+      ],
+    },
+  },
 };

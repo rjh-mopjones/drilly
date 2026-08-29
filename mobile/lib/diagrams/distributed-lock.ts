@@ -609,4 +609,31 @@ export const DISTRIBUTED_LOCK: Diagram = {
       },
     },
   ],
+  figures: {
+    "lease-race": {
+      title: "A 35s pause outlasts a 20s lease: the fence catches the stale write",
+      nodes: [
+        { id: "holdera", label: "Holder A: token 33", sub: "paused 35s in GC", kind: "service", col: 0, row: 0 },
+        { id: "holderb", label: "Holder B: token 34", sub: "acquired while A paused", kind: "service", col: 1, row: 0 },
+        {
+          id: "resource",
+          label: "Protected resource",
+          sub: "accepts highest token seen",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The single row every fenced write checks and updates atomically.",
+            why: "It remembers the highest token accepted, so a resumed holder's stale write is rejected on arrival even though the lock service never knew the pause happened.",
+          },
+        },
+        { id: "rejected", label: "A wakes, writes 33", sub: "fenced: 33 < 34", kind: "service", col: 1, row: 1 },
+      ],
+      edges: [
+        { id: "e1", from: "holderb", to: "resource", tier: "hot", step: 1, label: "writes 34, accepted" },
+        { id: "e2", from: "holdera", to: "rejected", tier: "data", label: "resumes from GC" },
+        { id: "e3", from: "rejected", to: "resource", tier: "hot", step: 2, label: "fenced: 33 < 34" },
+      ],
+    },
+  },
 };

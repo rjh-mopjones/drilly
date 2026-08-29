@@ -819,4 +819,33 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       },
     },
   ],
+  figures: {
+    "dedup-hops": {
+      title: "Four hops, four suppression mechanisms, one gap",
+      nodes: [
+        { id: "hop1", label: "Caller retry", sub: "idempotency key", kind: "service", col: 0, row: 0 },
+        { id: "hop2", label: "DB → queue", sub: "outbox, one txn", kind: "service", col: 0, row: 1 },
+        { id: "hop3", label: "Worker redelivery", sub: "sent:{notif_id}", kind: "service", col: 0, row: 2 },
+        { id: "hop4", label: "Provider retry", sub: "apns-id dedup", kind: "service", col: 0, row: 3 },
+        {
+          id: "device",
+          label: "Provider → device",
+          sub: "no ack: gap remains",
+          kind: "client",
+          col: 0,
+          row: 4,
+          detail: {
+            what: "The one hop with no suppression mechanism, because there is nothing to acknowledge past it.",
+            why: "A 200 from a provider means it was accepted, not that a handset received it or a person saw it. Every earlier hop narrows a duplicate window; this one cannot, by construction.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "hop1", to: "hop2", tier: "hot", step: 1, label: "conditional insert" },
+        { id: "e2", from: "hop2", to: "hop3", tier: "hot", step: 2, label: "committed, then published" },
+        { id: "e3", from: "hop3", to: "hop4", tier: "hot", step: 3, label: "sent-key narrows window" },
+        { id: "e4", from: "hop4", to: "device", tier: "hot", step: 4, label: "accepted, not delivered" },
+      ],
+    },
+  },
 };

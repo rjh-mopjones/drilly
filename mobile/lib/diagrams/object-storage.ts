@@ -837,4 +837,41 @@ export const OBJECT_STORAGE: Diagram = {
       },
     },
   ],
+  figures: {
+    "pointer-swap": {
+      title: "A reader keeps its manifest; a writer swaps the pointer",
+      nodes: [
+        { id: "v1", label: "Manifest v1", sub: "immutable", kind: "blob", col: 0, row: 0 },
+        { id: "v2", label: "Manifest v2", sub: "immutable, freshly written", kind: "blob", col: 1, row: 0 },
+        {
+          id: "reader",
+          label: "Reader",
+          sub: "resolved v1, still reading",
+          kind: "client",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "A GET that already resolved the (bucket, key) pointer to manifest v1 before the overwrite committed.",
+            why: "Because v1 is never edited, only superseded, the reader keeps reading valid bytes to completion regardless of what happens to the pointer afterwards.",
+          },
+        },
+        {
+          id: "pointer",
+          label: "Pointer now points to v2",
+          sub: "the one mutable cell",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "The (bucket, key, version_id) → manifest_id mapping, atomically swapped to v2 once its fragments are durably written.",
+            why: "This swap is the only mutation in the whole system. Nothing else needs a lock because nothing else is ever edited in place.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "v1", to: "reader", tier: "hot", step: 1, label: "resolved before the swap" },
+        { id: "e2", from: "v2", to: "pointer", tier: "hot", step: 2, label: "commit swaps pointer" },
+      ],
+    },
+  },
 };

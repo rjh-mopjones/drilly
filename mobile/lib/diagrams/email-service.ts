@@ -917,4 +917,89 @@ export const EMAIL_SERVICE: Diagram = {
       },
     },
   ],
+  figures: {
+    "accept-refuse": {
+      title: "A refusal is gone; an acceptance is reversible",
+      nodes: [
+        { id: "txn", label: "SMTP transaction", kind: "client", col: 0, row: 0 },
+        {
+          id: "refuse",
+          label: "5xx refuse",
+          sub: "near-certain evidence only",
+          kind: "gateway",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "A refusal issued only on evidence with a near-certain false-positive rate, such as a DMARC failure against the sender's own published policy.",
+            why: "Refusal cannot be taken back, so it is spent only where the error rate is roughly a thousand times better than a probabilistic model's.",
+          },
+        },
+        { id: "accept", label: "250 accept", sub: "everything else", kind: "gateway", col: 1, row: 1 },
+        { id: "gone", label: "Gone, no recall", sub: "no signal ever learned", kind: "external", col: 0, row: 2 },
+        {
+          id: "labelled",
+          label: "Labelled INBOX or SPAM",
+          sub: "relabel either way, trains model",
+          kind: "database",
+          col: 1,
+          row: 2,
+          detail: {
+            what: "An asynchronous, reversible verdict written after acceptance, which a user correction can flip in either direction.",
+            why: "Everything expensive and probabilistic happens here, on the side of the boundary where a wrong verdict costs a mislabelled message rather than a permanently lost one.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "txn", to: "refuse", tier: "hot", step: 1, label: "near-certain evidence" },
+        { id: "e2", from: "txn", to: "accept", tier: "hot", step: 2, label: "everything else" },
+        { id: "e3", from: "refuse", to: "gone", tier: "hot", step: 3, label: "permanent" },
+        { id: "e4", from: "accept", to: "labelled", tier: "hot", step: 4, label: "reversible" },
+      ],
+    },
+    "convergent-key": {
+      title: "One ciphertext, wrapped separately per recipient",
+      nodes: [
+        { id: "plaintext", label: "Plaintext body", kind: "blob", col: 0, row: 0 },
+        {
+          id: "datakey",
+          label: "SHA-256 → data key",
+          sub: "deterministic, from content",
+          kind: "service",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "A data key derived from the hash of the plaintext body, so identical content always derives the same key.",
+            why: "Deterministic key derivation is what keeps the ciphertext deterministic too, which is the property content addressing depends on for dedup.",
+          },
+        },
+        {
+          id: "ciphertext",
+          label: "One ciphertext",
+          sub: "stored once, dedup survives",
+          kind: "blob",
+          col: 0,
+          row: 2,
+        },
+        { id: "wrapped-a", label: "Wrapped: user A", kind: "database", col: 0, row: 3 },
+        {
+          id: "wrapped-b",
+          label: "Wrapped: user B",
+          sub: "revoke B: A unaffected",
+          kind: "database",
+          col: 1,
+          row: 3,
+          detail: {
+            what: "The same data key, wrapped a second time under user B's own key-encryption key.",
+            why: "Revoking B's wrapping key ends B's access without touching A's copy or the shared ciphertext, which is what makes per-user erasure possible alongside deduplication.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "plaintext", to: "datakey", tier: "hot", step: 1, label: "hash content" },
+        { id: "e2", from: "datakey", to: "ciphertext", tier: "hot", step: 2, label: "derives key" },
+        { id: "e3", from: "ciphertext", to: "wrapped-a", tier: "hot", step: 3, label: "wrap per recipient" },
+        { id: "e4", from: "ciphertext", to: "wrapped-b", tier: "hot", step: 4, label: "wrap per recipient" },
+      ],
+    },
+  },
 };

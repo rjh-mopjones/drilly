@@ -729,4 +729,31 @@ export const RIDE_HAILING: Diagram = {
       },
     },
   ],
+  figures: {
+    "driver-race": {
+      title: "Racing for a driver: one CAS wins, the loser cascades",
+      nodes: [
+        { id: "da", label: "Dispatcher A", kind: "service", col: 0, row: 0 },
+        { id: "db", label: "Dispatcher B", kind: "service", col: 1, row: 0 },
+        {
+          id: "driver",
+          label: "driver[D-449]",
+          sub: "AVAILABLE → OFFERED",
+          kind: "database",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The one driver record two dispatchers race to write, gated on its current state.",
+            why: "The store accepts exactly one conditional write per driver; the loser is rejected atomically instead of both writes racing to completion.",
+          },
+        },
+        { id: "next", label: "driver[D-512]", sub: "2nd candidate", kind: "database", col: 1, row: 2 },
+      ],
+      edges: [
+        { id: "e1", from: "da", to: "driver", tier: "hot", step: 1, label: "CAS wins" },
+        { id: "e2", from: "db", to: "driver", tier: "data", label: "CAS rejected" },
+        { id: "e3", from: "db", to: "next", tier: "hot", step: 2, label: "falls to 2nd candidate" },
+      ],
+    },
+  },
 };

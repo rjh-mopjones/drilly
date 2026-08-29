@@ -900,4 +900,64 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       },
     },
   ],
+  figures: {
+    "build-vs-serve": {
+      title: "Build removes ranking from the serve path",
+      nodes: [
+        { id: "query-logs", label: "Query logs", sub: "Kafka stream", kind: "queue", col: 0, row: 0 },
+        { id: "aggregator", label: "Aggregator", sub: "Spark / Flink", kind: "service", col: 0, row: 1 },
+        { id: "topk-compile", label: "Top-K → compile to FST", sub: "bottom-up, 5-10x compress", kind: "service", col: 0, row: 2 },
+        { id: "publish", label: "Publish", sub: "push to shards, atomic swap", kind: "blob", col: 0, row: 3 },
+        { id: "keypress", label: "User keypress", kind: "client", col: 1, row: 0 },
+        { id: "cdn-check", label: "CDN cache?", kind: "gateway", col: 1, row: 1 },
+        {
+          id: "return-topk",
+          label: "Return top-K",
+          sub: "~95% of traffic",
+          kind: "service",
+          col: 1,
+          row: 2,
+          detail: {
+            what: "A precomputed top-ten answer served straight from the edge cache.",
+            why: "A precomputed lookup costs roughly a microsecond, three orders of magnitude cheaper than ranking at request time, which is what makes serving a lookup rather than a search.",
+          },
+        },
+        { id: "lookup", label: "In-RAM lookup", sub: "miss: route to shard", kind: "service", col: 1, row: 3 },
+      ],
+      edges: [
+        { id: "e1", from: "query-logs", to: "aggregator", tier: "hot", step: 1, label: "raw query stream" },
+        { id: "e2", from: "aggregator", to: "topk-compile", tier: "hot", step: 2, label: "counts per prefix" },
+        { id: "e3", from: "topk-compile", to: "publish", tier: "hot", step: 3, label: "compiled automaton" },
+        { id: "e4", from: "keypress", to: "cdn-check", tier: "hot", step: 4, label: "prefix typed" },
+        { id: "e5", from: "cdn-check", to: "return-topk", tier: "hot", step: 5, label: "hit ~95%" },
+        { id: "e6", from: "cdn-check", to: "lookup", tier: "data", label: "miss" },
+        { id: "e7", from: "publish", to: "lookup", tier: "control", label: "hourly snapshot" },
+      ],
+    },
+    rollup: {
+      title: "A parent's top-10 comes from the union of its children's",
+      nodes: [
+        {
+          id: "parent",
+          label: "node \"wea\"",
+          sub: "top-10 = best 10 of union below",
+          kind: "service",
+          col: 0,
+          row: 0,
+          detail: {
+            what: "A node's top-ten completions, built from its children rather than a fresh scan of its subtree.",
+            why: "Any true top-ten member of \"wea\" lives in exactly one child's subtree, so it is already present in that child's own top-ten. The union of the children's lists is a sufficient candidate set.",
+          },
+        },
+        { id: "child-weat", label: "child \"weat\"", sub: "its own top-10", kind: "database", col: 0, row: 1 },
+        { id: "child-wear", label: "child \"wear\"", sub: "its own top-10", kind: "database", col: 1, row: 1 },
+        { id: "terminal", label: "terminal \"wea\"", sub: "if a complete query", kind: "database", col: 0, row: 2 },
+      ],
+      edges: [
+        { id: "e1", from: "child-weat", to: "parent", tier: "data", label: "contributes candidates" },
+        { id: "e2", from: "child-wear", to: "parent", tier: "data", label: "contributes candidates" },
+        { id: "e3", from: "terminal", to: "parent", tier: "data", label: "contributes candidates" },
+      ],
+    },
+  },
 };

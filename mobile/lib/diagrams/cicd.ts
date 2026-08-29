@@ -723,4 +723,42 @@ export const CICD: Diagram = {
       },
     },
   ],
+  figures: {
+    "expand-contract": {
+      title: "Four deploys expand a schema before contracting it",
+      nodes: [
+        {
+          id: "a",
+          label: "A: add + dual-write",
+          sub: "expand phase",
+          kind: "service",
+          col: 0,
+          row: 0,
+          detail: {
+            what: "Add the new column and write both the old and new column on every write.",
+            why: "Rollback stays safe through this step and the next two, because the old column is still there and still correct.",
+          },
+        },
+        { id: "b", label: "B: backfill", sub: "background job", kind: "service", col: 0, row: 1 },
+        { id: "c", label: "C: read new column", sub: "still dual-write", kind: "service", col: 0, row: 2 },
+        {
+          id: "d",
+          label: "D: drop old column",
+          sub: "irreversible",
+          kind: "database",
+          col: 0,
+          row: 3,
+          detail: {
+            what: "Drop the old column, once nothing depends on the old shape.",
+            why: "This is the only irreversible step in the sequence, and it runs weeks after A, once nothing depends on the old shape.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "a", to: "b", tier: "hot", step: 1, label: "then" },
+        { id: "e2", from: "b", to: "c", tier: "hot", step: 2, label: "then" },
+        { id: "e3", from: "c", to: "d", tier: "hot", step: 3, label: "weeks later" },
+      ],
+    },
+  },
 };

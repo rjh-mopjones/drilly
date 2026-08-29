@@ -1036,4 +1036,70 @@ export const GOOGLE_MAPS: Diagram = {
       },
     },
   ],
+  figures: {
+    contraction: {
+      title: "Contraction: a shortcut skips a removed junction",
+      nodes: [
+        { id: "u", label: "u", sub: "low-rank neighbor", kind: "database", col: 0, row: 0 },
+        {
+          id: "v",
+          label: "v (contracted)",
+          sub: "removed; may add a shortcut",
+          kind: "service",
+          col: 1,
+          row: 0,
+          detail: {
+            what: "A junction removed during contraction, replaced by a direct shortcut between its neighbors wherever no equal-or-shorter alternative already exists.",
+            why: "The shortcut represents a real path exactly, so removing v costs nothing at query time: no optimal route is ever lost, only the number of hops shrinks.",
+          },
+        },
+        { id: "w", label: "w", sub: "low-rank neighbor", kind: "database", col: 0, row: 1 },
+        { id: "origin", label: "Origin", sub: "search climbs upward only", kind: "client", col: 0, row: 2 },
+        { id: "dest", label: "Destination", sub: "search climbs upward only", kind: "client", col: 1, row: 2 },
+        {
+          id: "meet",
+          label: "Meet near hierarchy top",
+          sub: "hundreds of nodes settled",
+          kind: "service",
+          col: 0,
+          row: 3,
+          detail: {
+            what: "The point where the two upward searches, one from each end, first settle a common node.",
+            why: "Both searches only relax edges towards higher-ranked nodes, so they converge near the motorway level instead of exploring the whole graph.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "u", to: "v", tier: "control", label: "removed" },
+        { id: "e2", from: "v", to: "w", tier: "control", label: "removed" },
+        { id: "e3", from: "u", to: "w", tier: "hot", step: 1, label: "shortcut = w(u,v)+w(v,w)" },
+        { id: "e4", from: "origin", to: "meet", tier: "hot", step: 2, label: "climbs upward" },
+        { id: "e5", from: "dest", to: "meet", tier: "hot", step: 3, label: "climbs upward" },
+      ],
+    },
+    "via-node": {
+      title: "A via-node candidate, checked before it is offered",
+      nodes: [
+        {
+          id: "vianode",
+          label: "Via-node candidate",
+          sub: "stretch, sharing, local optimality",
+          kind: "service",
+          col: 0,
+          row: 0,
+          detail: {
+            what: "An intermediate node the candidate route is forced through, checked against the shortest path on three tests before it is admitted.",
+            why: "Bounded stretch (≤10% longer), limited sharing (≤80% common edges) and local optimality (every long sub-path is itself shortest) together rule out a route that only looks different because part of it is a bad detour.",
+          },
+        },
+        { id: "origin", label: "Origin", kind: "client", col: 0, row: 1 },
+        { id: "dest", label: "Destination", kind: "client", col: 1, row: 1 },
+      ],
+      edges: [
+        { id: "e1", from: "origin", to: "dest", tier: "data", label: "shortest path" },
+        { id: "e2", from: "origin", to: "vianode", tier: "hot", step: 1, label: "candidate half 1" },
+        { id: "e3", from: "vianode", to: "dest", tier: "hot", step: 2, label: "candidate half 2" },
+      ],
+    },
+  },
 };

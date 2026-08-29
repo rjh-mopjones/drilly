@@ -883,4 +883,60 @@ export const NEARBY_FRIENDS: Diagram = {
       },
     },
   ],
+  figures: {
+    "motion-state": {
+      title: "Adaptive sampling: motion state sets the GPS interval",
+      nodes: [
+        { id: "background", label: "Background", sub: "min 1min, OS-permitted", kind: "database", col: 0, row: 0 },
+        { id: "stationary", label: "Stationary", sub: "GPS off, sample 5min", kind: "database", col: 1, row: 0 },
+        { id: "walking", label: "Walking", sub: "GPS on, sample 30s", kind: "database", col: 1, row: 1 },
+        {
+          id: "driving",
+          label: "Driving",
+          sub: "GPS on, sample 10s",
+          kind: "database",
+          col: 1,
+          row: 2,
+          detail: {
+            what: "The highest-frequency sampling state, classified locally from accelerometer and speed.",
+            why: "Only the device knows its own motion state without a round trip, and the classifier draws a tiny fraction of the power a GPS fix does, which is why this policy runs on-device rather than server-side.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "background", to: "stationary", tier: "hot", step: 1, label: "app foregrounded" },
+        { id: "e2", from: "stationary", to: "background", tier: "hot", step: 2, label: "app backgrounded" },
+        { id: "e3", from: "stationary", to: "walking", tier: "hot", step: 3, label: "accel motion >5s" },
+        { id: "e4", from: "walking", to: "stationary", tier: "hot", step: 4, label: "still >5min" },
+        { id: "e5", from: "walking", to: "driving", tier: "hot", step: 5, label: "speed >10 m/s" },
+        { id: "e6", from: "driving", to: "walking", tier: "hot", step: 6, label: "speed <5 m/s" },
+        { id: "e7", from: "driving", to: "stationary", tier: "data", label: "still >5min, direct", fromSide: "right", toSide: "right" },
+      ],
+    },
+    "cell-sharding": {
+      title: "Sharding by cell keeps a write's candidates local",
+      nodes: [
+        { id: "write", label: "Write: position update", kind: "service", col: 0, row: 0 },
+        { id: "shard-a", label: "Friend shard A", kind: "database", col: 0, row: 1 },
+        { id: "shard-b", label: "Friend shard B", kind: "database", col: 1, row: 1 },
+        {
+          id: "cell-node",
+          label: "Cell node",
+          sub: "write + all nearby friends",
+          kind: "database",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The single node that owns a geographic cell, holding every writer and every friend physically near them.",
+            why: "A write from anywhere inside a cell lands on the node that owns it, so the pre-filter becomes a local set intersection with no network hop and no fan-in at all.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "write", to: "shard-a", tier: "data", label: "sharded by user id: hop" },
+        { id: "e2", from: "write", to: "shard-b", tier: "data", label: "sharded by user id: hop" },
+        { id: "e3", from: "write", to: "cell-node", tier: "hot", step: 1, label: "sharded by cell: local" },
+      ],
+    },
+  },
 };

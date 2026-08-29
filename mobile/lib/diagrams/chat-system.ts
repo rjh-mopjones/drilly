@@ -922,4 +922,60 @@ export const CHAT_SYSTEM: Diagram = {
       },
     },
   ],
+  figures: {
+    delivery: {
+      title: "Delivery state machine: sending to read, with retry",
+      nodes: [
+        { id: "sending", label: "Sending", kind: "database", col: 0, row: 0 },
+        { id: "sent", label: "Sent", sub: "persists + msg_id", kind: "database", col: 0, row: 1 },
+        { id: "delivered", label: "Delivered", sub: "device acks", kind: "database", col: 0, row: 2 },
+        { id: "read", label: "Read", sub: "opens chat", kind: "database", col: 0, row: 3 },
+        { id: "failed", label: "Failed", sub: "timeout / net err", kind: "database", col: 1, row: 0 },
+      ],
+      edges: [
+        { id: "e1", from: "sending", to: "sent", tier: "hot", step: 1, label: "persists + msg_id" },
+        { id: "e2", from: "sent", to: "delivered", tier: "hot", step: 2, label: "device acks" },
+        { id: "e3", from: "delivered", to: "read", tier: "hot", step: 3, label: "opens chat" },
+        { id: "e4", from: "sending", to: "failed", tier: "data", label: "timeout / net error" },
+        { id: "e5", from: "failed", to: "sending", tier: "data", label: "retry, exp backoff" },
+      ],
+    },
+    "e2ee-fork": {
+      title: "One fork, four subsystems reshaped at once",
+      nodes: [
+        {
+          id: "decision",
+          label: "E2EE: yes or no",
+          kind: "service",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The single decision, taken before anything else, over whether the server can ever read message content.",
+            why: "Search, new-device history, group delivery and abuse detection are all built assuming the server can read content. Retrofitting the fork later means rebuilding all four, not adding a library.",
+          },
+        },
+        {
+          id: "search",
+          label: "Search",
+          sub: "server index → on-device",
+          kind: "service",
+          col: 1,
+          row: 0,
+          detail: {
+            what: "Full-text search over message history.",
+            why: "Under the encryption fork, server-side search stops existing and becomes an on-device index, workable at the roughly one megabyte of text a typical user holds, but it can only search what that one device has ever received.",
+          },
+        },
+        { id: "history", label: "New-device history", sub: "server read → transfer/backup", kind: "service", col: 1, row: 1 },
+        { id: "fanout", label: "Group fan-out", sub: "1 write → 1 per device", kind: "service", col: 1, row: 2 },
+        { id: "abuse", label: "Abuse detection", sub: "content → metadata only", kind: "service", col: 1, row: 3 },
+      ],
+      edges: [
+        { id: "e1", from: "decision", to: "search", tier: "data", label: "reshapes" },
+        { id: "e2", from: "decision", to: "history", tier: "data", label: "reshapes" },
+        { id: "e3", from: "decision", to: "fanout", tier: "data", label: "reshapes" },
+        { id: "e4", from: "decision", to: "abuse", tier: "data", label: "reshapes" },
+      ],
+    },
+  },
 };

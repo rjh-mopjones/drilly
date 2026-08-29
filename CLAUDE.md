@@ -47,8 +47,16 @@ Plain-markdown conventions the reader draws (`makeRules` in `ItemView.tsx`):
 - a blockquote whose first line is bold is a callout.
 - a paragraph that is only `[caption](/diagram/<id>?focus=a,b,e3)` embeds the
   diagram cropped and lit to those node/edge ids. Crop the picture to the part
-  being explained; draw new figures as ```svg fences (currentColor,
-  `var(--accent)`).
+  being explained.
+- **Figures are diagrams.** A mechanism that needs its own picture (push vs
+  pull lanes, a ring of tiles, a lease race) is a `FigureSpec` in the diagram
+  file's `figures: { key: { title, nodes, edges } }` block, drawn by the same
+  engine, embedded with `[caption](/diagram/<id>?figure=key)` and opened full
+  size from the caption. Author it **tall**: ≤ 2 columns, ≤ 8 boxes, `detail`
+  on the boxes the text explains. The gate checks every figure on a phone-width
+  canvas (`✗` below zoom 0.40). Only non-flows (a grid of cells, bars, a
+  timeline) stay ```svg, and then on a `viewBox` ≤ 400 wide with 12–13px text;
+  `SvgDiagram` sizes from the drawn content. Never a 760-wide hand-drawn flow.
 - every text run goes through the glossary plus the diagram's box labels, so
   "Sketch workers" is tappable and defined by its own `what`.
 - `patterns` has `sectionOrder: []` (file order) and

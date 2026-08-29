@@ -907,4 +907,46 @@ export const YOUTUBE: Diagram = {
       },
     },
   ],
+  figures: {
+    pipeline: {
+      title: "Transcoding pipeline: split into independent segment jobs",
+      nodes: [
+        { id: "upload", label: "Raw upload", sub: "S3 ingest + validate", kind: "blob", col: 0, row: 0 },
+        { id: "split", label: "Split into segments", sub: "6s each, 600/hr video", kind: "service", col: 0, row: 1 },
+        {
+          id: "jobs",
+          label: "N parallel segment jobs",
+          sub: "closed GOP per segment",
+          kind: "queue",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "One independent job per segment, dispatched to whatever encoder capacity is free.",
+            why: "A segment can be encoded without referencing its neighbours only because every cut forces a closed group of pictures. That is what turns a twenty-minute video into hundreds of parallel jobs instead of one long stream.",
+          },
+        },
+        {
+          id: "encode",
+          label: "Encode all rungs",
+          sub: "1080p/720p/480p/240p, GPU",
+          kind: "service",
+          col: 0,
+          row: 3,
+          detail: {
+            what: "Each rung's encoder for a segment, run in parallel across the same split.",
+            why: "GPU compute for a floor pass is under two minutes of work; wall clock is dominated by object-store round trips, which is why the split records byte offsets so each worker issues one ranged read.",
+          },
+        },
+        { id: "package", label: "Package HLS/DASH", sub: "fMP4 + manifest", kind: "service", col: 0, row: 4 },
+        { id: "ready", label: "Status: READY", sub: "notify + pre-warm CDN", kind: "service", col: 0, row: 5 },
+      ],
+      edges: [
+        { id: "e1", from: "upload", to: "split", tier: "hot", step: 1, label: "validated source" },
+        { id: "e2", from: "split", to: "jobs", tier: "hot", step: 2, label: "byte offsets recorded" },
+        { id: "e3", from: "jobs", to: "encode", tier: "hot", step: 3, label: "one ranged read each" },
+        { id: "e4", from: "encode", to: "package", tier: "hot", step: 4, label: "rung-aligned keyframes" },
+        { id: "e5", from: "package", to: "ready", tier: "hot", step: 5, label: "playable manifest" },
+      ],
+    },
+  },
 };

@@ -667,4 +667,66 @@ export const DIGITAL_WALLET: Diagram = {
       },
     },
   ],
+  figures: {
+    "one-statement": {
+      title: "One conditional UPDATE, no gap to race into",
+      nodes: [
+        { id: "balance", label: "available = $100", kind: "database", col: 0, row: 0 },
+        {
+          id: "try1",
+          label: "UPDATE ... -80",
+          sub: "available >= 80: 1 row, now $20",
+          kind: "service",
+          col: 0,
+          row: 1,
+        },
+        {
+          id: "try2",
+          label: "UPDATE ... -70",
+          sub: "available >= 70: 0 rows",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "A second concurrent transfer's conditional update, evaluated against whatever available is at the instant it runs.",
+            why: "By the time this statement runs, the first update already committed and available is $20, so the predicate is false and zero rows update. There was never a window between checking and deducting for this to race into.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "balance", to: "try1", tier: "hot", step: 1, label: "checks and deducts as one" },
+        { id: "e2", from: "balance", to: "try2", tier: "hot", step: 2, label: "fails cleanly, no unwind" },
+      ],
+    },
+    "lease-fencing": {
+      title: "A stale Confirm matches zero rows instead of half-applying",
+      nodes: [
+        { id: "try", label: "Try, lease = L1", kind: "service", col: 0, row: 0 },
+        {
+          id: "ttl-expire",
+          label: "TTL expires",
+          sub: "sweeper cancels the reservation",
+          kind: "external",
+          col: 0,
+          row: 1,
+        },
+        {
+          id: "wake",
+          label: "Orchestrator wakes",
+          sub: "Confirm WHERE lease_id = L1",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "A stalled orchestrator resuming after the sweeper has already cancelled its reservation and returned the funds.",
+            why: "The lease id in its Confirm predicate no longer matches any row, so the statement touches zero rows and fails cleanly into the transfer's failure path, instead of crediting against money that was already returned.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "try", to: "ttl-expire", tier: "hot", step: 1, label: "orchestrator stalls" },
+        { id: "e2", from: "ttl-expire", to: "wake", tier: "hot", step: 2, label: "lease already gone" },
+      ],
+    },
+  },
 };

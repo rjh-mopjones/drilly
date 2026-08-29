@@ -687,4 +687,68 @@ export const STOCK_EXCHANGE: Diagram = {
       },
     },
   ],
+  figures: {
+    "deterministic-inputs": {
+      title: "Four inputs the engine must never read directly",
+      nodes: [
+        { id: "wall-clock", label: "Wall clock", kind: "external", col: 0, row: 0 },
+        { id: "hash-order", label: "Hash iteration order", kind: "external", col: 1, row: 0 },
+        { id: "allocation", label: "On-demand allocation", kind: "external", col: 0, row: 1 },
+        { id: "config", label: "External config lookup", kind: "external", col: 1, row: 1 },
+        {
+          id: "seq-log",
+          label: "Sequenced log",
+          sub: "ticks + control messages",
+          kind: "queue",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The single channel every time-dependent or external input is required to pass through as a sequenced message.",
+            why: "Every replay reads the same values in the same order from this log, which is what makes the engine a pure function of it instead of of whatever the live environment happened to look like.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "wall-clock", to: "seq-log", tier: "control", label: "as tick events" },
+        { id: "e2", from: "hash-order", to: "seq-log", tier: "control", label: "explicit ordering" },
+        { id: "e3", from: "allocation", to: "seq-log", tier: "control", label: "preallocated pools" },
+        { id: "e4", from: "config", to: "seq-log", tier: "control", label: "sequenced control msg" },
+      ],
+    },
+    fencing: {
+      title: "Fencing revokes before the standby is promoted",
+      nodes: [
+        {
+          id: "recovering-primary",
+          label: "Recovering primary",
+          sub: "still publishing: unsafe",
+          kind: "external",
+          col: 0,
+          row: 0,
+          detail: {
+            what: "A primary that comes back after a failure is already believed dead, still able to publish trades.",
+            why: "Without fencing, this and a promoted standby can both emit trades under the same sequence numbers with different order ids, and subscribers accept both as real.",
+          },
+        },
+        { id: "promoted-standby", label: "Promoted standby", sub: "also publishing: unsafe", kind: "external", col: 1, row: 0 },
+        {
+          id: "fenced-primary",
+          label: "Old primary, fenced",
+          sub: "cannot publish",
+          kind: "service",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The failed primary, with its ability to publish explicitly revoked by the failover controller before promotion happens.",
+            why: "Revoking first is what makes the sub-second failover pause worthwhile: only one engine is ever live, at the cost of a deliberate delay.",
+          },
+        },
+        { id: "sole-publisher", label: "Standby, sole publisher", sub: "promoted after fencing", kind: "service", col: 1, row: 1 },
+      ],
+      edges: [
+        { id: "e1", from: "recovering-primary", to: "promoted-standby", tier: "control", label: "same seq #, two trades" },
+        { id: "e2", from: "fenced-primary", to: "sole-publisher", tier: "hot", step: 1, label: "revoke, then promote" },
+      ],
+    },
+  },
 };
