@@ -10,12 +10,30 @@ export const METRICS_MONITORING: Diagram = {
     shape:
       "One append-only time-series store with a write path that is allowed to say no, and two independent readers hanging off it: humans looking at dashboards, and an evaluator that pages someone when a number stays bad long enough to matter.",
     beats: [
-      "Collection is a pull by default. The agent reads its target list from service discovery and scrapes every endpoint every 10 seconds, which puts the cadence under your control and turns a dead target into an observation (`up == 0`) rather than an ambiguous silence. A push gateway exists beside it, but as the explicit exception path for jobs that live shorter than a scrape interval or sit behind a boundary you cannot poll into.",
-      "The write path is one service, not five. Inside it five stages run cheapest first with no network hop between them: relabel drops, a known-series hash lookup that at steady state hits for essentially every one of the 1M samples/s, then the per-metric budget, the per-tenant cap and a label-value heuristic. Only the miss path, a few thousand per second during a deploy, ever reaches the expensive checks, and that is the entire reason a limiter is affordable at this rate.",
-      "Storage is purpose-built and nothing like a row store. Timestamps arrive at a near-fixed cadence and values move slowly, so delta-of-delta on the timestamp and XOR on the float take a 16 byte sample down to about 1.5 bytes. Ingesters hold a head block in memory and a write-ahead log on local NVMe, keep the 10 second tier on that disk for 7 days, and seal a 2 hour immutable block into object storage.",
-      "Retention is three resolutions rather than one, because a year of 10 second data is 47TB against 131GB downsampled, a factor of 360. A compactor reads the sealed blocks back out of object storage, merges them, deduplicates the redundant collector pair by (series, timestamp), rolls 10s into 1 minute and 1 hour, and writes them back where the whole cold tier costs under 10 dollars a month.",
-      "The read side is two pools over two halves. A query frontend fans out across recent data still held by the ingesters and historical blocks behind a store gateway, routing by requested step size so a long range lands on a coarse tier, and it rejects a raw one year query outright instead of letting it time out. The alert evaluator gets its own reader pool against the ingesters, because 10,000 rules on a 30 second interval is roughly 330 evaluations per second, comparable to the entire dashboard load, and a capacity-planning query must never starve it.",
-      "Alerting is a state machine plus a router. Each rule holds pending, firing and resolved state and only fires once the condition has held for its configured duration, then the router groups, silences and inhibits before anything reaches a person, because 200 pages for one database failure is the same as no pages at all.",
+      {
+        text: "Collection is a pull by default. The agent reads its target list from service discovery and scrapes every endpoint every 10 seconds, which puts the cadence under your control and turns a dead target into an observation (`up == 0`) rather than an ambiguous silence. A push gateway exists beside it, but as the explicit exception path for jobs that live shorter than a scrape interval or sit behind a boundary you cannot poll into.",
+        lights: ["targets", "collector", "pushgw", "e2", "e3"],
+      },
+      {
+        text: "The write path is one service, not five. Inside it five stages run cheapest first with no network hop between them: relabel drops, a known-series hash lookup that at steady state hits for essentially every one of the 1M samples/s, then the per-metric budget, the per-tenant cap and a label-value heuristic. Only the miss path, a few thousand per second during a deploy, ever reaches the expensive checks, and that is the entire reason a limiter is affordable at this rate.",
+        lights: ["write-path", "relabel", "known-series", "metric-budget", "tenant-cap", "label-guard"],
+      },
+      {
+        text: "Storage is purpose-built and nothing like a row store. Timestamps arrive at a near-fixed cadence and values move slowly, so delta-of-delta on the timestamp and XOR on the float take a 16 byte sample down to about 1.5 bytes. Ingesters hold a head block in memory and a write-ahead log on local NVMe, keep the 10 second tier on that disk for 7 days, and seal a 2 hour immutable block into object storage.",
+        lights: ["ingesters", "e14"],
+      },
+      {
+        text: "Retention is three resolutions rather than one, because a year of 10 second data is 47TB against 131GB downsampled, a factor of 360. A compactor reads the sealed blocks back out of object storage, merges them, deduplicates the redundant collector pair by (series, timestamp), rolls 10s into 1 minute and 1 hour, and writes them back where the whole cold tier costs under 10 dollars a month.",
+        lights: ["compactor", "object-store", "e15", "e16"],
+      },
+      {
+        text: "The read side is two pools over two halves. A query frontend fans out across recent data still held by the ingesters and historical blocks behind a store gateway, routing by requested step size so a long range lands on a coarse tier, and it rejects a raw one year query outright instead of letting it time out. The alert evaluator gets its own reader pool against the ingesters, because 10,000 rules on a 30 second interval is roughly 330 evaluations per second, comparable to the entire dashboard load, and a capacity-planning query must never starve it.",
+        lights: ["query-frontend", "evaluator", "ingesters", "e17", "e-historical", "e21"],
+      },
+      {
+        text: "Alerting is a state machine plus a router. Each rule holds pending, firing and resolved state and only fires once the condition has held for its configured duration, then the router groups, silences and inhibits before anything reaches a person, because 200 pages for one database failure is the same as no pages at all.",
+        lights: ["evaluator", "router", "notify", "e22", "e23"],
+      },
     ],
     crux:
       "The system is priced per series, not per sample, and the label sets that create series are chosen by application teams rather than by you. A sample costs 1.5 bytes on disk; a series costs 3 to 4KB of ingester memory the moment it is created. That is three orders of magnitude of asymmetry, which is why the control has to sit on the write path: by the time a query runs, the memory is already spent. And every cap in the design bounds concurrent series while doing nothing about churn.",
@@ -44,6 +62,14 @@ export const METRICS_MONITORING: Diagram = {
         ],
         breaks:
           "A deploy ships a runaway label set and this one target's series count goes multiplicative, with no warning that anything changed except the counters downstream.",
+        choice: {
+          pick: "Expose a pull-scrapeable /metrics endpoint from every process",
+          instead: "Bundle a push SDK into every service that ships samples to a collector on its own schedule.",
+          decider:
+            "Who owns the cadence for 10,000 hosts. A pull endpoint costs one library and zero outbound network config; a push SDK means every one of those hosts independently decides its own send interval and retry policy, which the monitoring team then has to reconcile after the fact rather than set once.",
+          flips:
+            "A process that genuinely cannot be polled, behind a boundary or living shorter than a scrape interval, which is exactly the exception the push gateway exists to catch rather than the default for all 10,000 hosts.",
+        },
       },
     },
     {
@@ -59,10 +85,9 @@ export const METRICS_MONITORING: Diagram = {
         numbers: [
           "accepts what a 10s scrape structurally cannot see",
           "bounded buffer, ~5 minutes of burst",
-          "past the buffer the correct behaviour is to shed, not to queue",
         ],
         breaks:
-          "Silence through this path means nothing, so every workload behind it needs its own explicit liveness signal, and the gateway inherits whatever rate producers choose rather than owning the cadence.",
+          "Silence through this path means nothing, so every workload behind it needs its own explicit liveness signal, and the gateway inherits whatever rate producers choose rather than owning the cadence. Past the buffer the correct behaviour is to shed, not to queue.",
         choice: {
           pick: "A gateway with real backpressure, used only for what cannot be scraped",
           instead: "Make push the front door for the whole fleet and delete the collector tier.",
@@ -82,12 +107,11 @@ export const METRICS_MONITORING: Diagram = {
       row: 1,
       detail: {
         what: "An agent per host or pod that reads its target list from service discovery — the platform's own registry, re-read continuously rather than at boot — and pulls every endpoint on a fixed 10 second schedule, applying relabel rules before it forwards.",
-        why: "Pulling puts the cadence under one owner instead of inheriting whatever each team configured, and it makes failure detection free: a target that does not answer is something the collector observed, so `up == 0` is a fact rather than an inference. That only works because service discovery makes `up == 0` mean something: the collector knows a target should have answered because the registry said so, which is the whole difference between an observed failure and an absence nobody can distinguish from a healthy idle service.",
+        why: "Pulling puts the cadence under one owner instead of inheriting whatever each team configured, and it makes failure detection free: a target that does not answer is something the collector observed, so `up == 0` is a fact rather than an inference. That only works because service discovery makes `up == 0` mean something: the collector knows a target should have answered because the registry said so, which is the whole difference between an observed failure and an absence nobody can distinguish from a healthy idle service. It runs as a redundant pair per target, deduplicated later by the `cluster` and `replica` labels.",
         numbers: [
           "10s scrape interval",
           "1M samples/s steady, 3M peak",
           "~29MB/s on the wire after snappy, a quarter of a 1GbE link",
-          "run as a redundant pair per target, deduplicated later by `cluster` and `replica`",
           "registry: 10,000 hosts, target list re-read on the order of every 30s",
         ],
         breaks:
@@ -142,11 +166,10 @@ export const METRICS_MONITORING: Diagram = {
       parent: "write-path",
       detail: {
         what: "A static rule set applied before anything else: drop this metric entirely, strip this label from every metric, keep only this allowlist for this job.",
-        why: "First because it is the only stage with no state and no lookup, so it is the cheapest place to delete work. It is also the only stage that can do anything about churn: removing `pod` from a metric that only ever needed `deployment` prevents the series from being created at all, which no downstream cap can do.",
+        why: "First because it is the only stage with no state and no lookup, so it is the cheapest place to delete work. It is also the only stage that can do anything about churn: removing `pod` from a metric that only ever needed `deployment` prevents the series from being created at all, which no downstream cap can do. The same rules are also applied at the agent, so a drop can happen before the wire.",
         numbers: [
           "one map lookup per sample, no state",
           "runs on all 1M samples/s",
-          "also applied at the agent, so a drop can happen before the wire",
         ],
         breaks:
           "It is a config file nobody reviews with the cardinality budget in front of them, so the rule that would have saved you is usually written the week after the incident.",
@@ -210,11 +233,10 @@ export const METRICS_MONITORING: Diagram = {
       parent: "write-path",
       detail: {
         what: "Reject if the tenant is already at 2M active series, and return an explicit HTTP error rather than dropping quietly.",
-        why: "It bounds the blast radius of one bad team to that team: 2M is 20% of the 10M the ingester tier can hold, so no tenant can consume more than a fifth of the head memory everyone shares. The error is the important half — a remote-write client that receives a 200 for a dropped sample never retries it and never tells anyone.",
+        why: "It bounds the blast radius of one bad team to that team: 2M is 20% of the 10M the ingester tier can hold, so no tenant can consume more than a fifth of the head memory everyone shares. The error is the important half — a remote-write client that receives a 200 for a dropped sample never retries it and never tells anyone. Every drop is counted under `metric_dropped_total{tenant, metric, reason}`.",
         numbers: [
           "2M active series per tenant, 20% of the 10M ceiling",
           "alert at 80% of the cap, before any drop starts",
-          "`metric_dropped_total{tenant, metric, reason}`",
         ],
         breaks:
           "A tenant sitting on its cap has rules that return no data, and a rule that returns no data does not fire, so the limiter converts a loud failure into silence for exactly the team it is throttling.",
@@ -230,9 +252,8 @@ export const METRICS_MONITORING: Diagram = {
       parent: "write-path",
       detail: {
         what: "The only stage that inspects values: a label key that has seen more distinct values than its threshold in a rolling window is almost always a UUID, a request id, an email address or a raw URL path.",
-        why: "Stages 3 and 4 catch the explosion only after it has already cost a million series. This one catches the shape of the mistake — an unbounded value space on one key — and it is last because it is the only stage that has to hold per-label-key state.",
+        why: "Stages 3 and 4 catch the explosion only after it has already cost a million series. This one catches the shape of the mistake — an unbounded value space on one key — and it is last because it is the only stage that has to hold per-label-key state, against a threshold configurable per label key.",
         numbers: [
-          "per-label-key threshold, configurable",
           "runs only on the miss path, never on the 1M samples/s",
           "a legitimate 50,000-customer dimension trips it identically",
         ],
@@ -372,12 +393,10 @@ export const METRICS_MONITORING: Diagram = {
       col: 3,
       row: 2,
       detail: {
-        what: "A background job that reads sealed 2 hour blocks back out of object storage, merges them, deduplicates the redundant collector pair by (series, timestamp) using the `cluster` and `replica` external labels, produces 1 minute and 1 hour rollups, and writes them back.",
+        what: "A background job that reads sealed 2 hour blocks back out of object storage, merges them, deduplicates the redundant collector pair by a (series, timestamp) key using the `cluster` and `replica` external labels, produces 1 minute and 1 hour rollups, and writes them back. It runs only on sealed blocks, never on the head.",
         why: "It exists so retention becomes a storage-cost question rather than a capacity-planning one. Dedup lives here rather than on the write path because samples are idempotent by timestamp, so a duplicate is a no-op and can be resolved lazily — which is precisely the property an order-flow pipeline does not have.",
         numbers: [
           "10s to 1m is 6x, 10s to 1h is 360x",
-          "runs on sealed blocks, never on the head",
-          "dedup key: (series, timestamp)",
         ],
         breaks:
           "Downsampling is irreversible. The honest form of the decision is whether anyone will ever need the exact shape of a 30 second spike from four months ago, because after this job runs they cannot have it.",
@@ -430,7 +449,7 @@ export const METRICS_MONITORING: Diagram = {
       row: 4,
       detail: {
         what: "The human read path: browser panels refreshing on a fixed interval against the query frontend.",
-        why: "Drawn as its own consumer because its load profile is the opposite of alerting's. It is bursty, driven by whoever is looking, and it spikes exactly when the alert path most needs the read capacity it would otherwise share.",
+        why: "It is its own consumer because its load profile is the opposite of alerting's. It is bursty, driven by whoever is looking, and it spikes exactly when the alert path most needs the read capacity it would otherwise share.",
         numbers: [
           "1,000 engineers x 10 panels / 30s = ~330 queries/s",
           "roughly 10x that during a company-wide incident",
@@ -453,10 +472,9 @@ export const METRICS_MONITORING: Diagram = {
         numbers: [
           "100% of fired alerts delivered within 60s",
           "alerting fails over to the peer region in <5min",
-          "`alertmanager_notifications_failed_total` per receiver",
         ],
         breaks:
-          "It only covers total silence. The self-concealing failures — the write path dropping one tenant's series so their rules return no data — produce no heartbeat gap at all.",
+          "It only covers total silence. The self-concealing failures — the write path dropping one tenant's series so their rules return no data — produce no heartbeat gap at all. `alertmanager_notifications_failed_total` per receiver is the only counter that catches a delivery failure rather than a silence.",
         choice: {
           pick: "Third-party paging with an external dead-man's-switch, and a second evaluator stack on an independent TSDB replica",
           instead: "Self-hosted notification plus a meta-alert evaluated by the same stack.",
@@ -533,8 +551,8 @@ export const METRICS_MONITORING: Diagram = {
       id: "e6",
       from: "relabel",
       to: "known-series",
+      tier: "hot",
       label: "kept after drop rules",
-      animated: true,
       detail: {
         what: "Everything the static rule set did not delete or rewrite, moving to the series lookup in the same process.",
         why: "No network hop crosses here, which is the point of drawing these as stages rather than services: the ordering exists to put the cheapest test first, not to put a queue between two deployables.",
@@ -565,6 +583,7 @@ export const METRICS_MONITORING: Diagram = {
       id: "e8",
       from: "known-series",
       to: "metric-budget",
+      tier: "data",
       label: "miss: new series",
       detail: {
         what: "The lookup missed, so this is a series that does not exist yet and is about to cost 3 to 4KB of ingester memory.",
@@ -582,6 +601,7 @@ export const METRICS_MONITORING: Diagram = {
       id: "e9",
       from: "metric-budget",
       to: "tenant-cap",
+      tier: "data",
       label: "under 1M per metric",
       detail: {
         what: "The new series' metric name still has room under its million-series budget, so the check moves on to who is paying for it.",
@@ -595,6 +615,7 @@ export const METRICS_MONITORING: Diagram = {
       id: "e10",
       from: "tenant-cap",
       to: "label-guard",
+      tier: "data",
       label: "under 2M per tenant",
       detail: {
         what: "The tenant is still under its 2M active-series cap, so the last check looks at what the label values actually contain.",
@@ -612,11 +633,10 @@ export const METRICS_MONITORING: Diagram = {
       label: "index new series",
       detail: {
         what: "The series cleared all five stages, so it is indexed: label set stored, postings entries written for every label key-value pair, a fresh chunk opened and a WAL record appended.",
-        why: "This is where the money is actually spent. Every 3 to 4KB of head memory in the design is committed on this edge, and nothing downstream can give it back until head compaction retires the series.",
+        why: "This is where the money is actually spent. Every 3 to 4KB of head memory in the design is committed on this edge, and nothing downstream can give it back until head compaction retires the series. That same cost is then paid again in every sealed block the series appears in.",
         numbers: [
           "3 to 4KB of ingester memory per series, at creation",
           "a few thousand per second during a deploy",
-          "the same cost is then paid again in every sealed block the series appears in",
         ],
         breaks:
           "Head compaction is what releases the memory of retired series, so a deploy cadence rotating pod names faster than the 2 hour window makes memory a function of deploy frequency.",
@@ -630,10 +650,9 @@ export const METRICS_MONITORING: Diagram = {
       label: "429 + counted drop",
       offset: 40,
       detail: {
-        what: "The rejection travelling back to the sender as an explicit HTTP error, with `metric_dropped_total{tenant, metric, reason}` incremented and attributed to the owning team. Stages 3 and 5 count their drops the same way.",
+        what: "The rejection travelling back to the sender as an explicit HTTP error, with `metric_dropped_total{tenant, metric, reason}` incremented and attributed to the owning team, labelled by tenant, metric and reason. Stages 3 and 5 count their drops the same way.",
         why: "A silent limiter is worse than no limiter. The team sees a flat graph, concludes the service is idle, and files a bug against monitoring three weeks later, so the drop has to be both counted and visible to whoever caused it. A remote-write client that receives a 200 for a dropped sample never retries and never tells anyone.",
         numbers: [
-          "labels: tenant, metric, reason",
           "alert at 80% of the cap, before this edge ever fires",
         ],
         breaks:
@@ -648,10 +667,9 @@ export const METRICS_MONITORING: Diagram = {
       label: "2h immutable blocks",
       detail: {
         what: "A sealed, time-ranged, immutable block uploaded to object storage every two hours per ingester.",
-        why: "Sealing on a schedule is what lets the head block stay bounded and lets everything downstream treat history as immutable, which is the property the whole object-storage tier depends on. It also decouples retention from the size of any node.",
+        why: "Sealing on a schedule is what lets the head block stay bounded and lets everything downstream treat history as immutable, which is the property the whole object-storage tier depends on. It also decouples retention from the size of any node, and head compaction is what retires stale index entries.",
         numbers: [
           "one block every 2 hours per ingester",
-          "head compaction is also what retires stale index entries",
           "a year of 2h blocks is over 4,000 objects",
         ],
         breaks:
@@ -666,11 +684,8 @@ export const METRICS_MONITORING: Diagram = {
       label: "sealed blocks in",
       detail: {
         what: "The compactor reading back the raw 2 hour blocks the ingesters uploaded, together with the redundant copy the second collector produced.",
-        why: "Compaction reads from object storage rather than from the ingesters on purpose: the head must never be touched by a background job competing with 1M samples/s, and a block is immutable, so the merge can run whenever there is capacity.",
-        numbers: [
-          "reads only sealed blocks, never the head",
-          "dedup key: (series, timestamp) via the `cluster` and `replica` labels",
-        ],
+        why: "Compaction reads from object storage rather than from the ingesters on purpose: the head must never be touched by a background job competing with 1M samples/s, and a block is immutable, so the merge can run whenever there is capacity. It reads only sealed blocks, never the head, and dedups on a (series, timestamp) key via the `cluster` and `replica` labels.",
+        numbers: [],
         breaks:
           "If the compactor falls behind, block count grows without bound and every long-range query pays for the fan-out across un-merged two-hour blocks.",
       },
@@ -715,10 +730,9 @@ export const METRICS_MONITORING: Diagram = {
       label: "historical, by step size",
       detail: {
         what: "Anything older than the hot window, handed off at the resolution chosen from the query's requested step, resolved through a store-gateway tier that keeps each block's index header resident and fans reads out across the candidate blocks.",
-        why: "Step-size routing is what stops a long range from becoming a raw scan. A 1 hour step reads the hourly tier and returns 8,760 points for a year rather than 3.15M per series, and a raw query past the 7 day window is rejected here rather than allowed to time out. Caching index headers rather than listing objects is the difference between a warm map lookup and thousands of object-storage round trips per query.",
+        why: "Step-size routing is what stops a long range from becoming a raw scan. A 1 hour step reads the hourly tier and returns 8,760 points for a year rather than 3.15M per series, and a raw query past the 7 day window is rejected here outright rather than allowed to time out. Caching index headers rather than listing objects is the difference between a warm map lookup and thousands of object-storage round trips per query.",
         numbers: [
           "ranges beyond 7 days route to 1m or 1h",
-          "raw queries past hot retention are rejected outright",
           "a year-long selector considers 4,000+ candidate blocks",
         ],
         breaks:
@@ -751,11 +765,10 @@ export const METRICS_MONITORING: Diagram = {
       offset: 60,
       detail: {
         what: "Range queries over roughly a 5 minute window, one per rule per evaluation interval, served by a reader pool dedicated to alerting and pointed at the same recent tier the dashboards read.",
-        why: "The pool is separate because alert evaluation generates read load comparable to all of dashboards, and it must keep running precisely when human query load spikes. A slow query here also silently lengthens the effective hold and can reset pending state.",
+        why: "The pool is separate because alert evaluation generates read load comparable to all of dashboards, and it must keep running precisely when human query load spikes. A slow query here also silently lengthens the effective hold and can reset pending state. Rule windows are always recent, so this path never reaches the store gateway.",
         numbers: [
           "10,000 rules / 30s = ~330 evaluations/s",
           "each a range query over a 5 minute window",
-          "never reaches the store gateway: rule windows are always recent",
         ],
         breaks:
           "If this read path shares capacity with ad hoc queries, one capacity-planning question starves alerting during the incident it was meant to catch.",
@@ -801,9 +814,8 @@ export const METRICS_MONITORING: Diagram = {
       offset: 80,
       detail: {
         what: "A heartbeat emitted on a fixed cadence to a third-party monitor that pages when the beat stops, backed by a second evaluator stack running against an independent TSDB replica in the peer region.",
-        why: "The alert evaluator cannot run on the TSDB it monitors, and the meta-monitor cannot run on your infrastructure either, or a full outage takes both down together and nobody is told.",
+        why: "The alert evaluator cannot run on the TSDB it monitors, and the meta-monitor cannot run on your infrastructure either, or a full outage takes both down together and nobody is told. This beat terminates outside the monitoring infrastructure entirely.",
         numbers: [
-          "terminates outside your infrastructure entirely",
           "alerting fails over to the peer region in <5min",
         ],
         breaks:

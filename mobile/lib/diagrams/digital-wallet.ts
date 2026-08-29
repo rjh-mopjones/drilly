@@ -10,12 +10,30 @@ export const DIGITAL_WALLET: Diagram = {
     shape:
       "A wallet is a double-entry ledger with a cache in front of it: every movement writes a debit and a matching credit, and the balance the user sees is a materialised sum that can always be rebuilt from those entries.",
     beats: [
-      "Balances are never authoritative. The ledger is append-only, rows are inserted and never updated or deleted, and accounts.balance is a materialised sum of it. That inversion is the whole answer, and it is why reversals, disputes and a seven-year audit are answerable at all.",
-      "Accounts are sharded by user_id % 128, which is what makes 10k transfers/s possible and is also what creates the problem. A random pair shares a shard under 1% of the time, so cross-shard is the design rather than the exception, and every latency and capacity number should be quoted for that path.",
-      "Same shard is one local ACID transaction and the fast path at roughly 5ms: a conditional update that deducts only if the funds exist, plus the two ledger rows, committed together. The predicate lives inside the UPDATE, which is what makes double-spend structurally impossible rather than merely unlikely.",
-      "Cross shard is reserve-then-confirm, the pattern known as TCC. Try moves money from available into reserved on the sender and into pending on the receiver, writing no ledger entry; Confirm clears the hold and inserts the entry in the same local transaction. Four small local transactions in two rounds, about 20ms.",
-      "Every reservation carries a 30s deadline and the orchestrator's lease id, so a coordinator that dies leaves a row that expires rather than a frozen account, and a stale Confirm arriving after the sweeper matches zero rows instead of half-applying the transfer.",
-      "Hourly per-shard reconciliation proves that the sum of entries equals the balance row. Drift freezes the account and pages a human, and never self-corrects, because an auto-corrector is a background job with unreviewed write access to every balance in the system.",
+      {
+        text: "Balances are never authoritative. The ledger is append-only, rows are inserted and never updated or deleted, and accounts.balance is a materialised sum of it. That inversion is the whole answer, and it is why reversals, disputes and a seven-year audit are answerable at all.",
+        lights: ["ledger", "shard-a", "e8", "e9"],
+      },
+      {
+        text: "Accounts are sharded by user_id % 128, which is what makes 10k transfers/s possible and is also what creates the problem. A random pair shares a shard under 1% of the time, so cross-shard is the design rather than the exception, and every latency and capacity number should be quoted for that path.",
+        lights: ["shard-cluster", "shard-a", "shard-b"],
+      },
+      {
+        text: "Same shard is one local ACID transaction and the fast path at roughly 5ms: a conditional update that deducts only if the funds exist, plus the two ledger rows, committed together. The predicate lives inside the UPDATE, which is what makes double-spend structurally impossible rather than merely unlikely.",
+        lights: ["shard-a", "orchestrator"],
+      },
+      {
+        text: "Cross shard is reserve-then-confirm, the pattern known as TCC. Try moves money from available into reserved on the sender and into pending on the receiver, writing no ledger entry; Confirm clears the hold and inserts the entry in the same local transaction. Four small local transactions in two rounds, about 20ms.",
+        lights: ["orchestrator", "shard-a", "shard-b", "e4", "e5", "e8", "e9"],
+      },
+      {
+        text: "Every reservation carries a 30s deadline and the orchestrator's lease id, so a coordinator that dies leaves a row that expires rather than a frozen account, and a stale Confirm arriving after the sweeper matches zero rows instead of half-applying the transfer.",
+        lights: ["orchestrator", "sweeper", "shard-a", "e6", "e7"],
+      },
+      {
+        text: "Hourly per-shard reconciliation proves that the sum of entries equals the balance row. Drift freezes the account and pages a human, and never self-corrects, because an auto-corrector is a background job with unreviewed write access to every balance in the system.",
+        lights: ["reconciler", "ledger", "shard-a", "e12", "e13"],
+      },
     ],
     crux:
       "Making one transfer atomic across two shards without a coordinator that can freeze somebody's money. A distributed transaction holds locks across the network; a plain compensating saga exposes a window where the money is in neither account, and a balance read in that window returns a number that was never true.",
@@ -105,18 +123,19 @@ export const DIGITAL_WALLET: Diagram = {
       col: 1,
       row: 1,
       detail: {
-        what: "The durable three-phase state machine: Try on both sides, then Confirm on both sides, with Cancel as the failure branch.",
-        why: "This is the only place that knows a transfer is one thing rather than two independent writes. Its state is persisted between phases so a crash resumes from the last phase rather than restarting, and Confirm and Cancel are idempotent on (transfer_id, side) so a resumed run cannot double-apply.",
+        what: "The durable three-phase state machine: Try on both sides, then Confirm on both sides, with Cancel as the failure branch. It runs on a durable workflow engine such as Temporal rather than an ad-hoc state column plus a cron job re-driving stuck transfers, with the same-shard case short-circuited to one local transaction.",
+        why: "This is the only place that knows a transfer is one thing rather than two independent writes. Its state is persisted between phases so a crash resumes from the last phase rather than restarting, and Confirm and Cancel are idempotent on (transfer_id, side) so a resumed run cannot double-apply. With >90% of transfers crossing shards at 10k/s, a resumable phase log is the difference between a crash costing one transfer and a crash costing every transfer in flight; ~200 reservations are open at any instant in steady state and 300k in a full fleet stall.",
         numbers: ["4 local transactions in 2 rounds, ~20ms", "same-shard fast path ~5ms", ">90% of transfers take the TCC path"],
         breaks:
           "Dying between Try and Confirm. The reservation TTL is the backstop for a genuinely dead orchestrator, not the primary recovery path, and the two racing is a real failure the lease id exists to settle.",
         choice: {
-          pick: "A durable workflow engine such as Temporal driving TCC, with the same-shard case short-circuited to one local transaction",
-          instead: "An ad-hoc state column plus a cron job re-driving stuck transfers.",
+          pick: "Application-level TCC, whose locks are held only inside each Try for 1-2ms and whose durable state is a column with a deadline",
+          instead:
+            "Put every shard in one distributed-SQL cluster (Spanner, CockroachDB, Yugabyte) and write the transfer as a single begin/commit, letting the store run two-phase commit internally. That is genuinely the better answer under conditions many wallets actually meet, and the reflex that 2PC is always wrong is itself wrong: it is strictly less code, with no sweeper to operate and no three-phase state machine to test. Single region, 2PC adds about one consensus round trip, so ~50 of 300M rows are locked at any instant, which is nothing.",
           decider:
-            "Whether the state machine survives its own process. With >90% of transfers crossing shards at 10k/s, a resumable phase log is the difference between a crash costing one transfer and a crash costing every transfer in flight; ~200 reservations are open at any instant in steady state and 300k in a full fleet stall.",
+            "How long a lock may be held across the network, and what happens when the coordinator stalls. Cross-region the same round trip is 60-150ms, capping a hot account at roughly 16 transfers/s, and a stalled 2PC coordinator holds row locks on both shards until an operator intervenes, whereas a TCC reservation holds nothing and expires on its own.",
           flips:
-            "Same-shard-only or single-node wallets, where there is no second phase to orchestrate and the whole transfer is one begin/commit.",
+            "All shards in one cluster in one region, peak of a few thousand transfers/s, and no account above a few hundred writes/s. Then take the distributed transaction. It stops winning the day you go multi-region or a merchant gets popular.",
         },
       },
     },
@@ -178,7 +197,7 @@ export const DIGITAL_WALLET: Diagram = {
       detail: {
         what: "The receiver's shard. Try increments pending and writes no ledger entry; Confirm moves pending into balance and inserts the credit in the same local transaction.",
         why: "Putting the entry at Confirm rather than Try is the whole trick. The funds were checked and set aside at Try, so Confirm cannot fail for business reasons and the only reason it retries is infrastructure.",
-        numbers: ["Try and Confirm are 1-2ms local transactions", "idempotent on (transfer_id, side)"],
+        numbers: ["Try and Confirm are 1-2ms local transactions", "idempotent: 1 write per (transfer_id, side)"],
         breaks:
           "A receiver whose account is frozen fails its Try, which forces a Cancel of the sender's already-successful Try. That branch is the one worth testing, because it is the only place Cancel runs on the happy shard.",
         choice: {
@@ -249,7 +268,7 @@ export const DIGITAL_WALLET: Diagram = {
       detail: {
         what: "The hourly per-shard check that sum(ledger_entries.amount) equals accounts.balance, that debits equal credits globally, and that every committed entry reached the event stream.",
         why: "The balance is a cache, so this is the job that turns 'probably correct' into 'proven correct on a schedule'. The invariant is deliberately not balance + reserved: reserved money has no entries because it has not moved.",
-        numbers: ["hourly window = 20M entries", "100M account rows across 128 shards", "drift is incident-grade at any magnitude"],
+        numbers: ["hourly window = 20M entries", "100M account rows across 128 shards", "even $0.01 of drift is incident-grade"],
         breaks:
           "Freezing a real person out of their own money on a false positive, because a check that races an in-flight Confirm sees a mismatch that would have resolved itself. Re-run after a short delay, and freeze debits only so the account is degraded rather than dead.",
         choice: {
@@ -259,29 +278,6 @@ export const DIGITAL_WALLET: Diagram = {
             "What the corrector would be. A job that rewrites balances without review has unreviewed write access to all 100M accounts and a mandate to change them, which is a description of the worst possible bug in this system. A silent corrector is a silent thief.",
           flips:
             "Never for balances. The cheap half does flip: keep a running per-account entry total updated in the same transaction as the insert so the hourly check is a column comparison, and full-scan only nightly.",
-        },
-      },
-    },
-    {
-      id: "dist-sql",
-      label: "Distributed SQL (2PC)",
-      sub: "the alternative, not deployed",
-      kind: "database",
-      col: 2,
-      row: 1,
-      detail: {
-        what: "The road not taken: put every shard in one Spanner, CockroachDB or Yugabyte cluster and write the transfer as a single begin/commit, letting the store run two-phase commit internally.",
-        why: "It is drawn because it is genuinely the better answer under conditions many wallets actually meet, and because the reflex that 2PC is always wrong is itself wrong. It is strictly less code, with no sweeper to operate and no three-phase state machine to test.",
-        numbers: ["one region: rows locked ~2-5ms, ~50 locked rows at 10k/s", "cross-region: 60-150ms per transfer", "a hot row caps at 1/0.06 = ~16 transfers/s"],
-        breaks:
-          "A stalled coordinator holds row locks on both shards until an operator intervenes, queueing everything that touches those two accounts behind it.",
-        choice: {
-          pick: "Application-level TCC, whose locks are held only inside each Try for 1-2ms and whose durable state is a column with a deadline",
-          instead: "The store's internal two-phase commit across one distributed-SQL cluster.",
-          decider:
-            "How long a lock may be held across the network, and what happens when the coordinator stalls. Single region, 2PC adds about one consensus round trip, so ~50 rows out of 300M are locked at any instant, which is nothing. Cross-region the same round trip is 60-150ms, capping a hot account at ~16 transfers/s, and a stalled coordinator needs a human.",
-          flips:
-            "All shards in one cluster in one region, peak of a few thousand transfers/s, and no account above a few hundred writes/s. Then take the distributed transaction. It stops winning the day you go multi-region or a merchant gets popular.",
         },
       },
     },
@@ -416,7 +412,7 @@ export const DIGITAL_WALLET: Diagram = {
       detail: {
         what: "Confirm on the sender: clear the reservation and insert the debit row in the same local transaction.",
         why: "The entry lands at Confirm, not at Try, and that placement is the trick. The instant a reservation stops existing its entry exists, so there is no window where a hold is gone and the ledger has not caught up.",
-        numbers: ["idempotent on (transfer_id, side)"],
+        numbers: ["idempotent: 1 write per (transfer_id, side)"],
         breaks:
           "Splitting the hold-clear and the insert into two transactions reintroduces exactly the window the design removed, and it would be invisible until reconciliation caught it an hour later.",
       },
@@ -471,7 +467,7 @@ export const DIGITAL_WALLET: Diagram = {
       detail: {
         what: "The per-account running total of entries, maintained in the same transaction as each insert, read hourly by the check.",
         why: "Aggregating 20M entries an hour across 128 shards is the naive version and it does not stay cheap. Keeping the total as a column makes the hourly check a comparison, and the full scan runs nightly as a check on the running total itself.",
-        numbers: ["20M entries per hourly window", "full scan nightly only"],
+        numbers: ["20M entries per hourly window", "1 full scan per night, nothing hourly"],
         breaks:
           "If the running total is maintained anywhere other than the entry's own transaction, it becomes a third thing that can drift, and the check no longer proves anything.",
       },
@@ -485,7 +481,7 @@ export const DIGITAL_WALLET: Diagram = {
       detail: {
         what: "The materialised balance read back and compared against the ledger's total for that account.",
         why: "This is the comparison that catches a materialisation bug. Entries are truth and the balance is a cache, so any disagreement means the balance is wrong, never the entries.",
-        numbers: ["hourly, per shard", "any non-zero drift is incident-grade"],
+        numbers: ["128 shards checked hourly", "any non-zero drift is incident-grade"],
         breaks:
           "The check racing an in-flight Confirm produces a false positive, so acting on the first mismatch freezes accounts that were about to be fine. Re-run after a delay, and freeze debits only.",
       },
@@ -502,20 +498,6 @@ export const DIGITAL_WALLET: Diagram = {
         numbers: ["~12k reads/s peak", "<100 reads/s per shard leader"],
         breaks:
           "Collapsing the three numbers into one. A user who sees pending folded into their balance will try to spend it, and the spend correctly fails against available.",
-      },
-    },
-    {
-      id: "e15",
-      from: "orchestrator",
-      to: "dist-sql",
-      tier: "control",
-      label: "alternative: one commit",
-      detail: {
-        what: "The design branch not taken: hand the whole transfer to one distributed-SQL cluster as a single begin/commit and let it run 2PC internally.",
-        why: "It removes the orchestrator, the sweeper and the reservation columns entirely, which is a lot of code and operational surface for a system whose only job is to be correct. Worth stating out loud rather than dismissing by reflex.",
-        numbers: ["one region: ~2-5ms of lock per transfer", "cross-region: 60-150ms, ~16 transfers/s per hot row"],
-        breaks:
-          "The coordinator. A stall holds locks on both shards until an operator intervenes, whereas a TCC reservation holds nothing and expires on its own.",
       },
     },
   ],

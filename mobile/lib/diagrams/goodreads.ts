@@ -10,12 +10,30 @@ export const GOODREADS: Diagram = {
     shape:
       "A read-dominated catalogue whose primary key is a guess: book pages are static enough to live at the CDN edge, while an offline pipeline decides, and keeps re-deciding, which of 300M dirty edition records describe the same book.",
     beats: [
-      "The read path is almost entirely cache. A book page is byte-identical for every viewer and it is the organic-search surface, so the anonymous shell (work metadata, edition list, aggregate rating, histogram, top ten reviews) is a CDN object on a five minute TTL, returning in ~20ms at a 92% hit rate.",
-      "Personalised state is deliberately not in that body. A logged-in reader gets the same cached shell plus a separate ~5ms call for shelf, progress and their own rating, spliced in on the client. Splitting personalised state out of the cacheable body is the single biggest lever in the whole design.",
-      "Writes are small, rare and asynchronous. Shelving is one ~120B row partitioned by user_id at ~8ms, and a rating is a row plus an event; peak is ~750/s across 4M DAU. The work average is folded incrementally off the event log rather than recomputed over 1.8B rating rows.",
-      "Identity is inferred rather than looked up. Records arrive from publisher feeds, library records and members disagreeing on title, author spelling, page count and year. Pairwise comparison of 300M records is 4.5x10^16 pairs, so blocking on title tokens plus a folded author surname plus language cuts it to ~500M.",
-      "A merge writes pointers and nothing else. Above 0.92 the pipeline unions two clusters, 0.75 to 0.92 goes to a moderator queue, and every merge appends the full pre-merge membership of both sides to a log. No review row is ever rewritten, which is what makes unmerge a replay rather than a restore.",
-      "Everything downstream hangs off those same stores offline. Search reindexes incrementally from the merge log with a nightly full rebuild swapped in atomically, and the recommender reads a nightly dump of shelvings, discounting item scores by count^0.5 so the head does not eat every slot.",
+      {
+        text: "The read path is almost entirely cache. A book page is byte-identical for every viewer and it is the organic-search surface, so the anonymous shell (work metadata, edition list, aggregate rating, histogram, top ten reviews) is a CDN object on a five minute TTL, returning in ~20ms at a 92% hit rate.",
+        lights: ["client", "cdn", "e1", "e2"],
+      },
+      {
+        text: "Personalised state is deliberately not in that body. A logged-in reader gets the same cached shell plus a separate ~5ms call for shelf, progress and their own rating, spliced in on the client. Splitting personalised state out of the cacheable body is the single biggest lever in the whole design.",
+        lights: ["client", "shelf-svc", "e7"],
+      },
+      {
+        text: "Writes are small, rare and asynchronous. Shelving is one ~120B row partitioned by user_id at ~8ms, and a rating is a row plus an event; peak is ~750/s across 4M DAU. The work average is folded incrementally off the event log rather than recomputed over 1.8B rating rows.",
+        lights: ["shelf-svc", "shelvings", "kafka", "aggregates", "e8", "e9", "e10"],
+      },
+      {
+        text: "Identity is inferred rather than looked up. Records arrive from publisher feeds, library records and members disagreeing on title, author spelling, page count and year. Pairwise comparison of 300M records is 4.5x10^16 pairs, so blocking on title tokens plus a folded author surname plus language cuts it to ~500M.",
+        lights: ["catalog-store", "er-pipeline", "e12"],
+      },
+      {
+        text: "A merge writes pointers and nothing else. Above 0.92 the pipeline unions two clusters, 0.75 to 0.92 goes to a moderator queue, and every merge appends the full pre-merge membership of both sides to a log. No review row is ever rewritten, which is what makes unmerge a replay rather than a restore.",
+        lights: ["er-pipeline", "clusters", "e13"],
+      },
+      {
+        text: "Everything downstream hangs off those same stores offline. Search reindexes incrementally from the merge log with a nightly full rebuild swapped in atomically, and the recommender reads a nightly dump of shelvings, discounting item scores by count^0.5 so the head does not eat every slot.",
+        lights: ["search", "recommender", "shelvings", "e15", "e16", "e17"],
+      },
     ],
     crux:
       "work_id looks like a primary key and behaves like a hypothesis. Under-merging splits a book's ratings across two pages, which is annoying and recoverable; over-merging puts 900 reviews of a horror novel on a children's picture book, which gets screenshotted. Since no threshold is safe, every merge has to be a reversible pointer write rather than a data migration.",
@@ -33,7 +51,7 @@ export const GOODREADS: Diagram = {
       detail: {
         what: "The two batch jobs that write into the serving stores rather than serving traffic themselves.",
         why: "Catalogue correctness and recommendation quality both tolerate hours of latency, so they are deliberately pushed off the request path. Losing this whole region is not an outage: the serving path keeps using the last published cluster table and recommendation lists.",
-        numbers: ["full dedup pass runs in under an hour", "batch region loss is tolerable for hours"],
+        numbers: ["full dedup pass runs in under 1 hour", "batch region loss is tolerable for 24+ hours"],
         breaks:
           "A pipeline change that merges 2M pairs in one pass enqueues 2M aggregate recomputes and reindexes at once, so merge application is rate limited per hour and prioritised by rating count.",
       },
@@ -85,7 +103,7 @@ export const GOODREADS: Diagram = {
       row: 1,
       detail: {
         what: "Renders the shell on a cache miss: work document, edition list, aggregates, and the top ten review IDs hydrated in one batch read.",
-        why: "Everything it touches is small, cached and globally identical, so it is a read-only assembler rather than a transaction owner. It also owns identifier resolution, which returns candidates rather than guessing when an ISBN is ambiguous.",
+        why: "Everything it touches is small, cached and globally identical, so it is a read-only assembler rather than a transaction owner. It also owns identifier resolution, which returns a list of matching editions rather than guessing when an ISBN is ambiguous.",
         numbers: ["work ~1ms, editions ~2ms, aggregate ~1ms", "top-10 reviews ~3ms + ~6ms hydrate", "~40ms server side, p99 ~180ms"],
         breaks:
           "Fan-out latency. Five dependent reads per render means one slow store sets the page p99, which is why review hydration is a single batch read rather than ten point reads.",
@@ -108,7 +126,7 @@ export const GOODREADS: Diagram = {
       row: 1,
       detail: {
         what: "The write path and the personalised read: shelvings, reading progress, ratings, review bodies and helpfulness votes.",
-        why: "User state cannot be shared between viewers, so it is kept out of the cacheable body and served live. The volumes are genuinely small, which is why the interview sits upstream of serving rather than here.",
+        why: "User state cannot be shared between viewers, so it is kept out of the cacheable body and served live. The volumes are genuinely small, which is why identity resolution sits upstream of serving rather than here.",
         numbers: ["shelf write ~8ms, p99 < 150ms", "~185/s average, ~750/s peak, ~2k/s in January", "shelf-state read ~5ms, never edge cached"],
         breaks:
           "Brigading: 40k one-star ratings in six hours before publication. An hourly rate above 20x the trailing 7-day baseline with over half from accounts under 30 days old quarantines new ratings into a holding buffer instead of deleting user content.",
@@ -154,7 +172,7 @@ export const GOODREADS: Diagram = {
       row: 3,
       parent: "offline-group",
       detail: {
-        what: "Nightly batch plus a streaming path for new records: normalise, block into candidate groups, score pairs on about eight weighted features, then auto-merge, queue for a moderator, or create a new work.",
+        what: "Nightly batch plus a streaming path for new records: normalise, block into comparison groups, score pairs on about eight weighted features, then auto-merge, queue for a moderator, or create a new work.",
         why: "The catalogue is not authored in house, it is inferred from sources that disagree in every field. Blocking is what makes the problem finite: ~80M blocks averaging four records, ~500M pairs at ~20us, about 8 minutes of wall clock on 200 cores.",
         numbers: ["~2M auto-merges, ~400k queued pairs per pass", "auto-merge precision SLO >= 99.5%", "new records resolve in ~200ms each"],
         breaks:
@@ -205,7 +223,7 @@ export const GOODREADS: Diagram = {
         why: "An edition is the object a reader is actually holding and a work is the thing ratings aggregate to, so they cannot be one row. The identifier maps to a list because publishers reuse and misassign ISBNs, which is a fact about the world rather than a data-quality bug.",
         numbers: ["~300M editions at ~2KB, ~1.8TB at RF=3", "~90M works at ~1.5KB, ~400GB at RF=3", "~200k new or changed records/day, ~2.3/s"],
         breaks:
-          "A feed reusing an ISBN-13. If the index were a unique key the second record either overwrites the first silently or wedges the feed; as a list, resolve returns ambiguous with candidates.",
+          "A feed reusing a 13-digit ISBN. If the index were a unique key the second record either overwrites the first silently or wedges the feed; as a list, resolve returns ambiguous with the matching editions.",
         choice: {
           pick: "Document store (DynamoDB or MongoDB), identifiers indexed to a list",
           instead: "A relational schema with a books table and a unique ISBN key.",
@@ -298,7 +316,7 @@ export const GOODREADS: Diagram = {
         numbers: [
           "~90M rows, ~1ms read",
           "displayed average updates within ~30s",
-          "fully recomputed after any merge or unmerge",
+          "1 full recompute triggered per merge or unmerge",
           "~1.8B ratings folded incrementally",
         ],
         breaks:
@@ -351,7 +369,7 @@ export const GOODREADS: Diagram = {
       label: "work + edition list",
       detail: {
         what: "Reading the work document and its edition list to build the page body.",
-        why: "The whole works table is ~400GB at RF=3, small enough to sit in a cache tier, which is precisely why book pages are cheap to serve and why the interview is not about this read.",
+        why: "The whole works table is ~400GB at RF=3, small enough to sit in a cache tier, which is precisely why book pages are cheap to serve and why this read is never the bottleneck.",
         numbers: ["work ~1ms, editions ~2ms"],
         breaks:
           "A work with 200+ editions makes this list the largest thing on the page, so the edition list has to be paged or truncated rather than returned whole.",
@@ -408,8 +426,8 @@ export const GOODREADS: Diagram = {
       offset: 90,
       detail: {
         what: "The second, tiny call a logged-in reader makes: shelf, progress percentage and their own rating for this work.",
-        why: "It bypasses the CDN entirely and on purpose. Keeping personalised state out of the cacheable body is what allows one shared object to serve 92% of traffic, and the splice happens on the client.",
-        numbers: ["~5ms", "never edge cached"],
+        why: "It bypasses the CDN entirely and on purpose, never edge cached. Keeping personalised state out of the cacheable body is what allows one shared object to serve 92% of traffic, and the splice happens on the client.",
+        numbers: ["~5ms"],
         breaks:
           "If the client blocks the first paint on this call, the cached shell arrives in 20ms and is then held hostage by a request that has to reach the origin every single time.",
       },
@@ -437,7 +455,7 @@ export const GOODREADS: Diagram = {
       detail: {
         what: "An event emitted after the row is written, carrying the rating delta for aggregation and the action for the follower feed.",
         why: "The user write returns as soon as its own row is durable. Aggregation, fanout and reindexing are all consumers, so none of them can add latency to, or fail, the action the reader actually took.",
-        numbers: ["one event per action", "UUID per event for dedupe"],
+        numbers: ["one event per action", "1 UUID per event for dedupe"],
         breaks:
           "A rating edit has to carry a delta computed from the user's previous value, which is only safe because that row is single-writer per user.",
       },
@@ -508,7 +526,7 @@ export const GOODREADS: Diagram = {
       detail: {
         what: "Incremental index updates driven from the merge log, with a nightly full rebuild into a parallel index swapped in atomically.",
         why: "Every merge changes a work document and its edition list, and reindexing 90M works takes hours, so the serving index has to be patched from the log rather than rebuilt on each change.",
-        numbers: ["~90M work documents", "swap gated on doc count and smoke queries"],
+        numbers: ["~90M work documents", "2 gates before swap: document count and smoke queries"],
         breaks:
           "A merge that has not reached the index yet leaves both the merged-away work and its survivor in results, which reads to the user as the duplicate they just reported.",
       },

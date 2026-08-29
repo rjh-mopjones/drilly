@@ -10,19 +10,37 @@ export const NOTIFICATION_SYSTEM: Diagram = {
     shape:
       "One front door that can refuse a send, then one durable queue per channel below it, each with its own worker pool paced to a provider nobody here controls.",
     beats: [
-      "Whether to notify was already decided by the caller, so this system does three things only: fan-out, delivery, and restraint. One ingestion service is the only front door. It validates, checks the caller's idempotency key, and expands one logical send into one message per user, channel and device, an average fan-out of about 1.6 and 15M push targets if the target is the whole base.",
-      "The per-user gate sits above the queues, and its placement is the design rather than a detail. Preferences, quiet hours in the recipient's timezone and a bucket of five notifications an hour decide whether the send happens at all, because once a message is sitting in a channel queue the only question left is when to send it, not whether to.",
-      "The write is a transactional outbox: the notification rows and an unpublished outbox row commit together, and a publisher moves them onto the channel topics only after the broker acknowledges. That closes the gap between the database accepting a send and the queue receiving it, and it introduces the one failure that queue-depth alerting cannot see.",
-      "Below the outbox there is one topic per channel and one worker pool per provider. Push, email and SMS have different published ceilings, different error vocabularies and independent outages, so a shared backlog would mean an APNs bad hour stops email too. Each worker classifies the response rather than treating failure as a boolean, and after four attempts the message dead-letters instead of retrying forever.",
-      "The guarantee is at-least-once with duplicate suppression at four hops: the caller's idempotency key, the outbox, a recently-sent set inside the worker, and the provider's own dedup id. That is observably exactly-once and is a different sentence from exactly-once, because hop three leaks in the milliseconds around a crash and hop five, provider to handset, is not yours at all.",
-      "Tracking runs alongside all of it. Every state transition is persisted against the notif_id so a worker restart resumes from durable state rather than inferring it from queue position, and terminal states arrive minutes later by webhook. Every number the status store can report is an acceptance rate wearing a delivery label.",
+      {
+        text: "Whether to notify was already decided by the caller, so this system does three things only: fan-out, delivery, and restraint. One ingestion service is the only front door. It validates, checks the caller's idempotency key, and expands one logical send into one message per user, channel and device, an average fan-out of about 1.6 and 15M push targets if the target is the whole base.",
+        lights: ["notif-svc", "accept", "fanout"],
+      },
+      {
+        text: "The per-user gate sits above the queues, and its placement is the design rather than a detail. Preferences, quiet hours in the recipient's timezone and a bucket of five notifications an hour decide whether the send happens at all, because once a message is sitting in a channel queue the only question left is when to send it, not whether to.",
+        lights: ["gate", "e3", "e4"],
+      },
+      {
+        text: "The write is a transactional outbox: the notification rows and an unpublished outbox row commit together, and a publisher moves them onto the channel topics only after the broker acknowledges. That closes the gap between the database accepting a send and the queue receiving it, and it introduces the one failure that queue-depth alerting cannot see.",
+        lights: ["outbox", "publisher", "e5", "e6"],
+      },
+      {
+        text: "Below the outbox there is one topic per channel and one worker pool per provider. Push, email and SMS have different published ceilings, different error vocabularies and independent outages, so a shared backlog would mean an APNs bad hour stops email too. Each worker classifies the response rather than treating failure as a boolean, and after four attempts the message is recorded dead-lettered instead of retrying forever.",
+        lights: ["lanes", "push-topic", "email-topic", "sms-topic", "push-workers", "email-workers", "sms-workers"],
+      },
+      {
+        text: "The guarantee is at-least-once with duplicate suppression at four hops: the caller's idempotency key, the outbox, a recently-sent set inside the worker, and the provider's own dedup id. That is observably exactly-once and is a different sentence from exactly-once, because hop three leaks in the milliseconds around a crash and hop five, provider to handset, is not yours at all.",
+        lights: ["accept", "outbox", "push-workers", "providers", "e1", "e13"],
+      },
+      {
+        text: "Tracking runs alongside all of it. Every state transition is persisted against the notif_id so a worker restart resumes from durable state rather than inferring it from queue position, and terminal states arrive minutes later by webhook. Every number the status store can report is an acceptance rate wearing a delivery label.",
+        lights: ["status-store", "e16", "e19"],
+      },
     ],
     crux:
       "A notification is user-visible and cannot be recalled, and the final hop belongs to somebody else. So the honest design is at-least-once with a dedup key at every hop you own, never exactly-once, and the restraint that decides whether the product works has to sit above the queues rather than in the delivery tier.",
     numbers: [
-      "10M sends/day = ~120/s, ~220/s daytime",
+      "10M accepted requests/day = ~120/s avg, ~220/s daytime",
       "15M push targets; a broadcast smeared to 4,200/s under a ~10k/s ceiling",
-      "4 attempts at 30s, 5min and 1h, then the DLQ",
+      "4 attempts at 30s, 5min and 1h, then dead-lettered",
     ],
   },
   nodes: [
@@ -37,9 +55,9 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         what: "One deployable service, four stages of one request path: accept and dedupe, gate, fan out, publish. It decides nothing about whether to notify and everything about how, and it delivers nothing itself.",
         why: "Preferences, quiet hours and a provider rate limit that every team shares can only be enforced in one place. Spread across a client library, each service reimplements restraint, one team forgets, and each backs off independently against a limit they hold in common. The stages are stages rather than services because a request passes through all four or none: they deploy together, they fail together, and splitting them would buy independent scaling of a path that runs at 120 a second.",
         numbers: [
-          "~6M accepted requests/day, ~120 sends/s after fan-out",
+          "~10M accepted requests/day, ~120/s average",
           "~220/s daytime, 80% of traffic in a 10-hour window",
-          "idempotency_key is required, never defaulted",
+          "1 idempotency_key required per request, never defaulted",
         ],
         breaks:
           "A segment-wide broadcast accepted synchronously puts 15M messages on the queues in seconds, which is why segment targets are rejected at the front and routed to the batch path instead.",
@@ -66,9 +84,9 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         what: "The only front door. Validates the request, requires a caller-supplied idempotency key, and returns the original notif_id if this (caller_id, key) pair has been seen in the last 24 hours.",
         why: "The caller retried because our response timed out, and it has no way to know whether the original was accepted. Suppressing that retry here is the first of the four dedup hops, and it is the cheapest one: everything downstream of this point is already committed to happening.",
         numbers: [
-          "~6M accepted requests/day, ~220/s daytime",
+          "~10M accepted requests/day, ~220/s daytime peak",
           "idempotency cache 24h TTL, ~1.2 GB resident",
-          "idempotency_key is required, never defaulted",
+          "1 idempotency_key required per request, never defaulted",
         ],
         breaks:
           "Read-then-write loses the race between two parallel retries: both miss the cache and both create a notification. The check has to be a conditional insert, and the loser has to wait for the winner's notif_id.",
@@ -135,8 +153,8 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         why: "Two writes to two systems with no shared transaction. Publish first and a crash before the commit produces a notification nobody can look up; commit first and a crash before the publish loses it silently, which is worse, because the API already told the caller it was accepted. The table is the second of the four dedup hops.",
         numbers: [
           "one row per fanned-out message, ~1.6 per accepted request",
-          "rows marked published only after the broker acknowledges",
-          "published rows reaped on a schedule, not left to accumulate",
+          "0 rows marked published before the broker acknowledges",
+          "reaped once a day, not left to accumulate",
         ],
         breaks:
           "Nothing reaps published rows and the table grows without bound behind a workload that never reads it; and because rows are claimed in batches, ordering across a user's channels is not preserved here and must not be relied on downstream.",
@@ -161,12 +179,20 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         what: "The loop that claims unpublished outbox rows, writes them to the channel topic, and marks them published only once the broker has acknowledged the write.",
         why: "This is what makes the outbox worth having. Committing the row and publishing it are separated in time on purpose, so a crash anywhere in between leaves an unpublished row that the next pass picks up rather than a message that was accepted and then quietly lost.",
         numbers: [
-          "~190 rows/s at daytime steady, ~4,400/s during a broadcast",
-          "publisher lag and outbox depth are first-class metrics",
+          "~190 rows/s average, ~350/s at daytime peak, ~4,400/s during a broadcast",
+          "2 first-class metrics: publisher lag and outbox depth",
           "re-publish on an unacknowledged write, hence at-least-once",
         ],
         breaks:
           "A stalled publisher presents as an empty queue and idle workers while rows pile up in a table nobody graphs, so outbox depth and publisher lag have to be alerted on directly rather than inferred from queue depth. Every queue-based signal reports this failure as healthy.",
+        choice: {
+          pick: "A dedicated polling publisher process, separate from the request handler",
+          instead: "Publish to the channel topics directly from the request handler, right after the outbox commit.",
+          decider:
+            "Who retries after a crash. A separate poller picks up an unpublished row on its next pass with nobody waiting on it; publishing inline from the request handler means a crash between commit and publish leaves nothing to retry it, and at ~190 rows/s average that gap becomes a steady trickle of stuck rows.",
+          flips:
+            "A low-volume, synchronous channel where the caller can afford to wait for the publish and retry it itself, at which point a separate polling process is one more thing to operate for no benefit.",
+        },
       },
     },
     {
@@ -263,10 +289,18 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "SES ~10k/s with a warm sending reputation",
           "daytime steady ~440 KB/s across all channel topics",
-          "carries broadcast traffic, unlike SMS",
+          "0 broadcast carve-out, unlike SMS's transactional-only lane",
         ],
         breaks:
           "Cross-channel fallback doubles a user's notification count unless the fallback consumes the same rate-limit budget, so an outage turns into an over-notification incident.",
+        choice: {
+          pick: "Its own Kafka topic (notif.email), separate from push and SMS",
+          instead: "A single shared topic with a channel field that every worker pool filters on.",
+          decider:
+            "What a push outage costs email. On a shared topic, 15M backed-up push messages would sit in front of every password-reset email behind them; a dedicated topic lets email keep draining at its own ~10k/s ceiling regardless of what push is doing.",
+          flips:
+            "Volumes low enough that all three channels combined never approach one provider's ceiling, where a shared topic with a channel field is one broker to operate instead of three.",
+        },
       },
     },
     {
@@ -287,6 +321,14 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         ],
         breaks:
           "Anything that routes bulk traffic here silently converts a marketing send into a day-long backlog sitting in front of the one-time codes that actually need this channel.",
+        choice: {
+          pick: "Its own topic, deliberately the narrowest lane, fed only transactional traffic",
+          instead: "Let SMS share the same topic as push and email, filtered by a channel field on the message.",
+          decider:
+            "The carrier ceiling is two orders of magnitude below the others, ~200/s against ~10k/s; on a shared topic a push or email burst would either starve SMS behind it or, backwards, SMS's slow drain would back up the other channels. A dedicated topic keeps its 200/s pace independent of either.",
+          flips:
+            "A product with no SMS channel at all, where the topic and its worker pool are pure operational cost for a channel nobody uses.",
+        },
       },
     },
     {
@@ -331,7 +373,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "SES ~10k/s with a warm reputation",
           "a second integration is roughly 4 engineer-weeks",
-          "a few percent of live traffic permanently routed to the standby",
+          "~3% of live traffic permanently routed to the standby",
         ],
         breaks:
           "An account-level send pause from a bounce rate you caused follows the sender, not the provider, so a second integration buys nothing against the failure that actually happens most often.",
@@ -360,7 +402,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
         numbers: [
           "1 attempt here, versus 4 on push and email",
           "~200 msg/s per account, carrier-throttled",
-          "terminal state arrives by webhook minutes later",
+          "terminal state arrives by webhook 2 to 10 minutes later",
         ],
         breaks:
           "Retrying a 5xx from the provider may deliver twice, since the accept is not the delivery and there is nothing on that hop to tell you which it was.",
@@ -383,10 +425,10 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       row: 1,
       detail: {
         what: "Everyone else's infrastructure, and behind it the handset or inbox you have no visibility into at all.",
-        why: "This is where the guarantee stops by construction. A call to APNs is an HTTP request with no transaction to enrol in, and the hop after it, provider to device, is not yours: a 200 means Apple accepted the message, not that it reached a phone or that a person saw it.",
+        why: "This is where the guarantee stops by construction. A call to APNs is an HTTP request with no transaction to enrol in, and the hop after it, provider to device, is not yours: a 200 means Apple accepted the message, not that it reached a phone or that a person saw it. Every number reported from this box is therefore an acceptance rate, never a delivery rate.",
         numbers: [
           "push ~10k/s, SES ~10k/s, SMS ~200/s",
-          "every delivery number here is really an acceptance number",
+          "4 providers integrated: APNs, FCM, SES, Twilio",
           "each provider publishes 99.9% availability, 8.8 hours a year",
         ],
         breaks:
@@ -401,7 +443,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       col: 3,
       row: 0,
       detail: {
-        what: "One record per notification keyed by notif_id, carrying every attempt and the current state: queued, attempting, delivered, bounced, failed.",
+        what: "One record per notification keyed by notif_id, carrying every attempt and the current state: queued, attempting, delivered, bounced, dead-lettered.",
         why: "State is persisted on every transition so a worker restart resumes from durable state rather than inferring it from queue position, which breaks the moment a message is redelivered. It is also the only place that catches two services deciding to notify about the same event with different idempotency keys.",
         numbers: [
           "~1 KB per record: 10 GB/day logical, 30 GB/day at RF 3",
@@ -499,7 +541,7 @@ export const NOTIFICATION_SYSTEM: Diagram = {
       detail: {
         what: "The publisher claiming a batch of rows that are committed but not yet on a topic.",
         why: "Reading the table rather than being told about the write is what makes this crash-safe. A publisher that restarts finds the same unpublished rows waiting, so the recovery path and the normal path are the same code.",
-        numbers: ["~190 rows/s daytime steady", "~4,400/s during a broadcast"],
+        numbers: ["~190 rows/s average, ~350/s at daytime peak", "~4,400/s during a broadcast"],
         breaks:
           "Claiming without a lease means two publisher instances publish the same row twice, which is survivable because the guarantee is at-least-once, but it doubles provider traffic during exactly the incident where you have least headroom.",
       },

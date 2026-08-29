@@ -8,14 +8,32 @@ export const CDN: Diagram = {
   itemId: 51,
   overview: {
     shape:
-      "Other diagrams in this set draw 'CDN edge' as a single box; this is the inside of that box. Three tiers of cache falling down the page, a request router above them, and a control plane beside them whose only real job is telling 13,000 machines that something they are already holding is now wrong.",
+      "Three tiers of cache falling down the page under a request router, and a control plane beside them whose only real job is telling 13,000 machines that something they are already holding is now wrong.",
     beats: [
-      "Routing happens before any of your code runs. One prefix is announced by BGP from all 200 PoPs, so the internet's own routing delivers the packet to a PoP roughly 8ms away and draining a PoP is a route withdrawal rather than a DNS record you wait out. GeoDNS stays on top as a coarse per-customer steering knob between a handful of independently announced rings.",
-      "The hit path is dull and that is the point. The edge server builds a cache key from host, path, allowlisted query parameters and normalised headers, consistent-hashes it to the owning server inside the PoP, and answers from page cache or NVMe in about 12ms. Roughly 95% of requests stop here and the origin never learns they happened.",
-      "The miss path is where the tiers earn their keep. A single-flight lock, key ownership inside the PoP, mid-tier coalescing and a per-customer origin shield apply in series and collapse 1,000,000 concurrent fetches for one hot URL down to 1, while stale-while-revalidate means nobody waited for any of it. The mid-tier adds latency to a miss and is still correct: its job is fan-out collapse, not speed.",
-      "The cache key is a finance decision rather than a tuning decision. At 345 PB/day delivered, one point of byte hit ratio is about 3.5 PB/day of extra edge misses and roughly $420k a month of origin egress, so a tracking parameter or a Vary on User-Agent that multiplies one object into thousands of entries shows up on the bill before it shows up anywhere else.",
-      "Invalidation is the actual system. Where you own the URL you remove the problem instead of solving it: hash the bytes into the filename, serve it immutable, and change the reference. What is left over gets an eager push over a durable replayable log, idempotent because you cannot collect 13,000 acknowledgements, with tag generation counters so 'purge everything tagged product-1234' is one 40B counter bump rather than an enumeration of ten million objects.",
-      "State the guarantee honestly. Freshness is a promise about when, not whether: the fresh window, plus the stale window, plus about two seconds of purge propagation, plus an unbounded tail for whichever PoP happens to be partitioned right now and will replay the log when it returns.",
+      {
+        text: "Routing happens before any of your code runs. One prefix is announced by BGP from all 200 PoPs, so the internet's own routing delivers the packet to a PoP roughly 8ms away and draining a PoP is a route withdrawal rather than a DNS record you wait out. GeoDNS stays on top as a coarse per-customer steering knob between a handful of independently announced rings.",
+        lights: ["client", "router", "e1", "e2"],
+      },
+      {
+        text: "The hit path is dull and that is the point. The edge server builds a cache key from host, path, allowlisted query parameters and normalised headers, consistent-hashes it to the owning server inside the PoP, and answers from page cache or NVMe in about 12ms. Roughly 95% of requests stop here and the origin never learns they happened.",
+        lights: ["edge", "cachestore", "cachekey", "e3", "e4", "e5"],
+      },
+      {
+        text: "The miss path is where the tiers earn their keep. A single-flight lock, key ownership inside the PoP, mid-tier coalescing and a per-customer origin shield apply in series and collapse 1,000,000 concurrent fetches for one hot URL down to 1, while stale-while-revalidate means nobody waited for any of it. The mid-tier adds latency to a miss and is still correct: its job is fan-out collapse, not speed.",
+        lights: ["coalesce", "midtier", "shield", "origin", "e6", "e7", "e8", "e9"],
+      },
+      {
+        text: "The cache key is a finance decision rather than a tuning decision. At 345 PB/day delivered, one point of byte hit ratio is about 3.5 PB/day of extra edge misses and roughly $420k a month of origin egress, so a tracking parameter or a Vary on User-Agent that multiplies one object into thousands of entries shows up on the bill before it shows up anywhere else.",
+        lights: ["cachekey", "e4", "e5"],
+      },
+      {
+        text: "Invalidation is the actual system. Where you own the URL you remove the problem instead of solving it: hash the bytes into the filename, serve it immutable, and change the reference. What is left over gets an eager push over a durable replayable log, idempotent because you cannot collect 13,000 acknowledgements, with tag generation counters so 'purge everything tagged product-1234' is one 40B counter bump rather than an enumeration of ten million objects.",
+        lights: ["control-zone", "purgelog", "relay", "taggen", "e11", "e12", "e13", "e14"],
+      },
+      {
+        text: "State the guarantee honestly. Freshness is a promise about when, not whether: the fresh window, plus the stale window, plus about two seconds of purge propagation, plus an unbounded tail for whichever PoP happens to be partitioned right now and will replay the log when it returns.",
+        lights: ["purgelog", "relay", "edge", "e11", "e12"],
+      },
     ],
     crux:
       "One object now exists on thousands of unsupervised machines in hundreds of datacentres, holding somebody else's mutable data, and when it changes you have to correct all of them without consensus on the request path and without ever collecting an acknowledgement.",
@@ -30,6 +48,13 @@ export const CDN: Diagram = {
       id: "control-zone",
       label: "Purge control plane",
       kind: "zone",
+      detail: {
+        what: "The boundary around everything that tells a cache it is wrong: the durable purge log a customer's API writes to, and the fan-out tree that relays each record to every PoP.",
+        why: "It never touches a byte of the response: nothing inside it sits between a request and its answer. That isolation is what lets a control-plane outage degrade purge freshness without touching the 12ms hit path.",
+        numbers: ["~1,000 purges/s accepted", "p99 ~2s to 99.9% of ~13,000 servers"],
+        breaks:
+          "A stall here is invisible from the request path: every PoP keeps answering quickly with content it has already been told to forget, which is why propagation is checked with a synthetic canary rather than trusted from a healthy dashboard.",
+      },
     },
     {
       id: "client",
@@ -56,7 +81,7 @@ export const CDN: Diagram = {
       detail: {
         what: "The request router: a small number of /24s announced from every PoP, with GeoDNS choosing between a few independently announced anycast rings.",
         why: "Somebody has to decide which of 200 PoPs a user reaches, and the decision has to be revocable in seconds during an incident. Letting BGP deliver the packet means there is no client-side state to wait out when you take a PoP away.",
-        numbers: ["~200 PoPs", "reconvergence in seconds", "5 minute incident SLO"],
+        numbers: ["~200 PoPs", "BGP reconverges in under 30s", "5 minute incident SLO"],
         breaks:
           "Anycast gives you no per-request steering, so a degraded PoP cannot be selectively drained; you de-preference its announcement rather than withdrawing it, which is coarser and slower than DNS would be.",
         choice: {
@@ -170,7 +195,7 @@ export const CDN: Diagram = {
       row: 4,
       detail: {
         what: "The customer's own object store or application, the source of truth for every byte in the fleet and the only writer of the data you are caching.",
-        why: "It is drawn as external because that is the whole difficulty. You do not control the writer, so you learn about a change either by asking (conditional revalidation) or by being told through a customer-facing purge API, never by observing the write.",
+        why: "It sits outside our trust boundary, which is the whole difficulty. You do not control the writer, so you learn about a change either by asking (conditional revalidation) or by being told through a customer-facing purge API, never by observing the write.",
         numbers: ["~7 PB/day of origin egress at a 90% byte hit ratio", "provisioned for ~2% of delivered bytes", "304 responses ~200B against 100KB fills"],
         breaks:
           "If it returns 5xx or times out, stale-if-error has to serve expired copies for a configured window and the shield has to break the circuit, or the error itself becomes a herd.",
@@ -247,7 +272,7 @@ export const CDN: Diagram = {
           decider:
             "13,000 acknowledgements you cannot collect. Reporting servers_acked: 12987 is a statement about the servers that answered, not about the fleet, so the design has to make a missing ack harmless rather than treat it as a completion signal. Offsets plus idempotence do that; an RPC fan-out does not.",
           flips:
-            "A single-datacentre cache tier where the writer sits next to the cache and invalidation is a delete issued at the moment of the write, roughly synchronous and cheap. That is question 34, and none of this machinery is warranted there.",
+            "A single-datacentre cache tier where the writer sits next to the cache and invalidation is a delete issued at the moment of the write, roughly synchronous and cheap. That is the synchronous single-datacentre case, and none of this machinery is warranted there.",
         },
       },
     },
@@ -350,8 +375,8 @@ export const CDN: Diagram = {
       label: "key rules, TTL, SWR",
       detail: {
         what: "Per-origin configuration mirrored into a global KV that every PoP reads: which query parameters are keyed, which headers are keyed, the default TTL and the stale-while-revalidate window.",
-        why: "It is drawn as a control path because it never sits on the request path. The PoP reads it locally, so a control-plane outage degrades config changes and purges rather than the serving of bytes.",
-        numbers: ["origin_id is the partition key", "config and tag generations are a few GB globally"],
+        why: "It is a control path rather than a request-path dependency: the PoP reads it locally, so a control-plane outage degrades config changes and purges rather than the serving of bytes.",
+        numbers: ["1 partition key: origin_id", "~2-5GB of config and tag generations globally"],
         breaks:
           "A config change that removes a keyed header makes personalised responses shared, which shows up as a sudden hit-ratio jump on a dynamic route and is a security incident, not a caching win.",
       },
@@ -365,7 +390,7 @@ export const CDN: Diagram = {
       detail: {
         what: "The TTL is jittered by +/-10% at the moment the object is stored, and the stale window is recorded alongside it.",
         why: "200 PoPs that fetched the same object within the same second would otherwise expire within the same second. Jitter turns a synchronised global edge into a smear, which is what the coalescers downstream actually want.",
-        numbers: ["+/-10% jitter", "probabilistic early refresh weighted by last fetch duration"],
+        numbers: ["+/-10% jitter", "early-refresh odds rise inside the final 10% of TTL"],
         breaks:
           "Jitter widens the staleness window for some PoPs by up to 10% of the TTL, which routes that opted out of stale-while-revalidate also have to account for.",
       },
@@ -492,7 +517,7 @@ export const CDN: Diagram = {
       detail: {
         what: "On every lookup the server compares the tag generations stored with the object against the current ones and treats any mismatch as a miss.",
         why: "This is where the deferred work from a tag purge is finally paid, one request at a time, on the objects that are actually being asked for. Objects nobody requests cost nothing and are eventually evicted.",
-        numbers: ["tag generations held in the same globally replicated KV as origin config"],
+        numbers: ["generation compare costs <1µs per lookup"],
         breaks:
           "The comparison is on the hot path of every single lookup, so the generation table has to be local to the PoP and read-mostly; a remote read here would put a WAN hop inside a 12ms hit.",
       },

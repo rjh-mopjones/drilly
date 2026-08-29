@@ -10,11 +10,26 @@ export const PRICE_ALERTS: Diagram = {
     shape:
       "A predicate matching engine wearing a notification costume: ticks are routed by instrument into a stateful evaluator that already holds that instrument's rules sorted along the price axis, so a price move is a range query rather than a scan.",
     beats: [
-      "The whole design is one inversion. The naive loop iterates rules and looks up prices, which costs one lookup per rule per poll and puts a hard floor under latency at the poll interval: 10M rules polled every minute is 167k price lookups a second and a 60-second worst case. Iterate ticks instead and look up rules.",
-      "That inversion only pays if the lookup is local, so ticks and rule changes are co-partitioned on the same instrument_id key. A rule is about 500 bytes loaded, 10M rules is roughly 5GB, and across sixteen evaluator shards that is 310MB each, which fits in RAM alongside the window buffers. Co-partitioning is what makes the per-tick lookup a memory access rather than a network hop.",
-      "Inside a shard the rules with a fixed numeric trigger live in a skip list sorted by trigger price, so a tick moving AAPL from 199.95 to 200.05 range-scans only the rules whose threshold lies in that sliver. That is O(log N + matched) instead of O(rules on the instrument), and it is the only thing standing between you and 100M comparisons a second when 500k rules sit on one name.",
-      "Correctness is two details that cost nothing and are missed constantly. Fire on the crossing, not the level: prev < 200 <= now, so a rule fires once at the boundary and still fires when a gap open jumps clean over it. And guard the gap: after a checkpoint restore prev may be ten minutes stale, so treat the first tick after a gap as a reseed rather than one enormous move that fires every rule between the two prices.",
-      "Delivery is deliberately not designed here. The pipeline is at-least-once and the dispatcher absorbs duplicates on {alert_id, arm_epoch}, where the epoch advances only on a genuine re-arm, so a replayed tick produces a fired event the dispatcher recognises and drops. Past that it hands off to the existing notification service, because 10M rules produce roughly 17 notifications a second in normal markets.",
+      {
+        text: "The whole design is one inversion. The naive loop iterates rules and looks up prices, which costs one lookup per rule per poll and puts a hard floor under latency at the poll interval: 10M rules polled every minute is 167k price lookups a second and a 60-second worst case. Iterate ticks instead and look up rules.",
+        lights: ["evaluator", "threshold-idx"],
+      },
+      {
+        text: "That inversion only pays if the lookup is local, so ticks and rule changes are co-partitioned on the same instrument_id key. A rule is about 500 bytes loaded, 10M rules is roughly 5GB, and across sixteen evaluator shards that is 310MB each, which fits in RAM alongside the window buffers. Co-partitioning is what makes the per-tick lookup a memory access rather than a network hop.",
+        lights: ["shard", "tick-log", "rule-cdc"],
+      },
+      {
+        text: "Inside a shard the rules with a fixed numeric trigger live in a skip list sorted by trigger price, so a tick moving AAPL from 199.95 to 200.05 range-scans only the rules whose threshold lies in that sliver. That is O(log N + matched) instead of O(rules on the instrument), and it is the only thing standing between you and 100M comparisons a second when 500k rules sit on one name.",
+        lights: ["threshold-idx", "e4"],
+      },
+      {
+        text: "Correctness is two details that cost nothing and are missed constantly. Fire on the crossing, not the level: prev < 200 <= now, so a rule fires once at the boundary and still fires when a gap open jumps clean over it. And guard the gap: after a checkpoint restore prev may be ten minutes stale, so treat the first tick after a gap as a reseed rather than one enormous move that fires every rule between the two prices.",
+        lights: ["evaluator"],
+      },
+      {
+        text: "Delivery is deliberately not designed here. The pipeline is at-least-once and the dispatcher absorbs duplicates on {alert_id, arm_epoch}, where the epoch advances only on a genuine re-arm, so a replayed tick produces a fired event the dispatcher recognises and drops. Past that it hands off to the existing notification service, because 10M rules produce roughly 17 notifications a second in normal markets.",
+        lights: ["dispatcher", "notify", "fired-stream", "e10", "e13"],
+      },
     ],
     crux:
       "The partitioning that makes evaluation cheap also makes an instrument unsplittable. NVDA at earnings is 500k rules and 1,000 ticks a second on one process that cannot be spread, so the threshold index has to turn that scan into a range query before you resort to sub-sharding and give up the one-owner-per-instrument invariant.",
@@ -53,7 +68,7 @@ export const PRICE_ALERTS: Diagram = {
       col: 0,
       row: 0,
       detail: {
-        what: "The primary and secondary market-data vendors. The only part of this diagram nobody here operates.",
+        what: "The primary and secondary market-data vendors. The only part of the system nobody here operates.",
         why: "It is drawn because it sets the constraints the rest answers to: feeds disconnect, replay stale ticks, and disagree with each other on price for the same exchange sequence number.",
         numbers: ["50k tickable instruments", "~250k ticks/s sustained, ~1M/s in the first 60s after a US open"],
         breaks:
@@ -141,7 +156,7 @@ export const PRICE_ALERTS: Diagram = {
       detail: {
         what: "Per instrument, the fixed-trigger rules held in a skip list ordered by trigger price. A tick range-scans [min(prev, now), max(prev, now)] and touches nothing else.",
         why: "This is the component the question exists to ask about. It converts 'scan every rule on NVDA' into 'read the rules sitting in this 0.01% sliver', which is single digits on an ordinary tick and only the crossed band on an 8% earnings jump.",
-        numbers: ["O(log N + matched) per tick", "200 rules per instrument average, 500k on the hottest", "crossover versus a flat scan around 10k rules on one name"],
+        numbers: ["O(log N + matched) per tick, single digits typically matched", "200 rules per instrument average, 500k on the hottest", "crossover versus a flat scan around 10k rules on one name"],
         breaks:
           "It only covers rules with a fixed point on the price axis, and it has to be maintained on every create, delete and re-arm while ticks are being evaluated against it.",
         choice: {
@@ -210,7 +225,7 @@ export const PRICE_ALERTS: Diagram = {
       detail: {
         what: "A change-data-capture topic carrying rule creates, deletes and re-arms, keyed by the same instrument_id as the tick log.",
         why: "Co-partitioning is the whole trick: a new AAPL alert has to land on the shard that already consumes AAPL ticks, or the evaluator would need a lookup it does not have. Same key, same partition, no coordination.",
-        numbers: ["typically under 1s from commit to loaded on the shard", "alert CRUD held 'pending activation' until the shard confirms"],
+        numbers: ["typically under 1s from commit to loaded on the shard", "held 'pending activation' for that same ~1s"],
         breaks:
           "Silent lag. If the change topic stalls, alert creation still returns 200 and the rule simply never fires, which no queue-depth alert on the tick path will show you.",
         choice: {
@@ -272,12 +287,12 @@ export const PRICE_ALERTS: Diagram = {
     {
       id: "notify",
       label: "Notification service",
-      sub: "reused, see Q7 for fan-out",
+      sub: "reused, per-channel fan-out",
       kind: "service",
       col: 3,
       row: 3,
       detail: {
-        what: "The existing per-channel delivery tier: push, email and SMS lanes with their own worker pools, retries and provider rate limits. Designed in question 7, consumed here.",
+        what: "The existing per-channel delivery tier: push, email and SMS lanes with their own worker pools, retries and provider rate limits. Built for general fan-out elsewhere, consumed here as a dependency.",
         why: "Ten million rules produce roughly 17 notifications a second in normal markets, which is an order of magnitude under what a general notification system is already built for. Redesigning it here is the classic way to answer the wrong question.",
         numbers: ["~17 sends/s average, 10k/s burst", "end-to-end SLO p99 under 5s, tick to provider acceptance"],
         breaks:
@@ -321,6 +336,7 @@ export const PRICE_ALERTS: Diagram = {
       id: "e1",
       from: "exchanges",
       to: "gateway",
+      tier: "data",
       label: "two vendor feeds",
       detail: {
         what: "Raw market data arriving from the primary and secondary vendors, each carrying the exchange's own sequence number.",
@@ -334,8 +350,8 @@ export const PRICE_ALERTS: Diagram = {
       id: "e2",
       from: "gateway",
       to: "tick-log",
+      tier: "hot",
       label: "150B binary ticks",
-      animated: true,
       detail: {
         what: "Normalised, deduplicated ticks published onto the durable log with an ingest timestamp attached.",
         why: "Encoding matters at this rate rather than being a micro-optimisation: JSON is 3 to 4 times larger, and 100 wasted bytes per tick is 25MB/s of pure overhead at 250k ticks/s.",
@@ -348,8 +364,8 @@ export const PRICE_ALERTS: Diagram = {
       id: "e3",
       from: "tick-log",
       to: "evaluator",
+      tier: "hot",
       label: "partition = instrument_id",
-      animated: true,
       detail: {
         what: "Each evaluator consumes the partitions for the instruments it owns, so every AAPL tick reaches the process that already holds AAPL's rules.",
         why: "This is the arrow the entire design is built around. It is what makes rule lookup a local memory access instead of a network call, and it is also what makes a hot instrument unsplittable.",
@@ -362,12 +378,12 @@ export const PRICE_ALERTS: Diagram = {
       id: "e4",
       from: "evaluator",
       to: "threshold-idx",
+      tier: "hot",
       label: "range-scan [prev, now]",
-      animated: true,
       detail: {
         what: "The range query over rules whose trigger price lies between the previous tick and this one, followed by the half-open crossing test on each match.",
         why: "The bound on this operation is the bound on the whole system. Scanning the interval rather than the instrument is what makes an 8% jump touch only the rules in that band instead of all 500k on the name.",
-        numbers: ["O(log N + matched)", "single-digit matches on an ordinary 0.01% move"],
+        numbers: ["O(log N + matched), single digits typically matched", "single-digit matches on an ordinary 0.01% move"],
         breaks:
           "A rule created or re-armed mid-scan mutates the structure while ticks are being evaluated against it, which is why the choice between skip list and balanced tree is about concurrent update cost rather than asymptotics.",
       },
@@ -376,11 +392,12 @@ export const PRICE_ALERTS: Diagram = {
       id: "e5",
       from: "evaluator",
       to: "windowed",
+      tier: "data",
       label: "full scan, no index",
       offset: 60,
       detail: {
         what: "The same tick passed over every windowed rule on the instrument, because none of them has a fixed threshold to look up.",
-        why: "Drawn as a separate path deliberately: it is the half of the work the index does not cover, and on a hot instrument it is what saturates the core while the threshold rules cost nothing.",
+        why: "It is a separate path deliberately: it is the half of the work the index does not cover, and on a hot instrument it is what saturates the core while the threshold rules cost nothing.",
         numbers: ["one shared ring buffer per instrument"],
         breaks:
           "This scan is O(windowed rules) per tick with no way to shrink it, so it sets the real ceiling on an instrument carrying hundreds of thousands of percent-change rules.",
@@ -390,6 +407,7 @@ export const PRICE_ALERTS: Diagram = {
       id: "e6",
       from: "threshold-idx",
       to: "fired-stream",
+      tier: "data",
       label: "crossing fires",
       offset: 60,
       detail: {
@@ -404,6 +422,7 @@ export const PRICE_ALERTS: Diagram = {
       id: "e7",
       from: "windowed",
       to: "fired-stream",
+      tier: "data",
       label: "% change fires",
       detail: {
         what: "Fires from percent-change and volume-spike rules, evaluated against the ring buffer rather than a threshold crossing.",
@@ -416,8 +435,8 @@ export const PRICE_ALERTS: Diagram = {
       id: "e8",
       from: "rule-store",
       to: "rule-cdc",
+      tier: "control",
       label: "Debezium CDC",
-      dashed: true,
       detail: {
         what: "Committed rule inserts, updates and deletes streamed off the write-ahead log onto the change topic.",
         why: "Deriving the stream from the commit rather than dual-writing means a rule that exists to the user always eventually exists to the evaluator. The lag is bounded and measurable; a dual-write divergence is neither.",
@@ -430,8 +449,8 @@ export const PRICE_ALERTS: Diagram = {
       id: "e9",
       from: "rule-cdc",
       to: "threshold-idx",
+      tier: "control",
       label: "create / delete / re-arm",
-      dashed: true,
       detail: {
         what: "Rule changes applied incrementally to the shard's in-memory index and windowed list.",
         why: "Because the topic is keyed by instrument_id, a new AAPL alert arrives at the shard already consuming AAPL ticks with no routing decision to make. Same key, same partition, no coordination.",
@@ -444,8 +463,8 @@ export const PRICE_ALERTS: Diagram = {
       id: "e10",
       from: "fired-stream",
       to: "dispatcher",
+      tier: "hot",
       label: "alert_id + arm_epoch",
-      animated: true,
       detail: {
         what: "Fired events consumed by the dispatcher, which is the first component that knows anything about the user rather than the instrument.",
         why: "The split is what lets evaluation stay at market-data latency while delivery absorbs provider slowness. Back pressure from a push provider must never reach the tick path.",
@@ -458,8 +477,8 @@ export const PRICE_ALERTS: Diagram = {
       id: "e12",
       from: "dispatcher",
       to: "rule-store",
+      tier: "control",
       label: "ARMED to FIRED",
-      dashed: true,
       offset: 110,
       detail: {
         what: "The durable state transition for the rule, and on a cooldown rule the later re-arm that increments arm_epoch.",
@@ -473,10 +492,11 @@ export const PRICE_ALERTS: Diagram = {
       id: "e13",
       from: "dispatcher",
       to: "notify",
+      tier: "data",
       label: "deduped, prefs applied",
       detail: {
         what: "The hand-off to the shared notification system, by which point the decision to notify is final and only channel selection and pacing remain.",
-        why: "Everything price-specific has already happened. Drawing this as one arrow into an existing dependency is the point: the delivery half is question 7's problem and answering it here means answering the wrong question.",
+        why: "Everything price-specific has already happened. This is one hand-off into an existing dependency: the delivery half belongs to the general notification system, and re-solving it here would mean answering the wrong question.",
         numbers: ["end-to-end p99 under 5s, tick to provider acceptance"],
         breaks:
           "Provider outages land beyond this arrow, so the alert is surfaced in-app immediately rather than waiting on push, and the audit stays pinned to trigger time.",
@@ -486,11 +506,12 @@ export const PRICE_ALERTS: Diagram = {
       id: "e14",
       from: "dispatcher",
       to: "audit",
+      tier: "data",
       label: "fire + exchange_seq",
       detail: {
         what: "The compliance record written for every fire, including the rule as it stood at trigger time and the exchange sequence number that caused it.",
         why: "A broker has to be able to reconstruct the decision years later against the exchange's own audit feed. Recording the rule snapshot rather than a rule id is what makes that possible after the user edits or deletes the alert.",
-        numbers: ["7 years retention", "every state transition logged with its causing event"],
+        numbers: ["7 years retention", "1 causing event logged per state transition"],
         breaks:
           "The write happens before delivery is confirmed, so delivered_at is filled in later by webhook and a missing delivered_at is a delivery gap rather than an evaluation gap.",
       },

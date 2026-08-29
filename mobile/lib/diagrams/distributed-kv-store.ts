@@ -10,12 +10,30 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
     shape:
       "A leaderless ring where any node can coordinate: it hashes the key to its N=3 owners, fans the request to all of them, answers the client after W acknowledgements or R responses, and then spends the rest of its life converging the replicas it deliberately left behind.",
     beats: [
-      "Everything follows from one refusal: no key has a leader. Give that up and availability stops depending on any particular machine being alive, but you now allow two clients to write the same key at once, and every remaining decision is about where you pay for that.",
-      "Placement is arithmetic, not lookup. The coordinator hashes the key onto the consistent hashing ring and reads off the N nodes that own that range, so there is no placement service to fail and any of the 128 nodes in a region can serve any request without holding the data itself.",
-      "The quorum is the load-bearing line. W + R > N means the set that acknowledged a write and the set that answered a read must share a member, so with N=3 you need W + R at least 4, and W=R=2 is the cheapest pair that holds while tolerating one dead or slow replica on each path.",
-      "Locally each replica is a log structured merge tree: writes append to a commit log and a sorted in-memory table, flush to immutable files, and compact in the background. Writes are sequential and cheap; point reads cost one or two file opens once a Bloom filter per file rules the rest out.",
-      "Divergence is the steady state rather than a fault, because W=2 leaves one replica behind on every one of 200k writes per second. Three mechanisms converge it on three timescales and each covers the previous one's hole: read repair fixes what a read notices, hinted handoff parks writes for three hours, Merkle anti-entropy sweeps the rest.",
-      "Deletes break all three, so a delete writes a tombstone with a dominating version rather than removing the row, and the tombstone survives gc_grace_seconds. The residue after all of that is genuinely concurrent writes, which version vectors detect honestly and never resolve; something above the store has to merge.",
+      {
+        text: "Everything follows from one refusal: no key has a leader. Give that up and availability stops depending on any particular machine being alive, but you now allow two clients to write the same key at once, and every remaining decision is about where you pay for that.",
+        lights: ["client", "cas-store", "e17"],
+      },
+      {
+        text: "Placement is arithmetic, not lookup. The coordinator hashes the key onto the consistent hashing ring and reads off the N nodes that own that range, so there is no placement service to fail and any of the 128 nodes in a region can serve any request without holding the data itself.",
+        lights: ["geo-dns", "coordinator", "ring-lookup", "e1", "e2", "e3"],
+      },
+      {
+        text: "The quorum is the load-bearing line. W + R > N means the set that acknowledged a write and the set that answered a read must share a member, so with N=3 you need W + R at least 4, and W=R=2 is the cheapest pair that holds while tolerating one dead or slow replica on each path.",
+        lights: ["quorum", "replicas", "e4"],
+      },
+      {
+        text: "Locally each replica is a log structured merge tree: writes append to a commit log and a sorted in-memory table, flush to immutable files, and compact in the background. Writes are sequential and cheap; point reads cost one or two file opens once a Bloom filter per file rules the rest out.",
+        lights: ["replica-zone", "replicas", "lsm", "e7"],
+      },
+      {
+        text: "Divergence is the steady state rather than a fault, because W=2 leaves one replica behind on every one of 200k writes per second. Three mechanisms converge it on three timescales and each covers the previous one's hole: read repair fixes what a read notices, hinted handoff parks writes for three hours, Merkle anti-entropy sweeps the rest.",
+        lights: ["read-repair", "hints", "anti-entropy", "e8", "e9", "e5", "e6", "e14", "e15"],
+      },
+      {
+        text: "Deletes break all three, so a delete writes a tombstone with a dominating version rather than removing the row, and the tombstone survives gc_grace_seconds. The residue after all of that is genuinely concurrent writes, which version vectors detect honestly and never resolve; something above the store has to merge.",
+        lights: ["tombstones", "version-vectors", "e12", "e13", "e10", "e11"],
+      },
     ],
     crux:
       "W + R > N is an overlap property and nothing more. It guarantees a read reaches at least one replica holding the last acknowledged write; it does not order two concurrent writes, does not make two successive reads agree, and does not make read-modify-write safe at any setting. Every hard part of this design lives in that gap.",
@@ -74,7 +92,7 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       detail: {
         what: "The geo load balancer, or equivalently client-side region pinning: it steers a caller to a healthy region and pulls a whole region out when its health checks fail.",
         why: "It selects a region and stops there. Inside the region no load balancer is on the path, because every node can coordinate and the design's whole availability argument is that no particular machine has to be alive. This is also the only piece that owns the recovery time objective, since quorums never cross regions.",
-        numbers: ["RTO 1 to 5 minutes for client failover", "failover tested quarterly, AZ failover monthly"],
+        numbers: ["RTO 1 to 5 minutes for client failover", "region failover tested every ~90 days, AZ failover every 30"],
         breaks:
           "DNS TTL is the failover clock and clients cache past it, so the RTO is bounded by resolver behaviour you do not control; and a region that is unhealthy but still answering health checks keeps taking traffic.",
         choice: {
@@ -344,7 +362,7 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       row: 4,
       detail: {
         what: "The repair scheduler. Each replica builds a Merkle tree over its token ranges, leaves hashing small key ranges. Two replicas compare roots and recurse only into subtrees that disagree.",
-        why: "It is the only mechanism with complete coverage, so it is what backstops the cold keys read repair never touches and the writes hinted handoff dropped at the TTL. It is drawn as its own service because it is scheduled and throttled independently of the request path: its rate is an operator decision, not a consequence of traffic. Message cost is logarithmic; the disk cost is not, because building the tree reads every key in the range.",
+        why: "It is the only mechanism with complete coverage, so it is what backstops the cold keys read repair never touches and the writes hinted handoff dropped at the TTL. It runs as its own service because it is scheduled and throttled independently of the request path: its rate is an operator decision, not a consequence of traffic. Message cost is logarithmic; the disk cost is not, because building the tree reads every key in the range.",
         numbers: ["400GB per node at a 100MB/s throttle is ~4,000s, about 1.1 hours", "2¹⁵ leaves over 10⁷ keys is ~300 keys per leaf", "well inside gc_grace of 864,000s"],
         breaks:
           "Repair cost tracks data volume rather than divergence: a cluster where 0.001% of keys diverged still reads 400GB per node to establish that, and it binds at roughly 10x this data on the same node count.",
@@ -364,8 +382,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e1",
       from: "client",
       to: "geo-dns",
+      tier: "hot",
       label: "get / put(key)",
-      animated: true,
       detail: {
         what: "The client request, carrying the key, the value on a write, and the quorum the caller wants for this specific call.",
         why: "The quorum is a per-request argument rather than a cluster setting, which is what lets one deployment serve a strict caller and a sloppy one at the same time. Resolution happens once and is cached, so this hop is not on the per-request path in steady state.",
@@ -378,12 +396,12 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e2",
       from: "geo-dns",
       to: "ring-lookup",
+      tier: "hot",
       label: "any node in that region",
-      animated: true,
       detail: {
         what: "The request landing on whichever node in the healthy region the client resolved to, which becomes the coordinator for this call.",
         why: "Steering stops at the region. Inside it the client picks whichever node it likes, because none of them is special and adding a load balancer here would put a machine that can be down back on a path built to have none.",
-        numbers: ["128 candidate coordinators per region", "~8k coordinations/s per node"],
+        numbers: ["any of 128 nodes can coordinate per region", "~8k coordinations/s per node"],
         breaks:
           "Clients that pin to one node rather than spreading concentrate connections on it, and descriptor exhaustion there looks like a cluster problem rather than a client one.",
       },
@@ -392,8 +410,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e3",
       from: "ring-lookup",
       to: "quorum",
+      tier: "hot",
       label: "N owners for this key",
-      animated: true,
       detail: {
         what: "The output of placement handed to the counter: the three node IDs that own this key's range, in ring order.",
         why: "Drawn inside the coordinator because no network hop happens here — this is one process calling the next stage of itself. That is the whole point of hash placement: the owners are computed, not looked up.",
@@ -406,8 +424,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e4",
       from: "quorum",
       to: "replicas",
+      tier: "hot",
       label: "fan out to all N=3",
-      animated: true,
       fromSide: "right",
       toSide: "left",
       detail: {
@@ -422,8 +440,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e5",
       from: "quorum",
       to: "hints",
+      tier: "control",
       label: "replica unreachable",
-      dashed: true,
       fromSide: "right",
       toSide: "top",
       offset: 40,
@@ -439,8 +457,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e6",
       from: "hints",
       to: "replicas",
+      tier: "control",
       label: "replay on rejoin",
-      dashed: true,
       detail: {
         what: "The neighbour dials the recovered owner and replays its buffered writes in arrival order once gossip reports the owner alive again.",
         why: "It closes the window between a node going down and the next repair pass, which would otherwise be hours away. Replay is throttled because the backlog arrives as a single burst at the exact moment the node is also rebuilding caches and rejoining quorums.",
@@ -453,8 +471,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e7",
       from: "replicas",
       to: "lsm",
+      tier: "hot",
       label: "commit log + memtable",
-      animated: true,
       detail: {
         what: "The local durable write on each replica: append to the commit log, insert into the sorted in-memory table, acknowledge.",
         why: "Durability is a sequential append rather than an in-place page update, which is what makes an acknowledgement cheap enough that waiting for two of them fits inside a few milliseconds. The flush to immutable files happens later and off this path.",
@@ -467,8 +485,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e8",
       from: "quorum",
       to: "read-repair",
+      tier: "control",
       label: "digest mismatch",
-      dashed: true,
       detail: {
         what: "The trigger: the digests returned by the responding replicas do not agree, so a second round pulls full values from all N.",
         why: "Matching digests mean the replicas agree and nothing further happens, which is the common case and the reason digests are worth the extra round in the uncommon one. Comparing a hash over value plus version metadata is cheaper than shipping three copies of a 1.2KB record on every read.",
@@ -481,8 +499,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e9",
       from: "read-repair",
       to: "replicas",
+      tier: "control",
       label: "writeback of the winner",
-      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
@@ -497,6 +515,7 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e10",
       from: "lsm",
       to: "version-vectors",
+      tier: "data",
       label: "value + version vector",
       fromSide: "bottom",
       toSide: "right",
@@ -512,15 +531,15 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e11",
       from: "version-vectors",
       to: "client",
+      tier: "control",
       label: "value or sibling set",
-      dashed: true,
       fromSide: "left",
       toSide: "left",
       offset: 40,
       detail: {
         what: "The response: one value when a version dominates, or every concurrent sibling with its vector when none does, for the caller to merge.",
         why: "The store detects and never resolves, so this arrow is where the unresolved conflict is handed out. The caller must write the merged result back with the merged vector as its parent, or the same conflict reappears on the next read.",
-        numbers: ["alert on any sustained rise in siblings per read"],
+        numbers: ["alert when siblings/read rises above ~2x baseline"],
         breaks:
           "If reconciliation code cannot be put in clients, the only options left are restricting values to self-merging types or moving the key to a store with a per-key leader and paying the latency.",
       },
@@ -529,8 +548,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e12",
       from: "lsm",
       to: "tombstones",
+      tier: "control",
       label: "delete writes a marker",
-      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
@@ -545,8 +564,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e13",
       from: "tombstones",
       to: "anti-entropy",
+      tier: "control",
       label: "gc_grace > repair time",
-      dashed: true,
       fromSide: "right",
       toSide: "right",
       detail: {
@@ -561,14 +580,14 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e14",
       from: "lsm",
       to: "anti-entropy",
+      tier: "control",
       label: "Merkle over ranges",
-      dashed: true,
       fromSide: "bottom",
       toSide: "top",
       detail: {
         what: "The tree build: read every key in the range, hash small ranges into leaves, hash children into parents up to a root.",
         why: "Comparison has to be cheap enough to run between every pair of replicas, and a tree makes that logarithmic in messages. The read is the cost you cannot avoid, because there is nowhere else the current state of a range is summarised.",
-        numbers: ["400GB per node at 100MB/s is ~1.1 hours", "throttled so it does not compete with foreground reads"],
+        numbers: ["400GB per node at 100MB/s is ~1.1 hours", "throttled to ~100MB/s so it does not compete with foreground reads"],
         breaks:
           "The pass takes the same hour whether one key diverged or a million did, which couples the safe deletion window to total bytes rather than to anything about deletions.",
       },
@@ -577,8 +596,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e15",
       from: "anti-entropy",
       to: "replicas",
+      tier: "control",
       label: "resync diverged ranges",
-      dashed: true,
       fromSide: "left",
       toSide: "right",
       detail: {
@@ -593,8 +612,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e16",
       from: "replicas",
       to: "remote-region",
+      tier: "control",
       label: "async cross-DC shipping",
-      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
@@ -609,8 +628,8 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
       id: "e17",
       from: "client",
       to: "cas-store",
+      tier: "control",
       label: "values with invariants",
-      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {

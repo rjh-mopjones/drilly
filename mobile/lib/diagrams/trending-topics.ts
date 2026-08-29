@@ -10,12 +10,30 @@ export const TRENDING_TOPICS: Diagram = {
     shape:
       "A counting tier whose memory is fixed by the error you accept rather than by how many keys exist, feeding a once-a-minute ranking tier that scores each key against its own history, with the answer materialised into a cache so the read path computes nothing.",
     beats: [
-      "Start with the arithmetic that kills the obvious design. Roughly 1.4M distinct keys arrive per minute, a hash-map entry costs about 106B, and a sliding day needs all 1,440 minute deltas resident so you know what to subtract when a minute ages out. That is ~216GB per geography and ~40TB across ~200 of them, so exact counting is gone before you have chosen a structure.",
-      "What fits is a fixed grid of counters: 7 rows of 32,768, ~917KB, each key addressed by one hash per row. It stores no strings, so memory is independent of cardinality, and every collision only ever adds, so reading back the minimum of the 7 cells gives an estimate that is never below the truth and at most epsilon times the window volume above it.",
-      "The grid cannot enumerate its own keys, because a hash does not invert, so each worker keeps a bounded min-heap of 500 key strings beside it. That splits the answer across two mechanisms with different failure modes, which is where the classic bug lives: merge the shards' local top lists and a key ranked 51st everywhere disappears globally with no error signal anywhere.",
-      "Linear mergeability is what makes the whole topology legal. Two sketches of the same shape add cell by cell exactly, so 60 minute tiles sum to an hour, 64 shard tiles sum to the global grid, a tail minute is removed by subtraction, and a region ships 917KB a minute instead of its events. It is also why the conservative-update optimisation is banned, because it makes cells path-dependent.",
-      "Ranking is the actual product and it is a separate problem. Rank by volume and the same famous terms win every day, so each candidate is scored against its own EWMA baseline: a steady term at 10,000/min reading 10,500 scores z = 0.33 and is ignored, while a term at 10/min reading 500/min scores z = 122. Keys born inside the window need an absolute floor, a prior and an age damper or anything new goes straight to the top.",
-      "All the expensive work runs once a minute for everyone. The merger sums 14.7M cells, re-estimates ~32,000 candidates, joins only the surviving 500 against baselines, and writes a 50-entry blob per geo and window. The read is a single GET at ~2ms against a list that is at most ~10s stale, and the API can never answer 'exactly how many'.",
+      {
+        text: "Start with the arithmetic that kills the obvious design. Roughly 1.4M distinct keys arrive per minute, a hash-map entry costs about 106B, and a sliding day needs all 1,440 minute deltas resident so you know what to subtract when a minute ages out. That is ~216GB per geography and ~40TB across ~200 of them, so exact counting is gone before you have chosen a structure.",
+        lights: ["counting-tier"],
+      },
+      {
+        text: "What fits is a fixed grid of counters: 7 rows of 32,768, ~917KB, each key addressed by one hash per row. It stores no strings, so memory is independent of cardinality, and every collision only ever adds, so reading back the minimum of the 7 cells gives an estimate that is never below the truth and at most epsilon times the window volume above it.",
+        lights: ["sketch-worker", "e2", "e6"],
+      },
+      {
+        text: "The grid cannot enumerate its own keys, because a hash does not invert, so each worker keeps a bounded min-heap of 500 key strings beside it. That splits the answer across two mechanisms with different failure modes, which is where the classic bug lives: merge the shards' local top lists and a key ranked 51st everywhere disappears globally with no error signal anywhere.",
+        lights: ["heap", "e6", "e8"],
+      },
+      {
+        text: "Linear mergeability is what makes the whole topology legal. Two sketches of the same shape add cell by cell exactly, so 60 minute tiles sum to an hour, 64 shard tiles sum to the global grid, a tail minute is removed by subtraction, and a region ships 917KB a minute instead of its events. It is also why the conservative-update optimisation is banned, because it makes cells path-dependent.",
+        lights: ["merger", "ring", "e7", "e9"],
+      },
+      {
+        text: "Ranking is the actual product and it is a separate problem. Rank by volume and the same famous terms win every day, so each candidate is scored against its own EWMA baseline: a steady term at 10,000/min reading 10,500 scores z = 0.33 and is ignored, while a term at 10/min reading 500/min scores z = 122. Keys born inside the window need an absolute floor, a prior and an age damper or anything new goes straight to the top.",
+        lights: ["scorer", "baselines", "e10", "e12"],
+      },
+      {
+        text: "All the expensive work runs once a minute for everyone. The merger sums 14.7M cells, re-estimates ~32,000 candidates, joins only the surviving 500 against baselines, and writes a 50-entry blob per geo and window. The read is a single GET at ~2ms against a list that is at most ~10s stale, and the API can never answer 'exactly how many'.",
+        lights: ["merger", "cache", "api", "e13", "e14"],
+      },
     ],
     crux:
       "You have to choose the error before you choose the structure, and the only error worth defending is one that is one-sided and survives being combined 3,840 times before anything is published. Everything else follows: the minimum rather than the mean, sketches merged rather than ranked lists merged, and an API that publishes an interval because there is no ground truth anywhere to reconcile against.",
@@ -42,7 +60,7 @@ export const TRENDING_TOPICS: Diagram = {
           decider:
             "Memory for a window that has to slide. ~1.4M distinct keys/min at ~106B per map entry is ~150MB per minute, and a 24-hour sliding window needs all 1,440 minute deltas resident to subtract the tail, so ~216GB per geo and ~40TB across ~200 geos. The same coverage in sketches is ~150MB per geo, a ~1,400x reduction.",
           flips:
-            "When the key space is registered before the first event arrives, as with the ~5M ad IDs in #18, where exact per-key state is affordable and the counts are billable so approximation is not on the table.",
+            "When the key space is registered before the first event arrives, as with a fixed set of ~5M billable ad ids, where exact per-key state is affordable and the counts are billed so approximation is not on the table.",
         },
       },
     },
@@ -176,8 +194,8 @@ export const TRENDING_TOPICS: Diagram = {
       row: 3,
       detail: {
         what: "An async consumer scoring concentration signals per candidate key and emitting soft demotion flags rather than deletions.",
-        why: "Anything publicly ranked is a target, and per-(user, key) de-duplication has already priced out the single scripted account. What is left is many accounts acting together, which only concentration signals across network, account age and follow graph can see at all.",
-        numbers: ["demote and queue, never delete", "every decision written to the audit trail", "override rate is the metric that says whether it is working"],
+        why: "Anything publicly ranked is a target, and per-(user, key) de-duplication has already priced out the single scripted account. What is left is many accounts acting together, which only concentration signals across network, account age and follow graph can see at all. Every action here demotes and queues a key rather than deleting it, because deletion has no undo, and every decision is written to the audit trail so a fast override has something to act on. The override rate, not a raw flag count, is the number that says whether the scorer is calibrated.",
+        numbers: ["1 audit row per decision", "target override rate under 5%", "review-queue backlog alarm above 500"],
         breaks:
           "It cannot separate 10,000 organised aged accounts from a genuine grassroots event, because both produce regional concentration, dense follow clustering and a burst of accounts created because of the event. Every threshold that catches one catches the other.",
         choice: {
@@ -381,7 +399,7 @@ export const TRENDING_TOPICS: Diagram = {
         why: "It is the only durable record beyond the 24h retention, and the 24h window is exactly the longest one served, so there is no margin. Replaying a lost minute into a catch-up worker also happens from here.",
         numbers: ["~2.1TB/day raw", "24h stream retention against a 24h window"],
         breaks:
-          "It is drawn dashed because nothing on the serving path waits for it: if the archive falls behind, every published list still looks perfect and the loss shows up only when someone asks for a recount.",
+          "This is a control path that nothing on the serving path waits for: if the archive falls behind, every published list still looks perfect and the loss shows up only when someone asks for a recount.",
       },
     },
     {
@@ -394,7 +412,7 @@ export const TRENDING_TOPICS: Diagram = {
       detail: {
         what: "An independent consumer reading the same events for concentration signals: network origin, account age, follow-graph density.",
         why: "Abuse scoring is deliberately off the counting path, because it is slower and less certain than counting and must never be able to stall a publish cycle. It flags asynchronously and the scorer applies whatever has arrived.",
-        numbers: ["async, flags rather than blocks"],
+        numbers: ["0ms added to the publish cycle"],
         breaks:
           "Its verdicts arrive on their own schedule, so a manipulation detected after a list has published stays visible until the next refresh.",
       },
@@ -478,7 +496,7 @@ export const TRENDING_TOPICS: Diagram = {
       detail: {
         what: "Suppression flags applied as a score multiplier at ranking time rather than as a filter at ingest.",
         why: "Demoting at the last possible moment keeps the counting tier free of policy, keeps every decision reversible, and means a wrongly suppressed key is still sitting in the candidate set when a human overrides it.",
-        numbers: ["demote, never delete", "every decision to the audit trail"],
+        numbers: ["multiplier ranges 0 to 1, never a deletion", "1 audit row per decision"],
         breaks:
           "Flags arriving after a publish apply only from the next cycle, so a manipulated term is visible for up to one refresh, and the same signals fire on genuine grassroots events.",
       },

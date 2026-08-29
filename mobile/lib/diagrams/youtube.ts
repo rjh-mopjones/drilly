@@ -10,12 +10,30 @@ export const YOUTUBE: Diagram = {
     shape:
       "Two systems that touch at exactly one place: a write path that turns a stranger's file into cacheable segments as cheaply as it can get away with, and a read path where a CDN serves essentially every byte and the origin serves almost none.",
     beats: [
-      "Upload never touches an application server. The client asks for presigned multipart URLs, splits a 2.5GB file into 5MB parts and PUTs them straight into object storage, tracking which parts are confirmed so a dropped connection resumes at part 47 rather than at zero. Completion of the object is the event that enqueues a job.",
-      "The transcode DAG then does the smallest useful thing. Probe the container, re-cut the source at forced closed GOPs into six-second segments, encode two rungs only at 360p and 720p, fan the segments across GPU workers, package once as CMAF fragmented MP4 with an HLS playlist and a DASH manifest over the same bytes, extract thumbnails, publish. For a 12-minute upload that is 240 segment jobs and under a minute of wall clock.",
-      "In parallel, a frame and audio classifier pass and a fingerprint match against the rights database return a verdict. Publication is gated on that verdict rather than on the encode finishing, which is why upload readiness, publish readiness and full-quality readiness are three separate state fields rather than one status enum.",
-      "Everything above 720p is earned. An escalation controller watches per-video view velocity over a sliding window plus the channel's prior, and only then commissions 1080p, 4K, per-title ladder analysis and AV1. Around 5% of uploads cross the threshold, which is what turns a 3,600-GPU fleet into a 1,200-GPU one and 2.9PB/day of encoded output into 1.15PB.",
-      "Delivery is pull-through. The player reads a manifest, estimates its own bandwidth and pulls six-second segments from the nearest edge; on a miss the edge goes to a shield tier that collapses thousands of correlated misses for the same object into one origin fetch. Only a predicted-hot slice is pushed out in advance, because one day of uploads is several times what an edge appliance holds.",
-      "The asymmetry that falls out of escalation is that segments are immutable and manifests are not. Segment URLs are keyed by source hash, rung, encoder build and index and carry a year with immutable; manifests are rewritten when a rung lands and carry max-age=60, which bounds how long an edge keeps telling viewers the video tops out at 720p.",
+      {
+        text: "Upload never touches an application server. The client asks for presigned multipart URLs, splits a 2.5GB file into 5MB parts and PUTs them straight into object storage, tracking which parts are confirmed so a dropped connection resumes at part 47 rather than at zero. Completion of the object is the event that enqueues a job.",
+        lights: ["creator", "upload-api", "encoded-store", "orchestrator", "e1", "e2", "e4"],
+      },
+      {
+        text: "The transcode DAG then does the smallest useful thing. Probe the container, re-cut the source at forced closed GOPs into six-second segments, encode two rungs only at 360p and 720p, fan the segments across the GPU encode fleet, package once as CMAF fragmented MP4 with an HLS playlist and a DASH manifest over the same bytes, extract thumbnails, publish. For a 12-minute upload that is 240 segment jobs and under a minute of wall clock.",
+        lights: ["pipeline-zone", "splitter", "work-queue", "encoders", "packager", "e5", "e7", "e8", "e9", "e10"],
+      },
+      {
+        text: "In parallel, the Moderation + rights gate samples frames and audio, matches them against a rights catalogue, and returns a verdict. Publication is gated on that verdict rather than on the encode finishing, which is why upload readiness, publish readiness and full-quality readiness are three separate state fields rather than one status enum.",
+        lights: ["moderation", "metadata", "e11", "e16"],
+      },
+      {
+        text: "Everything above 720p is earned. The orchestrator's escalation logic watches per-video view velocity over a sliding window plus the channel's prior, and only then commissions 1080p, 4K, per-title ladder analysis and AV1. Around 5% of uploads cross the threshold, which is what turns a 3,600-GPU fleet into a 1,200-GPU one and 2.9PB/day of encoded output into 1.15PB.",
+        lights: ["orchestrator", "viewer", "e24"],
+      },
+      {
+        text: "Delivery is pull-through. The player reads a manifest, estimates its own bandwidth and pulls six-second segments from the nearest edge; on a miss the CDN collapses thousands of correlated misses for the same object into one origin fetch. Only a predicted-hot slice is pushed out in advance, because one day of uploads is several times what an edge appliance holds.",
+        lights: ["cdn", "viewer", "encoded-store", "e18", "e19", "e21"],
+      },
+      {
+        text: "The asymmetry that falls out of escalation is that segments are immutable and manifests are not. Segment URLs are keyed by source hash, rung, encoder build and index and carry a year with immutable; manifests are rewritten when a rung lands and carry max-age=60, which bounds how long an edge keeps telling viewers the video tops out at 720p.",
+        lights: ["cdn", "e21"],
+      },
     ],
     crux:
       "You have to commit the expensive work before the information that would justify it exists. Half of uploads never reach 100 views and the top 1% take 80% of watch time, but you learn which is which hours after the encode decision was made, so escalation is reactive by construction and the fastest-rising videos are served at the floor rung during exactly the hour their audience is largest.",
@@ -136,7 +154,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "240 jobs for a 12-minute floor pass",
           "under 60s upload-to-playable at p50",
-          "a second pass weeks later re-enters the same graph",
+          "escalation can re-enter the same graph 1 or more weeks later",
         ],
         breaks:
           "The box is long-running, so worker loss mid-graph is normal rather than exceptional and every node in it has to be safe to re-run. Job output paths are pure functions of input plus encoder build, which is what makes a retry overwrite itself byte for byte.",
@@ -155,7 +173,7 @@ export const YOUTUBE: Diagram = {
         why: "Segment-parallel encoding works only because a segment can be encoded without reference to its neighbours, and that is a property you create rather than one you find: a camera puts keyframes wherever it likes. The recorded byte offsets are the second half of its job, because they are what let each encode worker issue one ranged read instead of seeking a 2.5GB object.",
         numbers: [
           "120 segments for a 12-minute video",
-          "keyframe timestamps identical across every rung",
+          "keyframe timestamps identical across all 2 floor rungs",
           "one pass over the source, CPU-bound",
         ],
         breaks:
@@ -184,7 +202,7 @@ export const YOUTUBE: Diagram = {
         numbers: [
           "~900M segment jobs/day at the floor",
           "peak upload rate ~2x the daily mean",
-          "queue drains in minutes, SLO is tens of seconds",
+          "queue drains in minutes, SLO is under 60 seconds",
         ],
         breaks:
           "Queue depth and oldest-job age are the creator-visible SLO in disguise. If the two lanes share priority, an escalation burst on yesterday's viral videos delays today's uploads becoming playable at all.",
@@ -264,15 +282,23 @@ export const YOUTUBE: Diagram = {
       parent: "pipeline-zone",
       detail: {
         what: "One gate service, three stages of a single verdict: sample and classify, fingerprint against the rights catalogue, then decide whether this video may be published. The rights catalogue is reference fingerprints that rights holders register themselves, each carrying a policy of block, monetise or track rather than a bare identity.",
-        why: "It is drawn as one service rather than three because it returns one answer to one caller in seconds and is deployed and scaled as a unit — the classifier pass is ~30 GPUs platform-wide, a rounding error against the 1,200-GPU encode fleet. It runs as a parallel branch of the transcode DAG because it is cheap and the encode is not, so gating on it costs nothing in wall clock. The rights catalogue is the gate's only durable dependency and its coverage bounds everything downstream: content nobody has registered cannot be matched, so recall is a property of that table rather than of the matcher, and the lookup itself is nearest-neighbour rather than equality since re-encoding changes the bits but not the content.",
+        why: "This is one service rather than three because it returns one answer to one caller in seconds and is deployed and scaled as a unit — the classifier pass is ~30 GPUs platform-wide, a rounding error against the 1,200-GPU encode fleet. It runs as a parallel branch of the transcode DAG because it is cheap and the encode is not, so gating on it costs nothing in wall clock. The rights catalogue is the gate's only durable dependency and its coverage bounds everything downstream: content nobody has registered cannot be matched, so recall is a property of that table rather than of the matcher, and the lookup itself is nearest-neighbour rather than equality since re-encoding changes the bits but not the content.",
         numbers: [
-          "verdict in seconds, both branches must be green",
+          "verdict within a few seconds, both of 2 branches must be green",
           "~0.7 GPU-seconds/video, ~30 GPUs platform-wide",
           "3.6M videos/day",
           "rights catalogue queried once per upload, nearest-neighbour not equality",
         ],
         breaks:
           "It owns the exposure window, and that window can never be driven to zero at 3.6M uploads a day. The honest metric is exposure-hours before takedown rather than an incident count, and the target is a number somebody has to sign off on. Coverage gaps in the rights catalogue are invisible the same way: nothing signals that a piece of content was simply never registered.",
+        choice: {
+          pick: "One synchronous gate service, three internal stages sharing a decode",
+          instead: "Three separate services — classifier, fingerprint matcher, verdict — chained by queues.",
+          decider:
+            "Shared cost. The classifier and fingerprint stages want the same decoded frames, and re-decoding per service would double the ~30-GPU platform-wide cost of the whole check branch for no new information. Queueing between three services also adds hops to a path that has to return in seconds, not the tens of seconds a queue chain typically costs.",
+          flips:
+            "When one stage needs independent scaling or a different deploy cadence from the other two, for example a fingerprint matcher whose reference catalogue update schedule has nothing to do with the classifier model's.",
+        },
       },
     },
     {
@@ -311,8 +337,8 @@ export const YOUTUBE: Diagram = {
         what: "Computes perceptual audio and video fingerprints from the frames the classifier stage already decoded, and looks them up against the rights catalogue.",
         why: "It shares a decode with the classifier pass because decoding is the expensive part and both stages want the same frames. Rights matching has to survive re-encoding, so an exact hash is useless here: the lookup is a nearest-neighbour search over perceptual descriptors.",
         numbers: [
-          "runs on the same decode as the classifier pass",
-          "returns a match id or nothing, in seconds",
+          "shares 1 decode with the classifier pass",
+          "returns a match id or nothing, in under 5 seconds",
         ],
         breaks:
           "It loses an arms race. Robust fingerprints handle re-encoding, cropping, mirroring, time-shifting and pitch-shifting individually and lose to combinations, so low-reach infringement is largely uncaught and the reachable position is to make evasion expensive rather than impossible.",
@@ -320,7 +346,7 @@ export const YOUTUBE: Diagram = {
           pick: "Perceptual fingerprints matched against a reference catalogue",
           instead: "Exact content hashing of the uploaded file.",
           decider:
-            "What a re-upload actually looks like. An exact hash catches only a byte-identical file, and every real infringing re-upload has been through a transcode at minimum, so the hash changes while the content does not. Exact hashing is still worth keeping as a cheap first pass for identical re-uploads and for storage dedup.",
+            "What a re-upload actually looks like. An exact hash catches only a byte-identical file, and every real infringing re-upload has been through at least 1 transcode, so the hash changes while the content does not. Exact hashing is still worth keeping as a cheap first pass for identical re-uploads and for storage dedup.",
           flips:
             "Deduplicating literal re-uploads, where an exact hash is free and answers the question completely.",
         },
@@ -448,7 +474,7 @@ export const YOUTUBE: Diagram = {
       label: "init: presigned parts",
       detail: {
         what: "POST /upload/init returning an upload_id, a part size and a list of presigned part URLs.",
-        why: "It is drawn as a control path because it is the only part of the upload the application tier participates in. Everything after it is the client talking to storage directly, which is what keeps this tier stateless at 83 upload starts a second.",
+        why: "This is a control path because it is the only part of the upload the application tier participates in. Everything after it is the client talking to storage directly, which is what keeps this tier stateless at 83 upload starts a second.",
         numbers: ["83 upload starts/s at peak"],
         breaks:
           "Presigned URLs expire, so a long-running upload has to be able to ask for fresh ones without restarting the session.",
@@ -596,6 +622,7 @@ export const YOUTUBE: Diagram = {
       id: "e12",
       from: "classifiers",
       to: "fingerprint",
+      tier: "data",
       label: "one decode, reused",
       detail: {
         what: "The decoded frames and audio the classifier pass already produced, handed to fingerprinting rather than decoded a second time.",
@@ -608,6 +635,7 @@ export const YOUTUBE: Diagram = {
       id: "e13",
       from: "classifiers",
       to: "verdict",
+      tier: "data",
       label: "safety score",
       offset: 40,
       detail: {
@@ -622,6 +650,7 @@ export const YOUTUBE: Diagram = {
       id: "e14",
       from: "fingerprint",
       to: "verdict",
+      tier: "data",
       label: "match id or none",
       detail: {
         what: "The matched reference asset and its policy, or nothing.",
@@ -720,7 +749,7 @@ export const YOUTUBE: Diagram = {
       detail: {
         what: "Watch events feeding the per-video sliding-window counters, the same stream the recommendation system consumes for its own purposes.",
         why: "This is the only signal that tells you what a video is worth, and it arrives hours after the encoding decision it should have informed. The whole cost model rests on this arrow being cheap and roughly right rather than exact.",
-        numbers: ["~1B watch-hours/day", "sliding window of the last hour"],
+        numbers: ["~1B watch-hours/day", "a 1-hour sliding window"],
         breaks:
           "It must never sit on the playback path: an outage here costs escalation decisions, and blocking playback on it would trade a 99.99% SLO for a best-effort one.",
       },

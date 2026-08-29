@@ -10,12 +10,30 @@ export const EMAIL_SERVICE: Diagram = {
     shape:
       "An acceptance decision wrapped around a storage system: SMTP gives you one irreversible bit at the end of DATA, so the architecture is mostly about which signals are allowed to refuse and which are only ever allowed to file.",
     beats: [
-      "Ingest is one MX service that refuses in three places inside a single transaction, cheapest first. On connect it drops known-bad IPs before a byte of body crosses the wire; at RCPT TO it returns 550 for an unknown recipient rather than accepting and bouncing later, because the return path on spam is forged and your bounce makes you the spammer; at end of DATA it refuses only a DMARC failure against a domain that published p=reject. That disposes of roughly 30% of arrivals at close to zero cost.",
-      "Everything else gets a 250, and acceptance is a promise about storage, not about the inbox. The body goes to content-addressed object storage under SHA-256 of its content, a 250B metadata row lands on the recipient's shard of a wide-column store carrying subject, participants, thread id, body hash and a wrapped data key, and the label starts as UNSORTED rather than INBOX.",
-      "Classification happens off a change stream, where it has unbounded time and features no per-connection decision can see. The strongest is cross-mailbox: the same body hash arriving in 40,000 mailboxes in 90 seconds is trivial to spot and nearly impossible to disguise. The output is a label, never a refusal, so copies already delivered can be retro-relabelled by a bulk update against the metadata rows with no bytes touched.",
-      "The storage split is the load-bearing separation. Metadata is 250B, read on every inbox view, and wants strong consistency because marking a message read must show on every device; bodies average 50KB, are typically read once, and deduplicate about 7x on the attachment slice. One store cannot be right for both. The cost is that delete, retention, legal hold and key revocation now have to be correct across two stores plus an index that is only eventually consistent with either.",
-      "Search is per user, which removes the hard half of the problem: nobody searches anyone else's mail, so there is no cross-user ranking and no global recall requirement, only a packing problem. One logical index per user, roughly 50k users to a physical shard sorted on user_id, gives 20,000 operable shards instead of a billion unmanageable ones.",
-      "Outbound never blocks on a stranger's infrastructure. A send is durable in a replicated queue before the UI says Sent, a worker does the MX lookup and opens SMTP, and failure means growing backoff for up to 72 hours and then a bounce into the sender's own inbox, never a silent drop. Sending addresses are tiered by account reputation so a compromised account burns a quarantine pool rather than the addresses everyone else sends from.",
+      {
+        text: "Ingest is one MX service that refuses in three places inside a single transaction, cheapest first. On connect it drops known-bad IPs before a byte of body crosses the wire; at RCPT TO it returns 550 for an unknown recipient rather than accepting and bouncing later, because the return path on spam is forged and your bounce makes you the spammer; at end of DATA it refuses only a DMARC failure against a domain that published p=reject. That disposes of roughly 30% of arrivals at close to zero cost.",
+        lights: ["mx-fleet", "p-connect", "p-rcpt", "p-data", "external-senders", "e-refuse-connect", "e-refuse-rcpt", "e-refuse-data"],
+      },
+      {
+        text: "Everything else gets a 250, and acceptance is a promise about storage, not about the inbox. The body goes to content-addressed object storage under SHA-256 of its content, a 250B metadata row lands on the recipient's shard of a wide-column store carrying subject, participants, thread id, body hash and a wrapped data key, and the label starts as UNSORTED rather than INBOX.",
+        lights: ["accept-writer", "object-store", "metadata-store", "e-accept", "e-body", "e-row"],
+      },
+      {
+        text: "Classification happens off a change stream, where it has unbounded time and features no per-connection decision can see. The strongest is cross-mailbox: the same body hash arriving in 40,000 mailboxes in 90 seconds is trivial to spot and nearly impossible to disguise. The output is a label, never a refusal, so copies already delivered can be retro-relabelled by a bulk update against the metadata rows with no bytes touched.",
+        lights: ["change-stream", "classifier", "e-event", "e-cs-classifier", "e-label"],
+      },
+      {
+        text: "The storage split is the load-bearing separation. Metadata is 250B, read on every inbox view, and wants strong consistency because marking a message read must show on every device; bodies average 50KB, are typically read once, and deduplicate about 7x on the attachment slice. One store cannot be right for both. The cost is that delete, retention, legal hold and key revocation now have to be correct across two stores plus an index that is only eventually consistent with either.",
+        lights: ["metadata-store", "object-store", "user-storage-zone"],
+      },
+      {
+        text: "Search is per user, which removes the hard half of the problem: nobody searches anyone else's mail, so there is no cross-user ranking and no global recall requirement, only a packing problem. One logical index per user, roughly 50k users to a physical shard sorted on user_id, gives 20,000 operable shards instead of a billion unmanageable ones.",
+        lights: ["search-index", "change-stream", "e-cs-search"],
+      },
+      {
+        text: "Outbound never blocks on a stranger's infrastructure. A send is durable in a replicated queue before the UI says Sent, a worker does the MX lookup and opens SMTP, and failure means growing backoff for up to 72 hours and then a bounce into the sender's own inbox, never a silent drop. Sending addresses are tiered by account reputation so a compromised account burns a quarantine pool rather than the addresses everyone else sends from.",
+        lights: ["outbound-queue", "sending-workers", "mailbox-api", "e-send", "e-lease", "e-defer", "e-bounce"],
+      },
     ],
     crux:
       "The protocol gives you one bit and no take-backs. A 5xx on legitimate mail is permanent and invisible to the recipient, so only signals running near 1e-6 false positives may produce one. A spam model runs near 1e-3, and at 100B accepted messages a day that is 1e8 legitimate messages destroyed daily, against roughly $45k/month to store the junk instead. That asymmetry, not storage, is what shapes the whole system.",
@@ -50,7 +68,7 @@ export const EMAIL_SERVICE: Diagram = {
       row: 0,
       detail: {
         what: "The internet-facing servers named by the domain's MX records: one SMTP transaction with three hooks, on_connect, on_rcpt and on_data_end, in one process. on_connect reads an in-memory IP-reputation table rebuilt from feeds; on_data_end reads a TTL-bounded cache of the sending domain's SPF, DKIM and DMARC records, refilled from that domain's own DNS on a miss.",
-        why: "Drawn as one service with three stages rather than three services because the stages share a TCP connection and a transaction. There is no network hop between them, nothing can be deployed or scaled without the others, and the whole point is that each hook is cheaper than the one after it, which is only true if they run in the same process in order. Both caches live in-process for the same reason: a network round trip is three orders of magnitude too slow to sit in front of a per-connection or per-message budget measured in microseconds.",
+        why: "It is one service with three stages rather than three services because the stages share a TCP connection and a transaction. There is no network hop between them, nothing can be deployed or scaled without the others, and the whole point is that each hook is cheaper than the one after it, which is only true if they run in the same process in order. Both caches live in-process for the same reason: a network round trip is three orders of magnitude too slow to sit in front of a per-connection or per-message budget measured in microseconds.",
         numbers: [
           "~30% of arrivals disposed of here",
           "~70% get a 250 and an asynchronous verdict",
@@ -80,7 +98,7 @@ export const EMAIL_SERVICE: Diagram = {
       detail: {
         what: "The first refusal point: the peer IP is checked against a reputation table and known botnet space is dropped with a 554 before a byte of message has crossed the wire.",
         why: "It runs first because it is the cheapest rejection available and it disposes of the most raw connection volume. Everything downstream costs a round trip, a body read or a DNS lookup; this costs one memory access on data we already had.",
-        numbers: ["one memory read per connection", "runs before MAIL FROM"],
+        numbers: ["one memory read per connection", "runs before the 1st MAIL FROM byte"],
         breaks:
           "A wrong entry blackholes a whole netblock of legitimate senders silently, and the senders it hits are exactly the ones with no other channel to tell us.",
       },
@@ -103,7 +121,7 @@ export const EMAIL_SERVICE: Diagram = {
           pick: "Refuse an unknown recipient inside the transaction, at RCPT TO.",
           instead: "Accept everything the syntax allows and generate a bounce afterwards when delivery finds no such mailbox.",
           decider:
-            "Who receives the bounce. The return path on spam is forged, so a bounce for a message we should never have taken goes to the forged victim rather than the sender. That is backscatter, and it gets us listed as a spam source by the same feeds the connect-time check depends on.",
+            "Who receives the bounce. The return path on spam is forged on most of the ~50% of traffic that is hostile, so a bounce for a message we should never have taken goes to the forged victim rather than the sender. That is backscatter, and it gets us listed as a spam source by the same feeds the connect-time check depends on.",
           flips:
             "A relay that genuinely cannot resolve recipients at the edge, such as a gateway in front of a directory it may only query asynchronously. Then the only honest answer is 451 and a retry, not an accept.",
         },
@@ -120,14 +138,14 @@ export const EMAIL_SERVICE: Diagram = {
       detail: {
         what: "The third and last refusal point: with the whole message in hand, evaluate SPF, DKIM and DMARC, refuse with 550 only on a DMARC failure against a published p=reject, defer with 451 if the classifier fleet is unhealthy, and otherwise return 250.",
         why: "This is the only place a content-aware decision is possible and the only place we deliberately decline to make one. A 550 here is not our judgement of the message, it is the sending domain instructing us to refuse mail that fails its own authentication, which moves the false-positive risk to the party that can actually fix it.",
-        numbers: ["DMARC p=none, p=quarantine, p=reject", "pct= stages enforcement, 10% then 50%"],
+        numbers: ["3 DMARC policies: none, quarantine, reject", "pct= stages enforcement, 10% then 50%"],
         breaks:
           "A stale or missing DMARC policy turns a would-be 5xx into an accept, so an outage in DNS resolution shows up as a spam wave rather than as an error.",
         choice: {
           pick: "Act only on DMARC: alignment between the visible From and whichever of SPF or DKIM passed, then the domain's own published policy.",
           instead: "Act on SPF or DKIM directly, refusing anything that fails either check.",
           decider:
-            "What each protocol actually authenticates. SPF authenticates the Return-Path, not the From: header the user sees, so a message can pass SPF for attacker.example while displaying From: security@yourbank.com, and SPF fails on every forward because the forwarder is now the connecting IP. DKIM survives forwarding but breaks the moment a list appends a footer. Only DMARC yields an aligned verdict plus a policy the sender authorised.",
+            "What each protocol actually authenticates. SPF authenticates the Return-Path, not the From: header the user sees, so a message can pass SPF for attacker.example while displaying From: security@yourbank.com, and SPF fails on every forward because the forwarder is now the connecting IP. DKIM survives forwarding but breaks the moment a list appends a footer. Only DMARC yields an aligned verdict, combining both of the other two checks into one decision plus a policy the sender authorised.",
           flips:
             "Inside a closed relay where every sender is yours and every path is known, an SPF failure really is conclusive and the extra DMARC lookup buys nothing.",
         },
@@ -145,7 +163,7 @@ export const EMAIL_SERVICE: Diagram = {
       detail: {
         what: "The post-250 write path: hash the body, derive a data key from that hash, put-if-absent into object storage, insert the metadata row with label UNSORTED, then publish the event.",
         why: "It is a separate service from the MX because the two sides of the 250 have opposite requirements. The MX is bounded by a connection it cannot hold open; this side has no deadline and is allowed to be slow, which is also why a short internal queue between them can absorb a storage hiccup without the door having to refuse.",
-        numbers: ["dek = hkdf(sha256(body))", "row inserted with labels=[UNSORTED]"],
+        numbers: ["dek = hkdf(sha256(body))", "1 row inserted with labels=[UNSORTED]"],
         breaks:
           "The write spans two stores plus a stream, so a partial failure leaves a metadata row pointing at a body that was never stored, and the user sees a message that will not open.",
         choice: {
@@ -256,7 +274,7 @@ export const EMAIL_SERVICE: Diagram = {
         numbers: [
           "1.16M events/s average",
           "three independent consumer offsets",
-          "push notifier: fires on accept, before the label exists, id only",
+          "push notifier fires on accept, before the label exists, ~1s median",
         ],
         breaks:
           "A consumer falling behind is invisible from the ingest side: mail is still being accepted and stored, so the only symptom is that new messages sit unsorted, unsearchable or unannounced for longer. Because the push consumer runs ahead of classification, a message about to be foldered as spam can still buzz a phone, which is why it carries a message id and never content.",
@@ -331,8 +349,8 @@ export const EMAIL_SERVICE: Diagram = {
       row: 0,
       detail: {
         what: "The devices a person is holding: the web client, the mobile apps and third-party IMAP or POP clients, plus the push channel they receive on.",
-        why: "Drawn as a client rather than an external because this is the side of the trust boundary where we know who is calling. Every request carries an authenticated user_id, which is what makes single-partition routing and cross-user isolation possible at all, and it is the exact opposite of the inbound SMTP side where nothing about the caller is known.",
-        numbers: ["10B sends/day, ~10 per user", "'not spam' clicks are the only FP signal we get"],
+        why: "It is a client rather than an external because this is the side of the trust boundary where we know who is calling. Every request carries an authenticated user_id, which is what makes single-partition routing and cross-user isolation possible at all, and it is the exact opposite of the inbound SMTP side where nothing about the caller is known.",
+        numbers: ["10B sends/day, ~10 per user", "0 other FP signals exist besides 'not spam' clicks"],
         breaks:
           "A POP client that downloads and deletes, or an IMAP client holding UID sequences, pins mailbox layout decisions we would otherwise be free to change. The push signal carries a message id rather than content, so a client that assumed otherwise would show a phishing subject line on a lock screen a second before the classifier foldered it.",
       },
@@ -428,8 +446,8 @@ export const EMAIL_SERVICE: Diagram = {
       label: "connection accepted",
       detail: {
         what: "The same SMTP conversation continuing into MAIL FROM and RCPT TO, in the same process on the same socket.",
-        why: "Drawn as a stage boundary rather than a hop because that is exactly what it is. The ordering is the design: each stage is more expensive than the one before it, and that only saves anything if the cheap one runs first and can end the conversation.",
-        numbers: ["no network hop, no serialisation"],
+        why: "It is a stage boundary rather than a hop because that is exactly what it is. The ordering is the design: each stage is more expensive than the one before it, and that only saves anything if the cheap one runs first and can end the conversation.",
+        numbers: ["0 network hops, 0 serialisation"],
         breaks: "Reordering the stages, or making one of them a remote call, silently converts the cheapest rejection in the system into the most expensive.",
       },
     },
@@ -456,7 +474,7 @@ export const EMAIL_SERVICE: Diagram = {
       detail: {
         what: "The transaction proceeding to DATA now that the recipient is known to exist and the sender is within its limits.",
         why: "This is the point where reading the body becomes worth paying for. Everything before it was decided on the envelope, which costs nothing; everything after it needs the whole message in hand.",
-        numbers: ["body read starts here"],
+        numbers: ["body read begins after 2 refusals already passed"],
         breaks: "Message size limits belong here, not later: reading an unbounded body before deciding anything is how a single sender consumes an MX host's memory.",
       },
     },
@@ -469,7 +487,7 @@ export const EMAIL_SERVICE: Diagram = {
       offset: 90,
       detail: {
         what: "The last refusal: 550 on a DMARC failure against a published p=reject, or 451 when the classifier fleet is unhealthy and we would rather not guess.",
-        why: "This arrow is the only irreversible thing in the diagram, and the only 5xx here is one the sending domain authorised. Anything probabilistic gets the 4xx instead, which is a refusal you can take back and which RFC 5321 senders retry for days.",
+        why: "This arrow is the only irreversible thing in the whole design, and the only 5xx here is one the sending domain authorised. Anything probabilistic gets the 4xx instead, which is a refusal you can take back and which RFC 5321 senders retry for days.",
         numbers: ["~1e-6 false positives on a p=reject refusal", "1e-3 for a model score, which is why it never lands here"],
         breaks: "A 5xx on legitimate mail is permanent and invisible to the recipient. There is no bounce they will see and no channel through which the mistake can be reported.",
       },
@@ -553,7 +571,7 @@ export const EMAIL_SERVICE: Diagram = {
       label: "extract + index postings",
       detail: {
         what: "The indexing consumer reading the same log at its own offset: extract subject, body text and participants, analyse them, and write postings into the user's logical index. Owns the purge that has to follow every delete.",
-        why: "Drawn as this edge's own step rather than folded silently into the store because it does work the store does not: deciding what is indexable, and keeping cleanup in step with deletion. Consuming off the same log as classification is what stops indexing and classification getting out of order with each other.",
+        why: "It is its own step rather than folded silently into the store because it does work the store does not: deciding what is indexable, and keeping cleanup in step with deletion. Consuming off the same log as classification is what stops indexing and classification getting out of order with each other.",
         numbers: ["~4KB indexable per 50KB message, ~30% of source text", "~250MB per user at steady state", "1.16M events/s"],
         breaks:
           "The write is not transactional with the metadata row, so a crash between them leaves a message that lists but does not search, or the reverse after a purge. Index cleanup is a separate job from message deletion, so a purge that completes in metadata but not here leaves deleted mail findable by search until somebody notices.",
@@ -596,7 +614,7 @@ export const EMAIL_SERVICE: Diagram = {
       detail: {
         what: "User feedback: 'Report spam' and 'Not spam' clicks, written as a label change and captured as a training label, retrained nightly.",
         why: "This loop is the reason labelling beats refusing. A refused message generates no signal and teaches the system nothing, whereas a mis-filed one reaches a human who can correct it, and that correction is the only false-positive measurement we have.",
-        numbers: ["retrained nightly", "gates the canary: auto-revert on FP threshold breach"],
+        numbers: ["retrained every 24h", "gates the canary: auto-revert above the 0.1% FP threshold"],
         breaks: "It counts only the mistakes somebody noticed. Most people never open the spam folder, and the mail most likely to be mis-filed is exactly the mail nobody is watching for, so the 0.1% budget is a lower bound with an unknown multiplier.",
       },
     },
@@ -622,7 +640,7 @@ export const EMAIL_SERVICE: Diagram = {
       detail: {
         what: "Fetching and decrypting the body when a user actually opens a message, using the data key unwrapped from their metadata row.",
         why: "It is deliberately a second round trip. Bodies are read roughly once in their life and inbox listings never need them, so paying a fetch on open is far cheaper than carrying 50KB through every list request.",
-        numbers: ["DEK unwrapped with the per-user KEK"],
+        numbers: ["1 DEK unwrapped per open, using the per-user KEK"],
         breaks: "A KMS regional issue makes bodies undecryptable while auth and metadata stay healthy, so the mailbox lists correctly and every message fails to open.",
       },
     },

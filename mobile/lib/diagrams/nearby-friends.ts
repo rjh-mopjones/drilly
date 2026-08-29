@@ -10,12 +10,30 @@ export const NEARBY_FRIENDS: Diagram = {
     shape:
       "This looks like a geo service and is really a write-rate problem: every indexed point moves, so the system is a funnel that sheds ten million position writes per second down to about forty-six thousand notifications, with a permission check on every path that produces an answer.",
     beats: [
-      "The rate is set on the phone, before a byte leaves it. Motion classification runs on the sensor hub at single-digit milliamps against GPS at hundreds, so the device picks its own interval: five minutes when still, 30 seconds walking, 10 seconds driving, one minute in the background. That is the first 10x, and only the device knows its own motion state without a round trip.",
-      "The Location Service is one deployable unit running four stages of the same request: write loc:{user_id} with a five minute expiry, pre-filter, check the permission pair, publish the crossing. The expiry is load-bearing: a user who stops reporting drops off the map by themselves, with no tombstone to write and no cleanup job chasing a billion keys.",
-      "Contrast this with Q13, which is the whole point of the question. Proximity search over static places is a read problem: millions of businesses sit still, you index them once, and the spatial index narrows an otherwise unanswerable query. Here the points move ten million times a second and the candidate set was handed to you for free by a friend graph averaging 200 entries, so the read path needs no spatial structure at all.",
-      "The cell scheme does not disappear, it changes job. Q13 uses it as a read index; here the same coarse cell is the write-placement key, so that everyone physically near the writer is already resident on the writer's shard and the pre-filter is a local set intersection rather than 20 scattered position reads. Around 85% of writes have no online, permitted friend in range and stop there.",
-      "Delivery then splits by what the user is actually looking at. A map on screen polls its owner's online friends every ten seconds, which is stateless and joins the permission pair on the same read that produces the answer. A radius crossing, meaning bob is now nearby, is published to the writer's topic and pushed over a held-open socket, and there are only about 46k of those per second against ten million writes.",
-      "Privacy is structural rather than a feature bolted on. Consent is bidirectional because unilateral location access is itself the abuse vector, permission is checked on the read rather than cached at fan-out so a revoke takes effect with a zero-length window, crossing events carry no coordinates at all, and history is opt-in and physically off the hot path.",
+      {
+        text: "The rate is set on the phone, before a byte leaves it. Motion classification runs on the sensor hub at single-digit milliamps against GPS at hundreds, so the device picks its own interval: five minutes when still, 30 seconds walking, 10 seconds driving, one minute in the background. That is the first 10x, and only the device knows its own motion state without a round trip.",
+        lights: ["device", "e1"],
+      },
+      {
+        text: "The Location Service is one deployable unit running four stages of the same request: write loc:{user_id} with a five minute expiry, pre-filter, check the permission pair, publish the crossing. The expiry is load-bearing: a user who stops reporting drops off the map by themselves, with no tombstone to write and no cleanup job chasing a billion keys.",
+        lights: ["location-service", "ingest", "prefilter", "acl-gate", "publisher"],
+      },
+      {
+        text: "This is a write-rate problem where a purely spatial design, searching for static places nearby, would be a read problem: millions of businesses sit still, you index them once, and the spatial index narrows an otherwise unanswerable query. Here the points move ten million times a second, and the nearby-friend set is handed over for free by a friend graph averaging 200 entries, so the read path needs no spatial index at all.",
+        lights: ["prefilter"],
+      },
+      {
+        text: "The geo cell scheme changes job rather than disappearing: a static-places search would use it as a read index, but here the same coarse cell is the write-placement key, so everyone physically near the writer is already resident on the writer's shard and the pre-filter is a local set intersection rather than 20 scattered position reads. About 85% of writes have no online friend in range at all and stop right there, before permission is even checked.",
+        lights: ["shard-node", "prefilter", "cell-members"],
+      },
+      {
+        text: "Delivery then splits by what the user is actually looking at. A map on screen polls its owner's online friends every ten seconds, which is stateless and joins the permission pair on the same read that produces the answer. A radius crossing, meaning bob is now nearby, is published to the writer's topic and pushed over a held-open socket, and there are only about 46k of those per second against ten million writes.",
+        lights: ["map-client", "nearby-api", "crossing-bus", "subscription", "friend-socket"],
+      },
+      {
+        text: "Privacy is structural rather than a feature bolted on. Consent is bidirectional because unilateral location access is itself the abuse vector, permission is checked on the read rather than cached at fan-out so a revoke takes effect with a zero-length window, crossing events carry no coordinates at all, and history is opt-in and physically off the hot path.",
+        lights: ["acl-gate", "perm-db", "friend-socket", "history"],
+      },
     ],
     crux:
       "The write amplification is on the wrong side of the system, and every write has to answer a question about other people before you know whether it mattered. Geographic sharding is what makes that question local and cheap, and it collapses exactly where the product is most valuable: a festival puts 50,000 mutually in-range users on one node, so the ordinary case and the interesting case want opposite layouts.",
@@ -88,14 +106,22 @@ export const NEARBY_FRIENDS: Diagram = {
       row: 0,
       detail: {
         what: "The write path as one deployable unit: accept POST /location, write the latest position, pre-filter against the local cell, join the permission pair on whatever survived, publish the crossing. Four stages of one request, on one fleet.",
-        why: "The prose's own hot-path pseudocode is a single function — set, then crossings(), then permitted(), then publish() — and drawing those as peer services would claim an independence that does not exist. They deploy together, scale on the same signal, and each stage exists only to make the next one affordable. It is stateless on purpose: ten million writes a second arrive whether or not anybody is watching, so the tier that absorbs them has to scale on the shard map and nothing else.",
+        why: "The write path is genuinely a single function — set the position, then evaluate crossings, then check who is permitted, then publish — and drawing those as peer services would claim an independence that does not exist. They deploy together, scale on the same signal, and each stage exists only to make the next one affordable. It is stateless on purpose: ten million writes a second arrive whether or not anybody is watching, so the tier that absorbs them has to scale on the shard map and nothing else.",
         numbers: [
           "~10M writes/s peak: 3.3M/s foreground, 6.7M/s background",
           "10M in, ~1.5M past the pre-filter, ~46k published",
-          "sized 200x above the delivery fleet it feeds",
+          "sized ~200x above the delivery fleet it feeds",
         ],
         breaks:
           "Batched samples after a network blip. The device buffers ~30 fixes in a tunnel and replays them with original timestamps, and the crossing evaluation has to run over that whole sequence rather than only the newest point, or a friend who walked past mid-tunnel is silently missed. Because the stages are one process, that replay cost lands on every stage at once.",
+        choice: {
+          pick: "All four stages in one deployable, in-process",
+          instead: "Four independent services — ingest, pre-filter, permission check, publisher — each scaled on its own metric.",
+          decider:
+            "Hops per write against a 10M/s write rate. In-process, a write crosses stage boundaries with 0 network hops; splitting into 4 services would add roughly 3 extra hops per write, about 30M extra RPCs/s, to buy independence none of the stages currently need since they all move in lockstep with the write rate.",
+          flips:
+            "If one stage's load stopped tracking the others, for example the publisher going CPU-bound on dedup while ingest stays I/O-bound, splitting it out would let that stage scale on its own signal instead of over-provisioning the whole fleet for its worst stage.",
+        },
       },
     },
     {
@@ -140,7 +166,7 @@ export const NEARBY_FRIENDS: Diagram = {
         numbers: [
           "~85% of writes stop here",
           "~20 online friends of ~200",
-          "ordinary case: zero or one local candidate",
+          "ordinary case: zero or one nearby friend",
         ],
         breaks:
           "Crowds. A split stadium cell fans the intersection across up to 8 sub-shards, reintroducing exactly the scatter-gather that geographic sharding existed to remove, and crossing notifications go from 5s to 30-60s where the product matters most.",
@@ -148,7 +174,7 @@ export const NEARBY_FRIENDS: Diagram = {
           pick: "Filter before the bus, against the cell that already holds the nearby positions",
           instead: "Publish every position and let the delivery tier decide who cares.",
           decider:
-            "What the delivery fleet then has to be sized for. Unconditional fan-out is 0.15 x 3 = 0.45 per write, so streaming positions is ~4.5M would-be pushes/s; filtering first and publishing only crossings is ~46k/s, 100x smaller, and the check is a local memory operation rather than a network hop.",
+            "What the delivery fleet then has to be sized for. Unconditional fan-out of every nearby pair is 0.15 x 3 = 0.45 per write, ~4.5M pushes/s; distance-filtering here is a local memory operation, not a network hop, and it is the first of the checks — permission, then dedup of repeat state — that together bring the delivery fleet down to the ~46k/s of actual crossings it has to be sized for.",
           flips:
             "A sub-second live-dot product for two people walking toward each other, where the answer is 'yes' on nearly every write anyway and the filter is pure overhead on the latency budget.",
         },
@@ -163,12 +189,12 @@ export const NEARBY_FRIENDS: Diagram = {
       row: 2,
       parent: "location-service",
       detail: {
-        what: "The second shedding point: for each candidate the distance test kept, join the bidirectional sharing pair and drop anything not currently permitted in both directions.",
+        what: "The second shedding point: for each nearby friend the distance test kept, join the bidirectional sharing pair and drop anything not currently permitted in both directions.",
         why: "It is a stage of this request rather than a check the delivery tier does later, and that placement is the privacy design: the verdict that leaves this service has already been authorised, so there is no cached permission anywhere downstream to go stale. Consent is bidirectional because a unilateral 'I can see where you are' is itself the abuse vector, not a scaling concern.",
         numbers: [
-          "runs on ~15% of writes, ~3 candidates each",
+          "runs on ~15% of writes, ~3 nearby friends each",
           "~0.5ms on a cache miss",
-          "both directions required for sharing to be live",
+          "2 rows, one per direction, both must be enabled",
         ],
         breaks:
           "If this moves to a TTL cache on the delivery nodes, a revoked pair keeps receiving crossings for the length of the TTL, and indefinitely if the invalidation channel partitions.",
@@ -191,12 +217,12 @@ export const NEARBY_FRIENDS: Diagram = {
       row: 3,
       parent: "location-service",
       detail: {
-        what: "The last stage: emit (subject, observer, entered|left, ts) to the writer's topic, with no coordinates in the payload, and deduplicate on (subject, observer, direction) before it goes.",
-        why: "It gets its own stage because it owns a failure nothing else can see. During a cell split or merge the write is routed by both the previous and the current cell, so the same boundary crossing is evaluated twice; the deduplication here is the only thing standing between that and a doubled notification, which users complain about far more than a missing one.",
+        what: "The last stage: emit (subject, observer, entered|left, ts) to the writer's topic only when the pair's state actually changed since the last evaluation, with no coordinates in the payload, and deduplicate on (subject, observer, direction) before it goes.",
+        why: "It gets its own stage because it owns two failures nothing else can see. First, most authorised pairs are friends who were already nearby on the previous write, so publishing only on a state change is what turns ~4.5M authorised evaluations a second into ~46k actual crossings; publishing every still-nearby confirmation would flood the bus at the pre-permission rate. Second, during a cell split or merge the write is routed by both the previous and the current cell, so the same boundary crossing is evaluated twice; the (subject, observer, direction) dedup is what stops that becoming a doubled notification, which users complain about far more than a missing one.",
         numbers: [
-          "~46k events/s out of ~10M writes/s in",
-          "dedup window must exceed the migration window",
-          "payload carries no lat/lng",
+          "~4.5M authorised evaluations/s in, ~46k new crossings/s out",
+          "dedup window ~5min, longer than the ~4min average migration interval",
+          "0 lat/lng fields in the payload",
         ],
         breaks:
           "A dedup window shorter than the shard migration window. Then every user crossing a cell boundary while a split is in flight is notified twice, and the bug only appears under exactly the load that caused the split.",
@@ -204,7 +230,7 @@ export const NEARBY_FRIENDS: Diagram = {
           pick: "Deduplicate at the publisher on (subject, observer, direction), with a window longer than the migration window",
           instead: "Lean on exactly-once delivery from the bus, or deduplicate on the subscriber.",
           decider:
-            "Where the duplicate is actually created. It is created upstream, by dual routing during a split, so both copies are distinct, legitimate publishes and no delivery guarantee on the bus can merge them. Only the publisher sees both.",
+            "Where the duplicate is actually created. It is created upstream, by dual routing during a split, so both copies are distinct, legitimate publishes and no delivery guarantee on the bus can merge them. Only the publisher sees both, which is why its dedup window is set to ~5min against a ~4min average migration interval.",
           flips:
             "If splits were coordinated rather than online — freeze the cell, drain, then resume — the duplicate never exists and the dedup state is pure cost.",
         },
@@ -273,10 +299,10 @@ export const NEARBY_FRIENDS: Diagram = {
       row: 3,
       detail: {
         what: "The observer's device holding an open socket, receiving { type: crossing, subject_id, direction, ts } and nothing else.",
-        why: "This is the path that works when the app is closed, which is most of the hours it is installed. It is drawn as a separate client from the map view because they are different products with different freshness promises and different failure modes, not because they are different phones: the same device is usually both, one channel at a time.",
+        why: "This is the path that works when the app is closed, which is most of the hours it is installed. It is a separate channel from the map view because they are different products with different freshness promises and different failure modes, not because they are different phones: the same device is usually both, one channel at a time.",
         numbers: [
           "crossing notification under 5s",
-          "no coordinates on this channel",
+          "0 coordinates in this channel's payload",
           "about 4 crossings per user per day",
         ],
         breaks:
@@ -309,14 +335,14 @@ export const NEARBY_FRIENDS: Diagram = {
       parent: "shard-node",
       detail: {
         what: "In-memory latest position per user: loc:{user_id} to (lat, lng, ts, prev_cell), five minute expiry, sharded on a coarse geographic cell rather than on the user key.",
-        why: "It is a cache and not a database on purpose: nothing here is a system of record, every entry is replaced within minutes and expires on its own, and losing a node costs one report cycle because clients republish. That is also why the RPO for live positions is deliberately non-zero. This is Q13's cell scheme borrowed and repurposed — a read index there, a write-placement key here.",
+        why: "It is a cache and not a database on purpose: nothing here is a system of record, every entry is replaced within minutes and expires on its own, and losing a node costs one report cycle because clients republish. That is also why the RPO for live positions is deliberately non-zero. This borrows the geohash cell scheme a static-places proximity search would use as a read index, and repurposes it as a write-placement key instead.",
         numbers: [
           "~60GB for 500M reporters at ~120B/entry",
           "~400 nodes, sized by 200M reads/s not by 60GB",
           "five minute expiry",
         ],
         breaks:
-          "The fleet is operations-bound rather than memory-bound, which is unusual enough to say out loud. It is also where staleness shows: expire an entry or lag a migration and you either lose the dot or, worse, render a confidently wrong one.",
+          "The fleet is operations-bound rather than memory-bound, which is the counterintuitive part of its sizing. It is also where staleness shows: expire an entry or lag a migration and you either lose the dot or, worse, render a confidently wrong one.",
         choice: {
           pick: "Shard on geohash(lat, lng, precision 5), not on user id",
           instead: "Hash on user id, the default that spreads load evenly by construction.",
@@ -440,8 +466,8 @@ export const NEARBY_FRIENDS: Diagram = {
         why: "It is transactional rather than a wide-column store because a grant or a revoke has to be atomic across a pair and immediately visible to the invalidation it triggers. Read-your-writes on a revoke is the whole guarantee; an eventually consistent store would give the revoking user a UI that says 'stopped' while a replica keeps answering yes.",
         numbers: [
           "one row per directed pair, ~40B each",
-          "written at share and revoke rates, not at read rates",
-          "both directions required for sharing to be live",
+          "far below the ~10M/s read rate: written at share/revoke rate only",
+          "2 rows, one per direction, both must be enabled",
         ],
         breaks:
           "Revocation reaches the next read and nothing already delivered. Positions already in a friend's client memory, or logged by a modified client since the day sharing was granted, are not recoverable, and the UI has to say so in words rather than implying revoke means erase.",
@@ -493,8 +519,8 @@ export const NEARBY_FRIENDS: Diagram = {
       label: "opt-in, moved >50m",
       detail: {
         what: "An asynchronous, movement-gated append to the tracking archive, written only for users who explicitly opted in.",
-        why: "Drawn dashed and on the opposite side of the write path from everything else because it must never be on the hot path: history is a separate product, and a candidate who lets it share the live write path has coupled a 240TB system to a 60GB one for no benefit.",
-        numbers: ["~30% opt-in", "~264 points/day per active user", "hourly heartbeat even when still"],
+        why: "It sits deliberately apart from the write path because it must never be on the hot path: history is a separate product, and coupling it to the live write path would tie a 240TB system to a 60GB one for no benefit.",
+        numbers: ["~30% opt-in", "~264 points/day per active user", "1 heartbeat/hour even when still"],
         breaks:
           "Capturing history when the user expected ephemeral mode. Hard-gate the write behind the explicit flag and audit it, because this is the failure that is a privacy incident rather than an outage.",
       },
@@ -534,9 +560,9 @@ export const NEARBY_FRIENDS: Diagram = {
       tier: "data",
       label: "~15% survive",
       detail: {
-        what: "The candidates that were close enough, handed to the permission join: roughly 3 friends on the 15% of writes that had anybody nearby at all.",
-        why: "This arrow is the funnel's first narrowing and it is why the expensive check is affordable. It is not animated because it is already 85% quieter than the arrow above it — the system does not spend its time here.",
-        numbers: ["~1.5M writes/s reach this stage", "~3 candidates each"],
+        what: "The nearby friends that were close enough, handed to the permission join: roughly 3 per write on the 15% of writes that had anybody in range at all.",
+        why: "This arrow is the funnel's first narrowing and it is why the expensive permission check is affordable: it runs against 1.5M writes/s rather than 10M/s, already 85% quieter than the arrow above it.",
+        numbers: ["~1.5M writes/s reach this stage", "~3 nearby friends each"],
         breaks:
           "If the pre-filter's drop rate falls in a cell, this arrow gets heavier before anything else does, which is why per-cell drop rate is the load-bearing metric rather than latency.",
       },
@@ -548,9 +574,9 @@ export const NEARBY_FRIENDS: Diagram = {
       tier: "data",
       label: "permitted pair?",
       detail: {
-        what: "The bidirectional sharing lookup for each surviving candidate, served from the read-through cache and falling through to the store on a miss.",
+        what: "The bidirectional sharing lookup for each nearby friend that survived the distance test, served from the read-through cache and falling through to the store on a miss.",
         why: "Running the check here, on the request that produces the verdict, rather than on the delivery nodes is what gives revocation a zero-length window. The same cache answers the poll path, which is deliberate: one tier, one invalidation rule, and no second copy of the permission state anywhere.",
-        numbers: ["~0.5ms on a cache miss", "both directions required", "~1.5M evaluations/s, against 10M/s from the poll path"],
+        numbers: ["~0.5ms on a cache miss", "2 directions, both required", "~1.5M evaluations/s, against 10M/s from the poll path"],
         breaks:
           "If this check moves to a TTL cache on the delivery nodes, a revoked pair keeps receiving crossings for the length of the TTL, and indefinitely if the invalidation channel partitions.",
       },
@@ -560,11 +586,11 @@ export const NEARBY_FRIENDS: Diagram = {
       from: "acl-gate",
       to: "publisher",
       tier: "data",
-      label: "authorised crossings",
+      label: "authorised pairs, ~4.5M/s",
       detail: {
-        what: "The pairs that passed both the distance test and the permission join, handed to the publisher to be deduplicated and emitted.",
-        why: "Everything past this point is already authorised, which is the property that lets the delivery tier hold no permission state of its own. It also means the funnel is finished here: ten million writes have become tens of thousands of verdicts.",
-        numbers: ["10M/s in at the top of this service, ~46k/s out"],
+        what: "The pairs that passed both the distance test and the permission join — authorised to be told about each other, but not yet filtered down to an actual state change — handed to the publisher to check against last known state and emit.",
+        why: "Everything past this point is already authorised, which is the property that lets the delivery tier hold no permission state of its own. Most of these ~4.5M/s evaluations repeat a pair's already-published state; the publisher is where that gets collapsed into the ~46k/s of genuinely new crossings.",
+        numbers: ["~4.5M authorised evaluations/s in, ~46k/s new crossings out"],
         breaks:
           "Publishing on every in-radius position instead of on the crossing puts 4.5M messages/s on the bus, which is the mistake this whole stage ordering exists to avoid.",
       },
@@ -592,7 +618,7 @@ export const NEARBY_FRIENDS: Diagram = {
       detail: {
         what: "Crossing events consumed by the delivery tier and matched against the routing table of currently live sockets.",
         why: "The bus decouples the write path from the socket fleet so a delivery outage cannot back-pressure ingest, and so a subscriber that reconnects can be caught up from the log rather than losing the event entirely.",
-        numbers: ["buffered for the reconnect window"],
+        numbers: ["buffered ~5min, the reconnect window"],
         breaks:
           "A crossing older than a few minutes is not worth delivering: 'bob arrived' is a claim about now, and replaying stale ones after a recovery is worse than dropping them.",
       },
@@ -633,7 +659,7 @@ export const NEARBY_FRIENDS: Diagram = {
       label: "multi-get ~20 keys",
       detail: {
         what: "A multi-get over the caller's online friends' position keys, roughly 10% of a 200-friend list, fanned across whichever shards those friends currently sit on.",
-        why: "No spatial index is consulted, which is the whole contrast with Q13: the candidate set was handed over by the friend graph, so 20 key reads and 20 distance computations are cheaper than any index that would have to be maintained under 10M writes/s. Note this read crosses cells freely — geographic placement exists for the write path, and costs the read path a scatter it can afford at 20 keys.",
+        why: "No spatial index is consulted, unlike a proximity search over static places: the nearby-friend set is handed over by the friend graph, so 20 key reads and 20 distance computations are cheaper than any index that would have to be maintained under 10M writes/s. Note this read crosses cells freely — geographic placement exists for the write path, and costs the read path a scatter it can afford at 20 keys.",
         numbers: ["200M key reads/s in aggregate", "~500k ops/s per cache node"],
         breaks:
           "This is what makes the cache fleet operations-bound rather than memory-bound: 400 nodes for 60GB of data, sized entirely by read rate.",
@@ -662,7 +688,7 @@ export const NEARBY_FRIENDS: Diagram = {
       detail: {
         what: "The fall-through to the system of record on a cache miss, and the write path for grants and revocations in the other direction.",
         why: "The store never sees the 10M/s; it sees misses and writes. That is the only reason a transactional database is a defensible choice here, and it is why the cache is a real tier rather than an optimisation.",
-        numbers: ["~0.5ms per miss", "write rate is share and revoke actions, not reads"],
+        numbers: ["~0.5ms per miss", "far below the ~10M/s read rate: writes are share/revoke actions only"],
         breaks:
           "An invalidation that does not land turns a zero-length revocation window into an unbounded one, and nothing downstream can tell the difference. The canary that revokes and immediately reads back is what catches it.",
       },
@@ -676,7 +702,7 @@ export const NEARBY_FRIENDS: Diagram = {
       detail: {
         what: "The control path a revoke takes to the delivery tier: tear down the socket route for that pair, not merely evict a cached entry.",
         why: "The read-time check gives a zero window on anything not yet evaluated, but a crossing that already passed the check and is in flight to a socket is past every gate this design has. Removing the route is the only thing that stops it. It is drawn because it is the one place where the push path needs a permission mechanism of its own.",
-        numbers: ["fires at revoke rate, not at message rate", "target: no delivery after the revoke commits"],
+        numbers: ["fires per revoke, not per one of the ~46k/s crossing messages", "target: 0 deliveries after the revoke commits"],
         breaks:
           "If this is treated as a cache eviction rather than a teardown, an in-flight crossing lands after permission was withdrawn, and the user who revoked has no way to know it happened.",
       },

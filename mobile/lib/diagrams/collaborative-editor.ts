@@ -10,12 +10,30 @@ export const COLLABORATIVE_EDITOR: Diagram = {
     shape:
       "The document is never transmitted: what travels is a stream of small operations, each tagged with the revision its author was looking at, and the entire system exists to rewrite those operations once that revision has gone stale.",
     beats: [
-      "An operation is not a message. A message means the same thing whenever it is delivered; insert('X', 5) is a function of a document, and by the time it lands that document has usually moved. Every real decision here is about where you convert that function into one that still expresses its author's intent against the state that actually exists.",
-      "One process owns each document. It takes operations in arrival order, reads its own log from the sender's base_rev to current_rev, folds the operation through that gap one transform at a time, assigns the next revision and only then broadcasts. Funnelling everything through a single owner turns a distributed concurrency problem into an ordered queue, which is the largest simplification in the design.",
-      "The client is not passive. Your keystroke applies locally the instant you type, so typing never waits for a round trip, and the client holds unacknowledged work in a pending buffer at most one operation deep on the wire. When a remote operation arrives the transform runs in both directions: the remote against the buffer so it is correct against what you are looking at, and the buffer against the remote so the server and the client transform from the same premise.",
-      "Write order is not negotiable. The operation is appended to a majority of the per document log before it is broadcast, because an edit that reached three screens and no disk can neither be recovered nor un-shown. The originating client gets back only its new revision number, never its own operation, because it applied that edit half a second ago.",
-      "Snapshots bound the cost of opening. A full serialised document is written every 1,000 operations or every 5 minutes, so a five year old document opens as one snapshot fetch plus a short tail rather than replaying 800,000 operations from creation. Version history is stored as revisions coalesced at roughly one per minute of editing, a 40x reduction over raw operations.",
-      "Presence and offline are the two paths that do not look like the others. Cursors ride the same socket, are throttled to about 10 frames per second per client at the socket edge and are never written to the log. A client returning from a gap sends its last received revision, pulls the operations it missed and rebases its buffered work against them.",
+      {
+        text: "An operation is not a message. A message means the same thing whenever it is delivered; insert('X', 5) is a function of a document, and by the time it lands that document has usually moved. Every real decision here is about where you convert that function into one that still expresses its author's intent against the state that actually exists.",
+        lights: ["client", "owner", "transform"],
+      },
+      {
+        text: "One process owns each document. It takes operations in arrival order, reads its own log from the sender's base_rev to current_rev, folds the operation through that gap one transform at a time, assigns the next revision and only then broadcasts. Funnelling everything through a single owner turns a distributed concurrency problem into an ordered queue, which is the largest simplification in the design.",
+        lights: ["owner-zone", "owner", "transform", "broadcast", "e2", "e3"],
+      },
+      {
+        text: "The client is not passive. Your keystroke applies locally the instant you type, so typing never waits for a round trip, and the client holds unacknowledged work in a pending buffer at most one operation deep on the wire. When a remote operation arrives the transform runs in both directions: the remote against the buffer so it is correct against what you are looking at, and the buffer against the remote so the server and the client transform from the same premise.",
+        lights: ["client", "socket-edge", "e1", "e6"],
+      },
+      {
+        text: "Write order is not negotiable. The operation is appended to a majority of the per document log before it is broadcast, because an edit that reached three screens and no disk can neither be recovered nor un-shown. The originating client gets back only its new revision number, never its own operation, because it applied that edit half a second ago.",
+        lights: ["oplog", "broadcast", "e4", "e5", "e6"],
+      },
+      {
+        text: "Snapshots bound the cost of opening. A full serialised document is written every 1,000 operations or every 5 minutes, so a five year old document opens as one snapshot fetch plus a short tail rather than replaying 800,000 operations from creation. Version history is stored as revisions coalesced at roughly one per minute of editing, a 40x reduction over raw operations.",
+        lights: ["snapshotter", "snapshots", "history", "e10", "e11", "e12"],
+      },
+      {
+        text: "Presence and offline are the two paths that do not look like the others. Cursors ride the same socket, are throttled to about 10 frames per second per client at the socket edge and are never written to the log. A client returning from a gap sends its last received revision, pulls the operations it missed and rebases its buffered work against them.",
+        lights: ["presence", "offline", "e8", "e9", "e13", "e14"],
+      },
     ],
     crux:
       "Every client must land on byte-identical text no matter what order operations arrived in, and the property that makes that achievable is that there is exactly one transform site. Two owners for one document means transforms happening in two places, which requires TP2, which almost nobody has correctly implemented.",
@@ -115,7 +133,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
     {
       id: "transform",
       label: "OT transform",
-      sub: "op' = T(op, gap[base_rev..cur])",
+      sub: "rewrites ops against the gap",
       kind: "service",
       col: 2,
       row: 1,
@@ -207,7 +225,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
         why: "One owner per document is only true if something enforces it. The lease is that enforcement, and its heartbeat is also how owner death is detected, which is what bounds the read-only window before a replacement takes over.",
         numbers: [
           "lease reassignment SLO p99 < 30s",
-          "on the critical path of every document open, not every operation",
+          "1 lookup per document open, 0 per operation",
         ],
         breaks:
           "The coordination service is on the open path for all ~250M editing sessions per day, so if it is unavailable nobody can open a document even though every owner is perfectly healthy.",
@@ -360,8 +378,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e1",
       from: "client",
       to: "socket-edge",
+      tier: "hot",
       label: "op + base_rev",
-      animated: true,
       detail: {
         what: "A coalesced bundle of a few characters, tagged with the revision its author was looking at and the client id.",
         why: "base_rev is the whole protocol in one field. Without it the server has no way to know which operations this client had not seen, and therefore no way to work out what the operation was supposed to mean.",
@@ -374,8 +392,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e2",
       from: "socket-edge",
       to: "owner",
+      tier: "hot",
       label: "ops in arrival order",
-      animated: true,
       detail: {
         what: "Forwarding operation frames from the socket tier to the process that currently holds the lease on this document.",
         why: "The socket tier scales on connection count and the owner scales on documents, so the two tiers are separate. Everything editing this document has to arrive at the same process, which is what turns concurrency into a queue.",
@@ -388,8 +406,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e3",
       from: "owner",
       to: "transform",
+      tier: "hot",
       label: "gap ops from base_rev",
-      animated: true,
       detail: {
         what: "The owner handing the incoming operation plus the log slice from base_rev to current_rev to the transform.",
         why: "That slice is precisely the set of operations the sender had not seen. Folding through it one at a time, op' = T(op, gap[i]), produces an operation that expresses the same intent against the revision that actually exists now.",
@@ -402,8 +420,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e4",
       from: "transform",
       to: "oplog",
+      tier: "hot",
       label: "append, majority write",
-      animated: true,
       detail: {
         what: "The transformed operation appended at the next revision, synchronously to a majority of replicas.",
         why: "This is the only part of the latency budget that is not physics, which is why it is the one worth optimising. It is also the durability boundary: everything before it can be retried, everything after it has been seen.",
@@ -416,8 +434,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e5",
       from: "oplog",
       to: "broadcast",
+      tier: "hot",
       label: "durable, then fan out",
-      animated: true,
       detail: {
         what: "The gate: fan-out only begins once the append has completed to a majority.",
         why: "Reverse these two and a crash leaves an edit visible on three screens and absent from storage. A broadcast cannot be undone, whereas a missing acknowledgement can always be retried, so the irreversible step goes second.",
@@ -429,8 +447,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e6",
       from: "broadcast",
       to: "client",
+      tier: "hot",
       label: "remote_op + ack rev",
-      animated: true,
       offset: 90,
       detail: {
         what: "The transformed operation to every other editor, and to its author only the new revision number.",
@@ -444,8 +462,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e7",
       from: "owner",
       to: "lease",
+      tier: "control",
       label: "lease + heartbeat",
-      dashed: true,
       detail: {
         what: "The owner asserting and renewing its exclusive claim on this doc_id, and the placement lookup that sent clients here in the first place.",
         why: "One transform site is a claim that has to be enforced by something outside the process making it. The heartbeat doubles as liveness: a lapsed lease is how owner death is noticed and reassignment starts.",
@@ -458,8 +476,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e8",
       from: "socket-edge",
       to: "presence",
+      tier: "control",
       label: "cursor frames, 10 fps",
-      dashed: true,
       detail: {
         what: "Cursor and selection frames peeled off the same socket and relayed without ever touching the owner or the log.",
         why: "Presence outnumbers edits and is worthless a second later. Handling it at the edge keeps hundreds of frames per dragged selection away from a single-threaded process that has real work to do.",
@@ -472,8 +490,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e9",
       from: "presence",
       to: "client",
+      tier: "control",
       label: "cursors, never logged",
-      dashed: true,
       detail: {
         what: "Other editors' cursors and selections arriving for display, carrying no durable consequence.",
         why: "A cursor is an offset, and offsets move. The client shifts every local anchor by the same arithmetic the transform just used, which is why this path has to stay ordered against the edit stream.",
@@ -485,8 +503,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e10",
       from: "oplog",
       to: "snapshotter",
+      tier: "control",
       label: "every 1,000 ops",
-      dashed: true,
       detail: {
         what: "The trigger and the source data: a run of operations since last_snapshot_rev, read back to materialise a full document.",
         why: "Without this the log grows without bound and open cost grows with it. Snapshotting is also what lets the online log tail be trimmed to about 7 days, with everything behind it archived.",
@@ -499,6 +517,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e11",
       from: "snapshotter",
       to: "snapshots",
+      tier: "data",
       label: "full document blob",
       detail: {
         what: "The serialised document written under a temporary key, hash-verified, then published by atomically advancing the 'latest' pointer.",
@@ -512,8 +531,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e12",
       from: "snapshotter",
       to: "history",
+      tier: "control",
       label: "coalesced revisions",
-      dashed: true,
       detail: {
         what: "Runs of operations collapsed into named revisions at roughly one per minute of editing, written to the history store.",
         why: "Version history is a product surface, not a replay of the log, and building it from coalesced revisions is what keeps a year of history at ~180TB instead of 7.3PB.",
@@ -526,6 +545,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e13",
       from: "snapshots",
       to: "offline",
+      tier: "data",
       label: "snapshot + tail on open",
       detail: {
         what: "The document open path: fetch the latest verified snapshot, then replay only the operations after it.",
@@ -539,6 +559,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e14",
       from: "offline",
       to: "owner",
+      tier: "data",
       label: "buffered ops to rebase",
       offset: 60,
       detail: {
@@ -553,8 +574,8 @@ export const COLLABORATIVE_EDITOR: Diagram = {
       id: "e15",
       from: "oplog",
       to: "owner",
+      tier: "control",
       label: "replay to current_rev",
-      dashed: true,
       offset: 60,
       detail: {
         what: "A replacement owner reading the log forward from the last snapshot to rebuild the document and the revision counter after acquiring the lease.",

@@ -8,14 +8,32 @@ export const DISTRIBUTED_CACHE: Diagram = {
   itemId: 34,
   overview: {
     shape:
-      "Everywhere else in this collection a cache is one box; this is the inside of that box, and it is a hint store bolted to the read path, so the hit is trivial and every component drawn here is a defence on the miss path or the invalidation path.",
+      "A cache is a hint store bolted onto the read path: the hit is trivial, and every component in this design exists to defend the miss path or the invalidation path — the two places a cache turns from an optimisation into a bug.",
     beats: [
-      "The hit path is one hop and deliberately boring. The application asks its in-process L1 for the handful of allowlisted hot keys, then the tier, where the ring maps the key to one of 60 shards and RAM answers in about 0.3ms. That is 98% of 5M gets/s, and the origin never learns those reads happened.",
-      "Every miss is a small write, which is why the miss path carries the machinery. One loader per key takes a short-lived lock so 10k concurrent misses become one origin query, the value goes back with a 300s TTL jittered by 10%, and a rising refresh probability near expiry means a hot key's TTL never actually arrives.",
-      "The sizing is arithmetic and it justifies everything after it. A 10TB working set over 180GB shards is 60 primaries, 5M over 60 is 83k ops/s each against a 150k to 200k ceiling, and 5M x (1 - h) < 100k of origin capacity forces h > 98%. Hit rate is a capacity constraint, not a target.",
-      "Sharding does not fix a hot key, because one key lives on one shard. A million reads per second of a 2KB value is 16 Gbps arriving at a single NIC while 59 shards run at 1.3 Gbps. The two fixes trade different things: the L1 cuts tier reads to P/T but makes the key uninvalidatable, key-level replication over 8 shards divides the bandwidth and keeps delete working.",
-      "Invalidation is where a cache stops being a performance optimisation and starts being able to show a customer a wrong number. Writes commit to the origin and then delete the key, never overwrite it, because deletes commute and absent is always safe. A change-log consumer does the same job once instead of once per call site, and a backstop TTL bounds whatever both of them miss.",
-      "Say plainly that a cache is not a database: it may lose every value at any moment and the system must still be correct. Then say the uncomfortable half, which is that an origin sized for 100k QPS against 5M reads/s cannot survive a cold pool, so availability really does depend on the cache being warm and rate-limited fill is a degradation, not a fix.",
+      {
+        text: "The hit path is one hop and deliberately boring. The application asks its in-process L1 for the handful of allowlisted hot keys, then the tier, where the ring maps the key to one of 60 shards and RAM answers in about 0.3ms. That is 98% of 5M gets/s, and the origin never learns those reads happened.",
+        lights: ["app", "l1", "proxy", "ring", "shard", "e1", "e2", "e3", "e4", "e5"],
+      },
+      {
+        text: "Every miss is a small write, which is why the miss path carries the machinery. One loader per key takes a short-lived lock so 10k concurrent misses become one origin query, the value goes back with a 300s TTL jittered by 10%, and a rising refresh probability near expiry means a hot key's TTL never actually arrives.",
+        lights: ["loader", "origin", "shard", "e6", "e7", "e8"],
+      },
+      {
+        text: "The sizing is arithmetic and it justifies everything after it. A 10TB working set over 180GB shards is 60 primaries, 5M over 60 is 83k ops/s each against a 150k to 200k ceiling, and 5M x (1 - h) < 100k of origin capacity forces h > 98%. Hit rate is a capacity constraint, not a target.",
+        lights: ["tier-group", "shard", "origin"],
+      },
+      {
+        text: "Sharding does not fix a hot key, because one key lives on one shard. A million reads per second of a 2KB value is 16 Gbps arriving at a single NIC while 59 shards run at 1.3 Gbps. The two fixes trade different things: the L1 cuts tier reads to P/T but makes the key uninvalidatable, key-level replication over 8 shards divides the bandwidth and keeps delete working.",
+        lights: ["hotkey", "l1", "ring", "e11", "e12", "e13"],
+      },
+      {
+        text: "Invalidation is where a cache stops being a performance optimisation and starts being able to show a customer a wrong number. Writes commit to the origin and then delete the key, never overwrite it, because deletes commute and absent is always safe. A change-log consumer does the same job once instead of once per call site, and a backstop TTL bounds whatever both of them miss.",
+        lights: ["writer", "origin", "shard", "invalidator", "e14", "e15", "e16", "e17"],
+      },
+      {
+        text: "Say plainly that a cache is not a database: it may lose every value at any moment and the system must still be correct. Then say the uncomfortable half, which is that an origin sized for 100k QPS against 5M reads/s cannot survive a cold pool, so availability really does depend on the cache being warm and rate-limited fill is a degradation, not a fix.",
+        lights: ["origin", "loader"],
+      },
     ],
     crux:
       "Two things have to be true at once. The cache may lose any value at any moment with no correctness consequence, and it may not serve a wrong value for an unbounded time. Hold only the first and the cache is free in your head and you ship a price that changed twenty minutes ago. Hold only the second and you reach for persistence and quorum reads and rebuild a slow database that happens to live in RAM.",
@@ -33,7 +51,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       detail: {
         what: "The cache cluster itself: 60 primary shards with one replica each, holding a 10TB working set entirely in RAM with persistence switched off.",
         why: "Everything in this box is derived state. Disaster recovery is refilling from the origin rather than restoring anything, which is what makes the tier cheap to run and what makes invalidation the only hard problem it has.",
-        numbers: ["120 processes x 256GB = ~30TB provisioned", "10TB working set, corpus is 10x larger", "RPO is not applicable, nothing here is authoritative"],
+        numbers: ["120 processes x 256GB = ~30TB provisioned", "10TB working set, corpus is 10x larger", "0 minutes of RPO applies; nothing here is authoritative"],
         breaks:
           "The tier is allowed to be empty and is not allowed to be wrong, and the second property is not enforced by anything inside this box.",
       },
@@ -69,7 +87,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       detail: {
         what: "A per-process copy of an explicitly allowlisted set of hot keys, held for 100ms to 1s and checked before the tier.",
         why: "Reads reaching the cache tier for one key fall to P/T, where P is the process count and T the L1 TTL. At P = 10k and T = 1s that is 10k/s instead of 1M/s, which takes a hot key from 16 Gbps on one NIC to 160 Mbps.",
-        numbers: ["P/T = 10k/1s = 10k reads/s at the tier", "a 100x cut on the hot key", "staleness floor becomes T"],
+        numbers: ["P/T = 10k/1s = 10k reads/s at the tier", "a 100x cut on the hot key", "staleness floor becomes T, up to 1s"],
         breaks:
           "No delete can reach 10,000 process heaps, so putting an L1 in front of a key silently converts that key's invalidation into a TTL.",
         choice: {
@@ -109,7 +127,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       col: 3,
       row: 0,
       detail: {
-        what: "The function mapping a key to its owning shard, with roughly 150 virtual positions per physical shard. Q2 is the ring itself in full; here it is one lookup on the hot path.",
+        what: "The function mapping a key to its owning shard, with roughly 150 virtual positions per physical shard, using consistent hashing so a resize moves a small fraction of keys instead of remapping the whole ring. Here it exists as one lookup on the hot path.",
         why: "The placement decision is load-bearing for the cache specifically because a remap is a miss burst. Hashing modulo the node count empties the cache on every resize and hands the full read load to an origin sized for 2% of it.",
         numbers: ["adding a shard moves ~1/60 of the keyspace", "modulo remaps ~98% of keys", "1 position per shard gives 2x to 3x imbalance"],
         breaks:
@@ -177,7 +195,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       detail: {
         what: "One asynchronous replica per primary, promoted on failure and optionally serving reads to multiply read capacity.",
         why: "Without a replica, losing a node deletes 1/60 of the keyspace permanently and hands the origin that shard's miss traffic. Surviving nodes do not inherit the dead node's data, because consistent hashing reassigns ownership rather than moving bytes.",
-        numbers: ["failover in roughly 10s", "one dead shard = 83k QPS into a 100k origin", "replica lag stacks on top of the TTL"],
+        numbers: ["failover in roughly 10s", "one dead shard = 83k QPS into a 100k origin", "lag adds seconds on top of the 300s TTL"],
         breaks:
           "A replica can return a value the primary has already deleted, so the bound you publish for replica reads is the TTL plus the lag, not the larger of the two.",
         choice: {
@@ -224,9 +242,9 @@ export const DISTRIBUTED_CACHE: Diagram = {
           "None of the three helps with a cache that starts empty. A cold pool has the same symptom as a stampede and a completely different cause, which is why it needs a rate limiter instead.",
         choice: {
           pick: "A per-key lock built on the cache itself, with no consensus and no fencing token",
-          instead: "A real lock service with consensus and monotonic fencing tokens (Q35), or no coordination at all.",
+          instead: "A real lock service with consensus and monotonic fencing tokens, or no coordination at all.",
           decider: "What a lost grant costs: one duplicate origin query, against a 100k QPS budget. Paying tens of milliseconds for consensus to protect a single extra read would destroy the only reason the cache exists.",
-          flips: "Never for this lock, and that is the point worth saying out loud. The moment the protected thing is a mutation rather than a read, a lost grant corrupts data and this construction is wrong.",
+          flips: "Never for this lock — that is the point. The moment the protected thing is a mutation rather than a read, a lost grant corrupts data and this construction is wrong.",
         },
       },
     },
@@ -282,7 +300,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       detail: {
         what: "A consumer of the origin's committed change stream that deletes the affected keys, and broadcasts those deletes to the other regions' independent pools.",
         why: "It gives one implementation of invalidation ordered by the store's own commit ordering, instead of a hand-written delete at every call site where one forgotten delete is a stale value that lives until its TTL.",
-        numbers: ["propagation lag becomes the published staleness bound", "delete broadcast is negligible in bytes", "a dropped broadcast is invisible, so the TTL is the real guarantee"],
+        numbers: ["cross-region propagation lag, often 1-5s, becomes the published bound", "~50B per delete broadcast, negligible", "a dropped broadcast is invisible, so the 300s TTL is the real guarantee"],
         breaks:
           "It cannot name derived keys. A page fragment built from a user row, a settings row and three feed rows has no key a row-level event can name, so that class gets a short TTL and no invalidation at all.",
         choice: {
@@ -299,12 +317,12 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e1",
       from: "app",
       to: "l1",
+      tier: "hot",
       label: "hot-key allowlist first",
-      animated: true,
       detail: {
         what: "The read checking the process-local copy before anything leaves the machine, for the small allowlisted set of keys that have one.",
         why: "It exists only for keys whose fanout would otherwise land on one NIC. Every other key skips it, because a blanket L1 would make the whole keyspace uninvalidatable to buy nothing measurable.",
-        numbers: ["allowlisted keys only", "100ms to 1s TTL"],
+        numbers: ["~200 keys allowlisted", "100ms to 1s TTL"],
         breaks: "If the allowlist grows by accident, key classes silently acquire a staleness floor nobody chose and no delete can reach.",
       },
     },
@@ -312,8 +330,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e2",
       from: "l1",
       to: "proxy",
+      tier: "hot",
       label: "GET, 5M/s fleet-wide",
-      animated: true,
       detail: {
         what: "The actual cache read leaving the application process on a pooled connection to the proxy tier.",
         why: "This is the hop the whole system is sized around: 5M gets/s at a sub-1ms p99, which is why it is a pooled binary protocol rather than anything that opens a connection per call.",
@@ -325,6 +343,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e3",
       from: "proxy",
       to: "ring",
+      tier: "data",
       label: "route by key",
       detail: {
         what: "The proxy resolving which shard owns the key, using the ring it holds rather than asking anyone.",
@@ -337,8 +356,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e4",
       from: "ring",
       to: "shard",
+      tier: "hot",
       label: "owning shard of 60",
-      animated: true,
       detail: {
         what: "The GET arriving at the single shard that owns this key.",
         why: "One key has exactly one owner, which is what makes the cache cheap and is also the entire hot key problem: no amount of sharding splits the load for a key that 1M requests per second all want.",
@@ -350,8 +369,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e5",
       from: "shard",
       to: "app",
+      tier: "hot",
       label: "hit: ~0.3ms, 98%",
-      animated: true,
       offset: 90,
       detail: {
         what: "The hit path returning a ~2KB value, which is where 98% of the 5M gets/s end.",
@@ -364,8 +383,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e6",
       from: "shard",
       to: "loader",
+      tier: "hot",
       label: "miss: 100k/s",
-      animated: true,
       detail: {
         what: "A miss handed to the loader, which is the only path allowed to touch the origin.",
         why: "Misses are a capacity number rather than an error: at 99% they are 50k/s and half the origin is spare, at 97% they are 150k/s and the origin is 50% over. Routing them through one place is what makes them countable and limitable.",
@@ -377,8 +396,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e7",
       from: "loader",
       to: "origin",
+      tier: "hot",
       label: "1 loader per key",
-      animated: true,
       detail: {
         what: "The origin query, made by exactly one holder of the per-key lock while every other misser waits.",
         why: "Without it, one popular key expiring turns 10 QPS into 10,000 in the same millisecond. The lock is what converts a stampede into a single read plus a short wait for everyone else.",
@@ -390,6 +409,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e8",
       from: "loader",
       to: "shard",
+      tier: "data",
       label: "SET, TTL 300s +/-10%",
       offset: 40,
       detail: {
@@ -403,11 +423,11 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e9",
       from: "shard",
       to: "eviction",
+      tier: "control",
       label: "180GB cap, TTL sweep",
-      dashed: true,
       detail: {
         what: "The two mechanisms inside the shard that remove data: expiry sweeping keys past their TTL, and eviction reclaiming under the memory cap.",
-        why: "It is drawn as a control path because it removes data rather than serving it, and because which of the two is actually binding decides whether the eviction policy fork is worth any time at all.",
+        why: "It is a control path because it removes data rather than serving it, and because which of the two is actually binding decides whether the eviction policy fork is worth any time at all.",
         numbers: ["residency ~14 hours vs 300s median TTL", "evictions/s is the metric that says which one binds"],
         breaks: "If keys without a TTL are configured as non-evictable, the cap stops being a cap and the process is OOM killed instead.",
       },
@@ -416,13 +436,13 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e10",
       from: "shard",
       to: "replica",
+      tier: "control",
       label: "async replication",
-      dashed: true,
       offset: 40,
       detail: {
         what: "Asynchronous replication of the primary's writes to its replica, which stands ready for promotion and can serve reads.",
         why: "It is deliberately asynchronous. Making it synchronous would put a network round trip on a sub-1ms write path in order to durably preserve data that is by definition allowed to vanish.",
-        numbers: ["promotion in roughly 10s", "lag is a second staleness source on top of the TTL"],
+        numbers: ["promotion in roughly 10s", "lag adds seconds on top of the 300s TTL"],
         breaks: "A replica serving reads can return a value the primary has already deleted, for as long as the lag lasts, which is fine for a profile blob and not for an entitlement.",
       },
     },
@@ -430,13 +450,13 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e11",
       from: "shard",
       to: "hotkey",
+      tier: "control",
       label: "sampled per-key counts",
-      dashed: true,
       offset: 60,
       detail: {
         what: "Per-shard egress and sampled request counts flowing to the detector that decides which keys are hot.",
         why: "Egress per node is cheap and exact but tells you a shard is saturated, not which key did it. Sampled key counts answer the second question at a cost that does not scale with 5M ops/s.",
-        numbers: ["per_shard_egress_gbps plus sampled counts", "trustworthy window ~10s"],
+        numbers: ["per-shard egress in Gbps, sampled at ~1% of requests", "trustworthy window ~10s"],
         breaks: "The window that makes the sample trustworthy is the same window during which the shard is already saturated and nothing has engaged.",
       },
     },
@@ -444,11 +464,11 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e12",
       from: "hotkey",
       to: "l1",
+      tier: "control",
       label: "promote to L1 allowlist",
-      dashed: true,
       detail: {
         what: "A detected hot key being added to the allowlist that application processes cache locally.",
-        why: "This is the cheap mitigation and it is one-way in a way worth stating: adding a key here caps its tier load at P/T and simultaneously sets its staleness floor at T, with no path back for a delete.",
+        why: "This is the cheap mitigation and it is one-way: adding a key here caps its tier load at P/T and simultaneously sets its staleness floor at T, with no path back for a delete.",
         numbers: ["1M/s at the tier becomes 10k/s", "staleness floor becomes the L1 TTL"],
         breaks: "Promoting a key whose value gates money or access converts a hard invalidation guarantee into a TTL without anything failing or logging.",
       },
@@ -457,8 +477,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e13",
       from: "hotkey",
       to: "ring",
+      tier: "control",
       label: "or spread :0-:7 over 8",
-      dashed: true,
       detail: {
         what: "The other mitigation: storing the hot value under 8 suffixed names so reads pick a suffix at random and land on 8 different shards.",
         why: "It is the answer when the value must stay invalidatable. Splitting one key over 8 shards divides 16 Gbps into 2 Gbps each and keeps DELETE working, which the L1 cannot do at any TTL.",
@@ -470,11 +490,12 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e14",
       from: "writer",
       to: "origin",
+      tier: "data",
       label: "commit v2 first",
       detail: {
         what: "The write committing to the authoritative store before anything touches the cache.",
         why: "Ordering is the whole point. Touching the cache first opens a window, single-digit milliseconds long, in which any reader misses, reads the pre-write value and caches it, and on a hot key that window is a certainty rather than a risk.",
-        numbers: ["50k writes/s", "the window is the origin write duration"],
+        numbers: ["50k writes/s", "window ~5ms, the origin write duration"],
         breaks: "If the commit succeeds and the process dies before the delete, the stale key survives until its backstop TTL, which is exactly why the TTL is not optional.",
       },
     },
@@ -482,13 +503,13 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e15",
       from: "writer",
       to: "shard",
+      tier: "control",
       label: "then DELETE, never SET",
-      dashed: true,
       offset: 100,
       detail: {
         what: "The invalidation itself: remove the key rather than overwrite it with the new value.",
         why: "Deletes commute, so any interleaving of two of them leaves the key absent and absent is always safe. Two SETs from two writers can land in the opposite order to their commits and leave the older value resident until the TTL.",
-        numbers: ["a delete on an absent key is a no-op", "idempotent, so retries are free"],
+        numbers: ["a delete on an absent key costs 0 extra work, a no-op", "idempotent, so a 2nd or 3rd retry costs nothing extra"],
         breaks: "A delete is only as good as its fanout: it must reach the primary, every read replica, every region's pool and every process L1, and the last of those is unreachable by construction.",
       },
     },
@@ -496,12 +517,12 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e16",
       from: "origin",
       to: "invalidator",
+      tier: "control",
       label: "committed change log",
-      dashed: true,
       detail: {
         what: "The origin's committed change stream feeding the invalidation consumer.",
         why: "Reading the log rather than trusting writers gives one implementation of invalidation with the store's own commit ordering, and nothing is forgotten because nothing is hand-written per call site.",
-        numbers: ["ordering is the store's commit ordering", "the consumer's lag is the staleness bound you publish"],
+        numbers: ["1 ordering source: the store's own commit log", "consumer lag, typically under 1s, is the staleness bound you publish"],
         breaks: "Consumer lag is a staleness bound that nobody sees fail: reads keep succeeding, they are just answering from before the write.",
       },
     },
@@ -509,13 +530,13 @@ export const DISTRIBUTED_CACHE: Diagram = {
       id: "e17",
       from: "invalidator",
       to: "shard",
+      tier: "control",
       label: "delete the row's keys",
-      dashed: true,
       offset: 150,
       detail: {
         what: "Deletes derived from committed row changes, applied to this region's pool and broadcast to the others.",
         why: "It removes the requirement that every one of many services remembers to invalidate. Cross-region it is best effort by construction, because there is no acknowledgement worth waiting on without making a local write depend on a remote region.",
-        numbers: ["negligible bytes on the wire", "the backstop TTL remains the only real guarantee"],
+        numbers: ["~50B per delete, negligible on the wire", "the 300s backstop TTL remains the only real guarantee"],
         breaks: "It can only delete keys a row-level event can name, so derived keys, which are the ones users actually look at, are quietly the stalest thing in the system.",
       },
     },

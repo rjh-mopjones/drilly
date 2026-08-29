@@ -10,12 +10,30 @@ export const GOOGLE_MAPS: Diagram = {
     shape:
       "Three subsystems that share a road-graph source and almost nothing else: tiles are a static-asset problem, traffic is stream aggregation, and routing is a shortest-path query with a 100ms budget that is only survivable because almost all of it was computed in advance.",
     beats: [
-      "Size each subsystem on its own numbers and they never meet: 350k tile requests/s at commute peak, 10k route computes/s, and roughly 1M GPS probes/s. There is no shared bottleneck, and the price of that is three pipelines that must stay in agreement about one graph.",
-      "Tiles are the cheap half. Slice the world into a quadtree keyed by (zoom, x, y), encode geometry rather than pixels, render once and cache at the edge. The quadtree is 1.4T addressable tiles at z=0 to 20, of which 1 to 5% materialise, so ~50B tiles at 30KB blended is a 1.5PB corpus behind a CDN that absorbs over 95% of requests.",
-      "Routing is the interview, and one number decides it. A continental graph is ~10M nodes and ~30M edges, and an unguided search settles most of it: about 0.5s of CPU per query, so 10k/s needs 5,000 cores for something with a 100ms budget. Preprocessing a shortcut hierarchy takes the same query to ~1ms, which is 10 cores.",
-      "The bill arrives when the weights move. A hierarchy is correct only for the metric it was built with, so preprocessing splits in two: a contraction order derived from graph shape alone, rebuilt weekly because that is how often roads physically change, and a customisation pass over the current travel times that runs in about a second and emits a fresh 240MB weight array every five minutes.",
-      "Traffic closes the loop. Anonymised probes are map-matched to segments, reduced with a trimmed mean over a 5-minute tumbling window with hysteresis so segments do not flap, and published as the next metric. Verified closures skip the window entirely on an override channel, because a closed road produces no probes and therefore looks exactly like a quiet one.",
-      "The honest concession is coverage. Roughly 300M probes per window land on about 3% of the world's 150M edges, and every other edge carries a historical time-of-day profile that the router treats as an equally good number. A road nobody is routed onto never gets probes, so its estimate never improves.",
+      {
+        text: "Size each subsystem on its own numbers and they never meet: 350k tile requests/s at commute peak, 10k route computes/s, and roughly 1M GPS probes/s. There is no shared bottleneck, and the price of that is three pipelines that must stay in agreement about one graph.",
+        lights: ["tile-origin", "routing-pod", "traffic-agg"],
+      },
+      {
+        text: "Tiles are the cheap half. Slice the world into a quadtree keyed by (zoom, x, y), encode geometry rather than pixels, render once and cache at the edge. The quadtree is 1.4T addressable tiles at z=0 to 20, of which 1 to 5% materialise, so ~50B tiles at 30KB blended is a 1.5PB corpus behind a CDN that absorbs over 95% of requests.",
+        lights: ["tile-origin", "e-tiles"],
+      },
+      {
+        text: "Routing decides everything on one number. A continental graph is ~10M nodes and ~30M edges, and an unguided search settles most of it: about 0.5s of CPU per query, so 10k/s needs 5,000 cores for something with a 100ms budget. Preprocessing a shortcut hierarchy takes the same query to ~1ms, which is 10 cores.",
+        lights: ["routing-pod", "cch-topology"],
+      },
+      {
+        text: "The bill arrives when the weights move. A hierarchy is correct only for the metric it was built with, so preprocessing splits in two: a contraction order derived from graph shape alone, rebuilt weekly because that is how often roads physically change, and a customisation pass over the current travel times that runs in about a second and emits a fresh 240MB weight array every five minutes.",
+        lights: ["order-builder", "customisation-pass", "weight-metric", "cch-topology"],
+      },
+      {
+        text: "Traffic closes the loop. Anonymised probes are map-matched to segments, reduced with a trimmed mean over a 5-minute tumbling window with hysteresis so segments do not flap, and published as the next metric. Verified closures skip the window entirely on an override channel, because a closed road produces no probes and therefore looks exactly like a quiet one.",
+        lights: ["traffic-agg", "closure-gate", "e21"],
+      },
+      {
+        text: "The honest concession is coverage. Roughly 300M probes per window land on about 3% of the world's 150M edges, and every other edge carries a historical time-of-day profile that the router treats as an equally good number. A road nobody is routed onto never gets probes, so its estimate never improves.",
+        lights: ["history-profiles", "e19", "e20"],
+      },
     ],
     crux:
       "A shortcut hierarchy is only correct for the weights it was built with, and live traffic replaces those weights every five minutes. Overlaying deltas does not repair it: the witness decisions that chose which shortcuts exist were taken under the old numbers, so a shortcut that is now required may simply not be there, and nothing at query time can detect it.",
@@ -94,7 +112,7 @@ export const GOOGLE_MAPS: Diagram = {
       row: 1,
       detail: {
         what: "The upstream road data everything is derived from: an OpenStreetMap diff feed (or a proprietary survey extract) carrying geometry, topology and restrictions such as one-ways, turn bans and vehicle class.",
-        why: "It is the single source the three subsystems share. The whole 'three pipelines, one graph' shape of this design only means something because tiles and the contraction order are two different renderings of the same upstream edits.",
+        why: "It is the single source the tile and routing pipelines share. The whole 'three pipelines, one graph' shape of this design only means something because tiles and the contraction order are two different renderings of the same upstream edits. The verified-closure channel that feeds the override gate is a separate, faster feed from separate upstream sources, not a variant of this diff.",
         numbers: [
           "~3M edits/day on the OSM diff feed",
           "~50M routable nodes and ~150M edges globally",
@@ -106,9 +124,9 @@ export const GOOGLE_MAPS: Diagram = {
           pick: "Ingest an open diff feed and treat it as an external dependency",
           instead: "A proprietary survey and imagery pipeline owned in house.",
           decider:
-            "What it actually changes. Source choice changes ingestion, licensing and the tile pipeline, and changes nothing about the serving path or the routing algorithm, so it is not an architecture fork. It is a data-quality and legal decision wearing an architecture costume.",
+            "What it actually changes. Source choice changes ingestion, licensing and the tile pipeline built around the ~3M edits/day feed, and changes nothing about the serving path or the routing algorithm, so it is not an architecture fork. It is a data-quality and legal decision wearing an architecture costume.",
           flips:
-            "Coverage or liability requirements the open feed cannot meet: lane-level geometry, verified speed limits, or markets where the community map is thin. Then it becomes an owned pipeline with its own editors and QA, feeding exactly the same two consumers.",
+            "Coverage or liability requirements the open feed cannot meet: lane-level geometry, verified speed limits, or markets where the community map is thin. Then it becomes an owned pipeline with its own editors and QA, feeding exactly the same consumers.",
         },
       },
     },
@@ -122,7 +140,7 @@ export const GOOGLE_MAPS: Diagram = {
       row: 0,
       detail: {
         what: "One deployable query server per continent. It holds the shortcut hierarchy in memory and answers a route request end to end: search, unpack, ETA. The three stages below are in-process, not services.",
-        why: "They are drawn as stages rather than peers because they share the resident graph and the current metric, and a network hop between them would cost more than the query itself. The pseudocode in the write-up is literally these three lines inside one process.",
+        why: "They run as stages rather than peers because they share the resident graph and the current metric, and a network hop between them would cost more than the query itself. Search, unpack and cost are three sequential steps inside one process, not three services.",
         numbers: [
           "~10M nodes and ~30M edges per continent",
           "~2GB topology + 240MB metric resident",
@@ -150,7 +168,7 @@ export const GOOGLE_MAPS: Diagram = {
       parent: "routing-pod",
       detail: {
         what: "The query itself: relax only edges toward higher-ranked nodes from the source, only edges from higher-ranked nodes in the reverse graph from the target, and stop when the smallest tentative key exceeds the best combined distance found.",
-        why: "The 100ms budget makes an unguided search impossible, so the pod does almost no exploration. Every shortcut stands for a real path, so this is exact rather than approximate, which is the property most candidates fail to claim out loud.",
+        why: "The 100ms budget makes an unguided search impossible, so the pod does almost no exploration. Every shortcut stands for a real path, so this is exact rather than approximate, a property most alternative speedups cannot claim.",
         numbers: [
           "~1ms per query customisable, ~150μs classic",
           "hundreds of nodes settled instead of millions",
@@ -209,8 +227,7 @@ export const GOOGLE_MAPS: Diagram = {
         why: "A 40-minute route uses this window's numbers for a segment you reach in 35 minutes, which is exactly the segment most likely to be wrong, because congestion moves. The hybrid is the shipped compromise between a scalar metric and full time-dependent routing.",
         numbers: [
           "NFR: ETA error p50 under 10% of trip duration",
-          "current weights for the first 15 to 20 minutes",
-          "historical profiles beyond that",
+          "current weights for the first 15 to 20 minutes, historical profiles beyond",
         ],
         breaks:
           "The drift shows up as ETA error rather than as a visibly bad route, so it is easy to under-measure: the map looks right and the clock is wrong. Some mid-trip re-plans are correcting our own earlier optimism rather than reacting to new traffic.",
@@ -308,8 +325,8 @@ export const GOOGLE_MAPS: Diagram = {
         what: "The batch job that derives a node ordering from graph structure alone and inserts every shortcut that order implies, with no witness search and no weights involved.",
         why: "This is the half of preprocessing that must not depend on travel time. Deriving the order by nested dissection over a separator hierarchy makes the resulting topology valid for any non-negative metric, which is exactly what lets weights be refreshed without touching structure.",
         numbers: [
-          "hours per continent",
-          "rebuilt weekly, tracking when roads physically change",
+          "single-digit hours per continent",
+          "rebuilt once a week, tracking when roads physically change",
           "adds roughly one shortcut per original edge",
         ],
         breaks:
@@ -363,11 +380,11 @@ export const GOOGLE_MAPS: Diagram = {
       row: 3,
       detail: {
         what: "Our side of the override channel: it confirms, rate-limits and applies closures reported by third parties — transport authorities, police and highways feeds, and roadworks schedules, all outside our trust boundary and our pager — writing edges impassable straight into the live weight array and handing the same set to the next customisation pass.",
-        why: "The external feed is a claim; this is the component that decides whether to act on it. It exists because the override path writes into a live artefact with none of the gating a deploy gets, so the gating has to live somewhere and it cannot live in the third party. A closed road produces no probes, which reads to the aggregator exactly like a quiet road, so this is the one input the traffic pipeline structurally cannot derive itself.",
+        why: "The external feed is a claim; this is the component that decides whether to act on it. It exists because the override path writes into a live artefact with none of the gating a deploy gets, so the gating has to live somewhere and it cannot live in the third party. A closed road produces no probes, which reads to the aggregator exactly like a quiet road, so this is the one input the traffic pipeline structurally cannot derive itself. The third-party feed itself has no place in this system: it is an API call arriving from outside the trust boundary, not a service we operate or size.",
         numbers: [
           "impassable within 60s of a confirmed closure",
           "two-source confirmation on motorway-class edges",
-          "per-region rate limit on closure events",
+          "closure events rate-limited to one batch per region per minute",
           "source requirement: closure reflected within 60s against a 300s aggregation window",
         ],
         breaks:
@@ -394,11 +411,7 @@ export const GOOGLE_MAPS: Diagram = {
       detail: {
         what: "The prior: a typical speed for every segment, keyed by time of day and day of week, fitted from months of past windows. It is what fills in the ~97% of edges no probe touched, and what the ETA model uses beyond the near horizon.",
         why: "The reduce step cannot publish a weight for a segment it has no samples for, and leaving a hole is not an option because the router has to cost that edge somehow. This is where the number comes from when there is no measurement.",
-        numbers: [
-          "~97% of 150M global edges fall back to it in any window",
-          "used under ~5 samples in the window",
-          "keyed by (segment, weekday, time bucket)",
-        ],
+        numbers: ["~97% of 150M global edges fall back to it in any window", "used under ~5 samples in the window"],
         breaks:
           "Measured and inferred weights arrive in the same units and the router cannot tell them apart, so a residential cut-through with no samples competes on equal terms with an arterial that has 60. Worse, the loop has no fix: a road nobody is routed onto never gets probes, so its profile never improves and a street closed for a month is indistinguishable from a permanently quiet one.",
         choice: {
@@ -446,7 +459,7 @@ export const GOOGLE_MAPS: Diagram = {
       row: 2,
       detail: {
         what: "The streaming job that turns probes into the next weight metric. Match, reduce and state are stages of it rather than services: they are bound to the same 5-minute window and share its watermark.",
-        why: "Splitting them into separate deployables buys nothing and costs a queue per boundary, because none of them can advance past the window the others are on. The write-up treats them as one component for the same reason: they share one pager row, and every symptom of a matching failure appears as a reduce-side lag.",
+        why: "Splitting them into separate deployables buys nothing and costs a queue per boundary, because none of them can advance past the window the others are on. They are one component for the same reason: they share one pager row, and every symptom of a matching failure appears as a reduce-side lag.",
         numbers: [
           "~1M probes/s at peak",
           "300M probes per 5-minute tumbling window",
@@ -467,7 +480,7 @@ export const GOOGLE_MAPS: Diagram = {
     {
       id: "map-match",
       label: "Map matching",
-      sub: "HMM over candidate segments",
+      sub: "HMM over nearby segments",
       kind: "process",
       col: 1,
       row: 2,
@@ -479,12 +492,12 @@ export const GOOGLE_MAPS: Diagram = {
         breaks:
           "A client GPS-format change collapses matching quietly. The symptom is a falling per-segment update rate rather than an error rate, so the gate is a format version at ingest plus an alert on segment-update lag over 5 minutes.",
         choice: {
-          pick: "Hidden Markov model over candidate segments, scored with the recent trajectory",
+          pick: "Hidden Markov model over nearby segments, scored with the recent trajectory",
           instead: "Nearest-segment snap by geometric distance.",
           decider:
             "Ambiguity in the geometry, weighted by where the traffic is. A distance snap gets a measurable share of ~1M probes/s wrong precisely in dense interchanges, which are the segments with the most probes and the most riding on their weight.",
           flips:
-            "Sparse rural networks or a fleet on known fixed routes, where there is one plausible candidate and the trajectory adds nothing an index lookup does not already give you.",
+            "Sparse rural networks or a fleet on known fixed routes, where there is one plausible match and the trajectory adds nothing an index lookup does not already give you.",
         },
       },
     },
@@ -583,8 +596,8 @@ export const GOOGLE_MAPS: Diagram = {
       label: "topology changes",
       detail: {
         what: "The same upstream data, read for structure rather than geometry: which intersections exist, which segments connect them, and what the turn restrictions are.",
-        why: "Drawn dashed and slow because the order only has to track when roads physically change, not when the map is edited. A relabelled café moves a tile and nothing else.",
-        numbers: ["rebuilt weekly", "~50M nodes and ~150M edges globally"],
+        why: "This is a slow control path because the order only has to track when roads physically change, not when the map is edited. A relabelled café moves a tile and nothing else.",
+        numbers: ["rebuilt once a week", "~50M nodes and ~150M edges globally"],
         breaks:
           "This is the slowest of the three clocks, so it sets how long a new road stays unroutable: up to a week after it is already visible on the map, which is the complaint users actually file.",
       },
@@ -609,11 +622,12 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e7",
       from: "upward-search",
       to: "shortcut-unpack",
+      tier: "data",
       label: "winning shortcut path",
       detail: {
         what: "The meeting node and the chain of shortcut edges that won, handed on for expansion.",
-        why: "The search deliberately never touched the low-ranked edges the driver actually turns onto, so what it produces is a correct answer in the wrong vocabulary.",
-        numbers: ["hundreds of nodes settled", "in-process, no network hop"],
+        why: "The search deliberately never touched the low-ranked edges the driver actually turns onto, so what it produces is a correct answer in the wrong vocabulary. It hands off in-process, with no network hop.",
+        numbers: ["hundreds of nodes settled"],
         breaks:
           "If the topology and metric versions disagree, this is where it becomes visible: the middle-node references expand into segments that do not join up, rather than into an error.",
       },
@@ -622,11 +636,11 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e8",
       from: "shortcut-unpack",
       to: "eta-model",
+      tier: "data",
       label: "road segments",
       detail: {
         what: "The fully expanded path as original road segments, ready to be costed and turned into a polyline and turn list.",
-        why: "The ETA is computed over real segments rather than shortcuts because the near part of the trip has to be costed on the live metric segment by segment, and a shortcut summarises a weight rather than a stretch of road.",
-        numbers: ["in-process, no network hop"],
+        why: "The ETA is computed over real segments rather than shortcuts because the near part of the trip has to be costed on the live metric segment by segment, and a shortcut summarises a weight rather than a stretch of road. This handoff is in-process, with no network hop.",
         breaks:
           "A very long route expands to a large segment list, so the polyline has to be simplified for transport; over-simplifying it is what makes the client's own map matching drift and fire spurious re-plans.",
       },
@@ -653,8 +667,8 @@ export const GOOGLE_MAPS: Diagram = {
       label: "order + shortcuts, weekly",
       detail: {
         what: "The topology being loaded into pod memory, which happens on the weekly order cadence rather than the traffic cadence.",
-        why: "Drawn as a control path because it is not traffic, it is a deployment. Separating it from the metric swap is what makes a bad order rollback-able without touching freshness.",
-        numbers: ["~2GB per continent", "weekly"],
+        why: "This is a control path rather than traffic, because it is a deployment. Separating it from the metric swap is what makes a bad order rollback-able without touching freshness.",
+        numbers: ["~2GB per continent", "once a week"],
         breaks:
           "Loading an order whose fixture routes fail their cost comparison would break routing continent-wide, so pods must refuse it and pin the previous artefact instead.",
       },
@@ -684,7 +698,7 @@ export const GOOGLE_MAPS: Diagram = {
       detail: {
         what: "A newly computed order and its shortcut set published as an artefact.",
         why: "Roads change on the timescale of construction, not congestion, so this pipeline runs on its own slow clock and never blocks the fast one.",
-        numbers: ["hours to build", "~60M edges after contraction"],
+        numbers: ["single-digit hours to build", "~60M edges after contraction"],
         breaks:
           "Promotion is the dangerous moment: node ranks change wholesale, so the new order is customised and shadowed against live traffic before it is allowed to take queries.",
       },
@@ -751,6 +765,7 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e17",
       from: "map-match",
       to: "window-reduce",
+      tier: "data",
       label: "(segment, speed)",
       detail: {
         what: "Matched pairs: one road segment and one observed speed per probe.",
@@ -764,11 +779,12 @@ export const GOOGLE_MAPS: Diagram = {
       id: "e18",
       from: "window-reduce",
       to: "segment-state",
+      tier: "data",
       label: "trimmed mean/segment",
       detail: {
         what: "One speed per segment for the closed window, measured where there were enough samples and taken from the profile where there were not.",
         why: "The state machine needs a single settled number per segment per window; comparing a distribution against a profile every window is the same decision made with more moving parts.",
-        numbers: ["~3% of edges measured", "the rest carry the profile"],
+        numbers: ["~3% of edges measured"],
         breaks:
           "Measured and inferred values travel on the same channel in the same units, so nothing after this point can tell them apart, and the state machine will happily transition a segment on the strength of a prior.",
       },
@@ -798,7 +814,7 @@ export const GOOGLE_MAPS: Diagram = {
       detail: {
         what: "The far half of the trip costed on typical speeds for the time the driver will actually be there, rather than on this window's numbers.",
         why: "Current weights are the best estimate for the next 15 to 20 minutes and a worse one after that, because congestion moves. This is the cheap approximation of time-dependent routing.",
-        numbers: ["current weights for the first 15 to 20 minutes", "profiles beyond"],
+        numbers: ["current weights for the first 15 to 20 minutes, profiles beyond"],
         breaks:
           "The handover point is arbitrary, so routes look optimal at departure and drift afterwards, and the drift surfaces as ETA error rather than as a visibly wrong road.",
       },

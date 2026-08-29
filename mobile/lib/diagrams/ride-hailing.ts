@@ -8,20 +8,38 @@ export const RIDE_HAILING: Diagram = {
   itemId: 29,
   overview: {
     shape:
-      "Two moving populations meet at a dispatcher, and the whole design is one conditional write: a location index nominates candidate drivers, a separate driver record adjudicates whether one is actually free, and the offer only leaves the building after the hold has been taken.",
+      "Two moving populations meet at a dispatcher, and the whole design is one conditional write: a location index nominates drivers, a separate driver record adjudicates whether one is actually free, and the offer only leaves the building after the hold has been taken.",
     beats: [
-      "Driver phones push a position every 4 seconds and the ingest tier forks each ping into two sinks that share nothing: an in-memory geo index holding one current position per driver behind a 10 second TTL, and an append-only history stream. Losing the index costs 10 seconds of positions and heals inside one ping cycle, which is why it can be disposable.",
-      "A ride request reads that index for drivers within 2 km, roughly 50 of them after filtering on vehicle type and ping freshness, and ranks them by predicted arrival time from precomputed cell-to-cell travel-time tiles rather than by straight-line distance. The index is a candidate generator and is never asked whether a driver is free.",
-      "Then the move the whole question is built around. Before any offer is sent, the dispatcher takes an exclusive lease on the top candidate: a conditional write on the driver record from available to offered, carrying the request id and an expiry 15 seconds out. Two dispatchers racing means one write wins and the loser falls through to its next candidate.",
-      "Exclusivity is two-sided, because an expired lease lets a second driver be offered the same request and both may tap Accept. So the accept path is ordered: claim the trip row from REQUESTED to MATCHED first, then convert that driver's lease to assigned. The other order commits a driver to a trip somebody else already owns.",
-      "Under a shortage it is the cascade, not the index, that burns the cluster: 2,700 unmatched requests walking all 50 candidates every 2 seconds is 4M conditional writes in a minute aimed at a few hundred hot keys. So the walk is capped at five attempts, the request then backs off and widens its radius by 50%, and NO_DRIVERS is a real terminal state rather than an error.",
-      "After the match the trip is a state machine whose every transition is a compare-and-swap gated on the prior status, so a client retry cannot drag a completed trip backwards. Payment hangs off completion asynchronously under an idempotency key, because a declined card must never stop a driver taking their next ride.",
+      {
+        text: "Driver phones push a position every 4 seconds and the ingest tier forks each ping into two sinks that share nothing: an in-memory geo index holding one current position per driver behind a 10 second TTL, and an append-only history stream. Losing the index costs 10 seconds of positions and heals inside one ping cycle, which is why it can be disposable.",
+        lights: ["driver-app", "ingest", "geo-index", "history-bus", "e1", "e2", "e3"],
+      },
+      {
+        text: "A ride request reads that index for drivers within 2 km, roughly 50 of them after filtering on vehicle type and ping freshness, and ranks them by predicted arrival time from precomputed cell-to-cell travel-time tiles rather than by straight-line distance. The index only nominates; it is never asked whether a driver is free.",
+        lights: ["rider-app", "matcher", "geo-index", "e4", "e5"],
+      },
+      {
+        text: "Then the move the whole question is built around. Before any offer is sent, the dispatcher takes an exclusive lease on the top nominee: a conditional write on the driver record from available to offered, carrying the request id and an expiry 15 seconds out. Two dispatchers racing means one write wins and the loser falls through to its next nominee.",
+        lights: ["offer-loop", "driver-record", "e8"],
+      },
+      {
+        text: "Exclusivity is two-sided, because an expired lease lets a second driver be offered the same request and both may tap Accept. So the accept path is ordered: claim the trip row from REQUESTED to MATCHED first, then convert that driver's lease to assigned. The other order commits a driver to a trip somebody else already owns.",
+        lights: ["trip-fsm", "driver-record", "e10", "e11"],
+      },
+      {
+        text: "Under a shortage it is the cascade, not the index, that burns the cluster: 2,700 unmatched requests walking all 50 nominees every 2 seconds is 4M conditional writes in a minute aimed at a few hundred hot keys. So the walk is capped at five attempts, the request then backs off and widens its radius by 50%, and NO_DRIVERS is a real terminal state rather than an error.",
+        lights: ["offer-loop", "e7"],
+      },
+      {
+        text: "After the match the trip is a state machine whose every transition is a compare-and-swap gated on the prior status, so a client retry cannot drag a completed trip backwards. Payment hangs off completion asynchronously under an idempotency key, because a declined card must never stop a driver taking their next ride.",
+        lights: ["trip-fsm", "trips", "payment-saga", "e12", "e14"],
+      },
     ],
     crux:
-      "A driver is scarce inventory that moves, declines and disappears, so assigning one is an exclusive allocation rather than a search result. Every hard property here falls out of that: the hold taken before the offer goes out, the expiry that returns it without a sweeper, the cascade to the next candidate, and the second claim on the request itself.",
+      "A driver is scarce inventory that moves, declines and disappears, so assigning one is an exclusive allocation rather than a search result. Every hard property here falls out of that: the hold taken before the offer goes out, the expiry that returns it without a sweeper, the cascade to the next nominee, and the second claim on the request itself.",
     numbers: [
       "250k location pings/s at a 4 s cadence",
-      "~50 candidates from a 2 km radius",
+      "~50 nominees from a 2 km radius",
       "15 s lease, walk capped at 5 attempts",
       "~2,900 conditional writes/s globally",
     ],
@@ -32,9 +50,9 @@ export const RIDE_HAILING: Diagram = {
       label: "Dispatch worker, per city",
       kind: "zone",
       detail: {
-        what: "One stateless matching worker's whole job: rank the candidates, take a lease, push an offer, cascade when the lease fails.",
-        why: "It is drawn as a boundary because nothing inside it survives a restart. Every piece of state that matters, the lease and the trip claim, lives in the two stores to the right, so a worker dying loses at most the offers in flight and those expire on their own.",
-        numbers: ["one pool per city", "no state survives a restart", "15 s lease bounds the damage"],
+        what: "One stateless matching worker's whole job: rank the nominees, take a lease, push an offer, cascade when the lease fails.",
+        why: "It is a boundary because nothing inside it survives a restart. Every piece of state that matters, the lease and the trip claim, lives in the two stores to the right, so a worker dying loses at most the offers in flight and those expire on their own.",
+        numbers: ["one pool per city", "0 state survives a restart", "15 s lease bounds the damage"],
         breaks:
           "Workers are interchangeable by design, so nothing stops two of them targeting the same driver; that race is pushed entirely onto the driver record's conditional write.",
       },
@@ -101,9 +119,9 @@ export const RIDE_HAILING: Diagram = {
       parent: "dispatch-worker",
       sub: "radius, filter, ETA tiles score",
       detail: {
-        what: "Stateless workers, one pool per city, turning a request into a ranked candidate list.",
+        what: "Stateless workers, one pool per city, turning a request into a ranked list of nominees.",
         why: "Ranking by predicted arrival time rather than straight-line distance is the difference between a car 500 m away across a river and one 1.5 km away on the same road. Holding nothing durable means a worker can die mid-request without anyone reconciling anything.",
-        numbers: ["~137 ids inside 2 km", "~50 after vehicle type and freshness filters", "scored on tiles, not live routing"],
+        numbers: ["~137 ids inside 2 km", "~50 after vehicle type and freshness filters", "scored on tiles, 0 live routing calls"],
         breaks:
           "If the ETA tile service is unreachable, scoring degrades to haversine and assignments get quietly worse, which shows up in pickup time rather than as an error.",
         choice: {
@@ -125,14 +143,14 @@ export const RIDE_HAILING: Diagram = {
       row: 1,
       parent: "dispatch-worker",
       detail: {
-        what: "The lease-then-offer loop: attempt a conditional hold on the top candidate, push the offer only if that write wins, move to the next candidate if it does not.",
+        what: "The lease-then-offer loop: attempt a conditional hold on the top nominee, push the offer only if that write wins, move to the next nominee if it does not.",
         why: "Taking the hold before the offer leaves the building is the entire trick. Offer first and hold on accept, and two dispatchers offer the same car, both drivers drive to different pickups, and one rider watches a car approach and then turn away.",
         numbers: ["walk capped at 5, not ~50", "radius x1.5 and 2 s backoff on failure", "second offer only after 8 s of silence"],
         breaks:
-          "Uncapped, an arena shortage is 2,700 requests x 50 candidates x 30 retries, roughly 67,000 conditional writes/s aimed at a few hundred hot keys against a useful global load of ~2,900/s.",
+          "Uncapped, an arena shortage is 2,700 requests x 50 nominees x 30 retries, roughly 67,000 conditional writes/s aimed at a few hundred hot keys against a useful global load of ~2,900/s.",
         choice: {
           pick: "Bounded walk of 5 with exponential backoff and a widening radius",
-          instead: "Walk the whole candidate list, or broadcast the request to every nearby driver and take the first claim.",
+          instead: "Walk the whole nominee list, or broadcast the request to every nearby driver and take the first claim.",
           decider:
             "Write amplification during a shortage. Fifty attempts per request at an arena is 4M conditional writes in a minute; five attempts is 405,000 before the growing backoff interval takes another factor off it. Broadcast does not remove the race, it moves it, and it hands drivers the ability to cherry-pick.",
           flips:
@@ -150,7 +168,7 @@ export const RIDE_HAILING: Diagram = {
       detail: {
         what: "The state machine moving a trip forward through REQUESTED, MATCHED, DRIVER_ENROUTE, ARRIVED, ON_TRIP, COMPLETED and PAID.",
         why: "It is also the second half of exclusivity. The request is itself a claimable resource, so when two drivers accept within milliseconds exactly one wins the trip row and the loser is released and shown an expired offer, which is what it looked like from their side anyway.",
-        numbers: ["accept returns 409 already_matched on the losing side", "6 transitions on a normal trip", "NO_DRIVERS is terminal, not an error"],
+        numbers: ["accept returns 409 already_matched on the losing side", "6 transitions on a normal trip", "NO_DRIVERS: 1 terminal state, not an error"],
         breaks:
           "Ordering the two accept writes the other way round commits a driver to a trip somebody else owns, and recovering means un-assigning a car that has already started moving.",
         choice: {
@@ -173,14 +191,14 @@ export const RIDE_HAILING: Diagram = {
       detail: {
         what: "The settlement path that runs after COMPLETED: authorise, capture, retry with backoff, and fall back to settling on the rider's next session.",
         why: "Completion never waits on payment. A gateway timeout inside the completion transition would hold the state machine open and strand a driver who has already stopped the car, turning a card problem into a supply outage.",
-        numbers: ["PAYMENT_PENDING sits after COMPLETED", "settlement lag p99 target under 30 min", "one idempotency key per trip"],
+        numbers: ["PAYMENT_PENDING: 1 state after COMPLETED", "settlement lag p99 target under 30 min", "one idempotency key per trip"],
         breaks:
           "Retries without a stable idempotency key double-charge riders, and the duplicate is invisible until a dispute arrives days later.",
         choice: {
           pick: "An asynchronous saga hung off the terminal trip transition",
           instead: "Charging inside the completion transition, so a trip is only complete once it is paid.",
           decider:
-            "What a gateway 5xx costs. Cards decline at percentage-point rates, and a synchronous charge puts that failure rate straight onto driver availability; asynchronously it costs a retry queue and a 30 minute settlement lag. Q23 owns the ledger and double-entry mechanics.",
+            "What a gateway 5xx costs. Cards decline at percentage-point rates, and a synchronous charge puts that failure rate straight onto driver availability; asynchronously it costs a retry queue and a 30 minute settlement lag. The ledger and double-entry mechanics live in the payment system this hands off to, not here.",
           flips:
             "Prepaid or wallet-funded rides where the money is already held, so capture is a local ledger write with no external gateway that can time out.",
         },
@@ -226,9 +244,9 @@ export const RIDE_HAILING: Diagram = {
           pick: "In-memory sorted sets in Redis Cluster, sharded by city, entries expiring at 10 s",
           instead: "A durable geospatial index inside the primary database.",
           decider:
-            "Cost of the write path. 250k pings/s at 100 B is 25 MB/s of writes each superseded within 4 seconds, and durability buys nothing because a lost index refills from live pings inside one ping cycle. The global working set is ~100 MB, so this is never the capacity problem. Q13 covers the indexing scheme itself.",
+            "Cost of the write path. 250k pings/s at 100 B is 25 MB/s of writes each superseded within 4 seconds, and durability buys nothing because a lost index refills from live pings inside one ping cycle. The global working set is ~100 MB, so this is never the capacity problem. The indexing scheme itself is a separate concern from this store.",
           flips:
-            "When positions must be queryable historically as well as live, at which point you are building Q13's index properly and this becomes its serving tier rather than the whole store.",
+            "When positions must be queryable historically as well as live, at which point you are building a proper spatial index and this becomes its serving tier rather than the whole store.",
         },
       },
     },
@@ -265,7 +283,7 @@ export const RIDE_HAILING: Diagram = {
       detail: {
         what: "A streaming job computing a multiplier per cell from the ratio of requests to available drivers, written to a cache the pricing path reads at quote time.",
         why: "It is the fast lever on imbalance: price rations demand inside a minute where repositioning bonuses take five to fifteen. Neither creates supply, which is why the arena case still ends in a twenty minute wait.",
-        numbers: ["recomputed every 60 s", "multiplier locked onto the trip at request time", "a 5 km reposition radius reaches 120 to 350 idle cars"],
+        numbers: ["recomputed every 60 s", "1 multiplier locked onto the trip at request time", "a 5 km reposition radius reaches 120 to 350 idle cars"],
         breaks:
           "If the job dies the cells go stale, and failing open to 1.0x is a revenue and supply event rather than graceful degradation, so it holds the last known value and alarms above 2 minutes of staleness.",
         choice: {
@@ -307,8 +325,8 @@ export const RIDE_HAILING: Diagram = {
       id: "e1",
       from: "driver-app",
       to: "ingest",
+      tier: "hot",
       label: "loc ping / 4 s",
-      animated: true,
       detail: {
         what: "A ~100 B Protobuf position carrying driver id, lat, lng, heading, speed, status and timestamp.",
         why: "The 4 second cadence is what makes the index good enough to dispatch from, and it is also where the entire write volume of the system comes from. Slower and the map lies about where cars are; faster buys precision nobody consumes.",
@@ -321,11 +339,11 @@ export const RIDE_HAILING: Diagram = {
       id: "e2",
       from: "ingest",
       to: "geo-index",
+      tier: "hot",
       label: "GEOADD, 10 s TTL",
-      animated: true,
       detail: {
         what: "Overwriting the driver's single current position in the city's in-memory index.",
-        why: "One entry per driver rather than an append, because only the newest position can ever nominate a candidate. Writing it with a TTL means a phone that dies removes itself from candidacy with nothing sweeping anything.",
+        why: "One entry per driver rather than an append, because only the newest position can ever nominate a driver. Writing it with a TTL means a phone that dies removes itself from candidacy with nothing sweeping anything.",
         numbers: ["one entry per on-shift driver", "10 s TTL", "under 50 ms p99 write target"],
         breaks:
           "A TTL much longer than the ping interval leaves ghosts in the index, and every ghost costs a wasted lease attempt on the match path.",
@@ -335,8 +353,8 @@ export const RIDE_HAILING: Diagram = {
       id: "e3",
       from: "ingest",
       to: "history-bus",
+      tier: "control",
       label: "every ping, async",
-      dashed: true,
       detail: {
         what: "The same ping, forked onto the durable log for analytics, fraud detection and route replay.",
         why: "The fork happens as early as possible so the two paths share no component downstream. Reporting is allowed to lag and dispatch is not, and this edge is what makes that separation structural rather than a promise.",
@@ -349,8 +367,8 @@ export const RIDE_HAILING: Diagram = {
       id: "e4",
       from: "rider-app",
       to: "matcher",
+      tier: "hot",
       label: "POST /ride/request",
-      animated: true,
       detail: {
         what: "A ride request carrying pickup, dropoff, vehicle type and the price token the rider was quoted.",
         why: "Carrying the quoted token rather than re-pricing on arrival is what stops the fare moving between the tap and the match. The rider accepted a number, and that number is what gets locked onto the trip.",
@@ -363,25 +381,25 @@ export const RIDE_HAILING: Diagram = {
       id: "e5",
       from: "matcher",
       to: "geo-index",
+      tier: "hot",
       label: "radius query, 2 km",
-      animated: true,
       detail: {
         what: "A bounded radius scan of the city's geo index around the pickup point.",
         why: "It is deliberately a hint. Both the position and the cached status it returns are up to 4 seconds old, which is long enough for somebody else to have taken the driver, so nothing it says is treated as an availability answer.",
         numbers: ["~137 ids inside 2 km", "~50 after filtering", "a couple of hundred microseconds"],
         breaks:
-          "Widening the radius during a shortage returns more candidates who are equally unavailable, so the scan is not the lever it looks like.",
+          "Widening the radius during a shortage returns more nominees who are equally unavailable, so the scan is not the lever it looks like.",
       },
     },
     {
       id: "e7",
       from: "matcher",
       to: "offer-loop",
+      tier: "hot",
       label: "ranked, top 5 only",
-      animated: true,
       detail: {
-        what: "The ranked candidate list, truncated to the first five before any lease is attempted.",
-        why: "Truncation here is the load-shedding decision. In a normal catchment the top candidate's lease succeeds almost always, so the other 45 exist only to be walked during a shortage, which is exactly when walking them is unaffordable.",
+        what: "The ranked nominee list, truncated to the first five before any lease is attempted.",
+        why: "Truncation here is the load-shedding decision. In a normal catchment the top nominee's lease succeeds almost always, so the other 45 exist only to be walked during a shortage, which is exactly when walking them is unaffordable.",
         numbers: ["5 attempts, not ~50", "0.43 extra offer rounds per match on average"],
         breaks:
           "Ties near the top have to be broken randomly, or 200 dispatchers in a cell all attempt the same top-ranked car and 199 of them fail.",
@@ -391,11 +409,11 @@ export const RIDE_HAILING: Diagram = {
       id: "e8",
       from: "offer-loop",
       to: "driver-record",
+      tier: "hot",
       label: "CAS available to offered",
-      animated: true,
       detail: {
         what: "The conditional write that takes the exclusive hold: available to offered, carrying the request id and an expiry 15 seconds out.",
-        why: "This is the arrow the whole question is about. It happens before the offer is sent, so two dispatchers racing for the same car resolve it in the store rather than on the road, and the loser simply moves to its next candidate.",
+        why: "This is the arrow the whole question is about. It happens before the offer is sent, so two dispatchers racing for the same car resolve it in the store rather than on the road, and the loser simply moves to its next nominee.",
         numbers: ["~2.4 of these per match", "~2,900/s globally", "15 s expiry"],
         breaks:
           "During a shortage this is where the CAS failure ratio spikes; sustained above roughly 20% the cell is short of cars and the bounded walk is doing real work.",
@@ -405,13 +423,12 @@ export const RIDE_HAILING: Diagram = {
       id: "e9",
       from: "offer-loop",
       to: "driver-app",
+      tier: "hot",
       label: "offer via WS, 15 s lease",
-      dashed: true,
-      animated: true,
       offset: 100,
       detail: {
         what: "The offer pushed down the driver's existing socket: pickup, fare, ETA and the expiry timestamp.",
-        why: "It is the only edge on this diagram that consumes something. Everything upstream is a repeatable read; once this is sent a driver has been committed to one rider and cannot be offered to anyone else until the lease resolves.",
+        why: "It is the only edge here that consumes something. Everything upstream is a repeatable read; once this is sent a driver has been committed to one rider and cannot be offered to anyone else until the lease resolves.",
         numbers: ["15 s to respond", "second offer only after 8 s of silence"],
         breaks:
           "A backgrounded or offline phone never sees it and the request waits out the full 15 seconds, which is the largest single term in time to match.",
@@ -421,6 +438,7 @@ export const RIDE_HAILING: Diagram = {
       id: "e10",
       from: "driver-app",
       to: "trip-fsm",
+      tier: "data",
       label: "accept: claim trip row",
       offset: 150,
       detail: {
@@ -435,6 +453,7 @@ export const RIDE_HAILING: Diagram = {
       id: "e11",
       from: "trip-fsm",
       to: "driver-record",
+      tier: "data",
       label: "then lease to assigned",
       detail: {
         what: "The second write of the accept path, converting that driver's lease from offered to assigned.",
@@ -448,6 +467,7 @@ export const RIDE_HAILING: Diagram = {
       id: "e12",
       from: "trip-fsm",
       to: "trips",
+      tier: "data",
       label: "CAS on prior status",
       detail: {
         what: "Each transition written as a compare-and-swap gated on the expected prior status.",
@@ -461,12 +481,12 @@ export const RIDE_HAILING: Diagram = {
       id: "e13",
       from: "trip-fsm",
       to: "surge",
+      tier: "control",
       label: "surge locked on the trip",
-      dashed: true,
       detail: {
         what: "Reading the cell's current multiplier and copying it onto the trip at request time.",
         why: "The multiplier is copied rather than referenced so the price cannot move during the 90 seconds before the car arrives. The rider accepted a number, and the surge job recomputing 30 seconds later must not change it.",
-        numbers: ["recomputed every 60 s", "held on the row as surge_locked"],
+        numbers: ["recomputed every 60 s", "held as 1 field on the row: surge_locked"],
         breaks:
           "If the surge job is dead this read returns a stale multiplier, and failing open to 1.0x instead would be a revenue and supply event, so it holds the last value and alarms.",
       },
@@ -475,6 +495,7 @@ export const RIDE_HAILING: Diagram = {
       id: "e14",
       from: "trip-fsm",
       to: "payment-saga",
+      tier: "data",
       label: "on COMPLETED, async",
       detail: {
         what: "Handing a completed trip to settlement, after the terminal transition rather than inside it.",
@@ -488,8 +509,8 @@ export const RIDE_HAILING: Diagram = {
       id: "e15",
       from: "trip-fsm",
       to: "history-bus",
+      tier: "control",
       label: "state transitions",
-      dashed: true,
       offset: 90,
       detail: {
         what: "Every trip transition also appended to the history log.",
@@ -503,8 +524,8 @@ export const RIDE_HAILING: Diagram = {
       id: "e16",
       from: "history-bus",
       to: "surge",
+      tier: "control",
       label: "requests/cell, 60 s window",
-      dashed: true,
       offset: 60,
       detail: {
         what: "The surge job consuming the request stream, keyed by cell on a 60 second tumbling window.",

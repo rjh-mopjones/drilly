@@ -10,17 +10,35 @@ export const HOTEL_RESERVATION: Diagram = {
     shape:
       "Two subsystems with opposite consistency requirements: a denormalised search index that is allowed to be seconds wrong, and one counter per room-night that is not, with a saga wrapped around the counter because payment is far too slow to sit inside a lock.",
     beats: [
-      "Discovery and commitment are separated on purpose. Search reads a denormalised index of hotel documents with cached price ranges and coarse availability, refreshed from the transactional store by change capture and running a few seconds behind. That staleness is free, because the booking path re-checks against the authoritative rows and a stale hit costs one NO_AVAILABILITY.",
-      "The whole write path hangs off one row shape: (hotel_id, room_type, date) holding sold and allowance. Nobody books room 412, they book a standard king on the 14th, so the state is a count rather than a per-unit calendar, and a three-night stay touches three rows that must all move or none.",
-      "The reservation is a single conditional UPDATE that increments sold on every night of the stay where sold < allowance and returns the rows it changed. Fewer rows back than nights means roll the whole stay back. Check and write collapse into one statement, so the row locks live for about 2ms with no application hop inside them.",
-      "Payment sits outside that transaction because authorisation takes 200ms in the good case and 30 seconds in the bad one. Inventory commits first with the booking marked INVENTORY_RESERVED, then a saga authorises the card, confirms and fans out notifications, with compensations keyed to (booking_id, step_id) and a sweeper that releases anything still reserved after 10 minutes.",
-      "Every write entry point takes an idempotency key stored under a unique constraint in the database, because a retried POST after a dropped connection is the commonest source of duplicate bookings in production. A cache in front is a fast path only: a design whose dedupe store can lose data has a probability, not a guarantee.",
-      "The ceiling the transaction enforces is not the room count. A nightly forecast job writes allowance as physical capacity plus a deliberate 5 to 15 percent oversell, and the booking path enforces it exactly while knowing nothing about the forecast. Separate columns with separate owners is what stops the two writers racing.",
+      {
+        text: "Discovery and commitment are separated on purpose. Search reads a denormalised index of hotel documents with cached price ranges and coarse availability, refreshed from the transactional store by change capture and running a few seconds behind. That staleness is free, because the booking path re-checks against the authoritative rows and a stale hit costs one no-availability response.",
+        lights: ["search-svc", "search-index", "cdc", "e-search-query", "e18"],
+      },
+      {
+        text: "The whole write path hangs off one row shape: (hotel_id, room_type, date) holding sold and allowance. Nobody books room 412, they book a standard king on the 14th, so the state is a count rather than a per-unit calendar, and a three-night stay touches three rows that must all move or none.",
+        lights: ["inventory-table"],
+      },
+      {
+        text: "The reservation is a single conditional update that increments sold on every night of the stay where sold is still under allowance, and returns the rows it changed. Fewer rows back than nights means roll the whole stay back. Check and write collapse into one statement, so the row locks live for about 2ms with no application hop inside them.",
+        lights: ["inventory-svc", "inventory-table", "e10"],
+      },
+      {
+        text: "Payment sits outside that transaction because authorisation takes 200ms in the good case and 30 seconds in the bad one. Inventory commits first with the booking marked as reserved, then a saga authorises the card, confirms and fans out notifications, with compensations keyed to (booking_id, step_id) and a sweeper that releases anything still reserved after 10 minutes.",
+        lights: ["bk-saga", "payment", "bookings-table", "recovery-svc", "e12", "e13", "e21"],
+      },
+      {
+        text: "Every write entry point takes an idempotency key stored under a unique constraint in the database, because a retried POST after a dropped connection is the commonest source of duplicate bookings in production. A cache in front is a fast path only: a design whose dedupe store can lose data has a probability, not a guarantee.",
+        lights: ["bk-dedupe", "idem-table", "e6"],
+      },
+      {
+        text: "The ceiling the transaction enforces is not the room count. A nightly forecast job writes allowance as physical capacity plus a deliberate 5 to 15 percent oversell, and the booking path enforces it exactly while knowing nothing about the forecast. Separate columns with separate owners is what stops the two writers racing.",
+        lights: ["inventory-table"],
+      },
     ],
     crux:
-      "The interesting number here is not QPS. At 1M bookings a day the average inventory row is touched once every ~7,000 days, so contention is a tail phenomenon and the database alone is enough. The hard part is that the ceiling on the counter is a business parameter somebody else owns: the transactional path must enforce sold < allowance exactly, while a forecast job rewrites allowance underneath it, and the two must never race.",
+      "The interesting number here is not QPS. At 1M bookings a day touching 182.5B inventory rows, the average row is touched once every ~57,000 days, so contention is a tail phenomenon and the database alone is enough. The hard part is that the ceiling on the counter is a business parameter somebody else owns: the transactional path must enforce sold < allowance exactly, while a forecast job rewrites allowance underneath it, and the two must never race.",
     numbers: [
-      "1.4 x 10^-4 decrements per row per day",
+      "~1.75 x 10^-5 decrements per row per day",
       "~2ms locks, ~500 attempts/s per row",
       "120 physical rooms sold as 131",
     ],
@@ -36,10 +54,18 @@ export const HOTEL_RESERVATION: Diagram = {
       row: 1,
       detail: {
         what: "One service that dedupes the request, prices the stay and then drives the saga. The three stages inside it are stages of a single request, not three deployments.",
-        why: "They are drawn as one box because there is no network hop between them and no independent scaling story: the same request thread inserts the idempotency key, resolves the rate plan and opens the transaction. Splitting them into peer services would add two hops to a path whose whole design goal is a ~2ms critical section.",
+        why: "They are one box because there is no network hop between them and no independent scaling story: the same request thread inserts the idempotency key, resolves the rate plan and opens the transaction. Splitting them into peer services would add two hops to a path whose whole design goal is a ~2ms critical section.",
         numbers: ["~12 bookings/s average, ~120/s peak", "p99 under 5s is the SLO", "5 persisted saga transitions"],
         breaks:
           "It owns the window between a committed decrement and a confirmed booking. A crash inside that window leaves inventory consumed by a booking nobody is finishing, which is why the alert is the age of the oldest non-terminal saga rather than a queue depth.",
+        choice: {
+          pick: "One deployable running dedupe, pricing and saga orchestration as in-process stages",
+          instead: "Three peer services, each independently deployed and scaled, talking to each other over the network.",
+          decider:
+            "The 2ms transaction budget against a network hop. Splitting the three stages into separate services adds 2 network hops inside a path budgeted at a ~2ms critical section, for zero independent-scaling benefit since all three see identical traffic.",
+          flips:
+            "When one stage's load genuinely diverges from the others, for example rate resolution becoming expensive enough to need its own fleet, at which point the hop cost buys real independent scaling.",
+        },
       },
     },
     {
@@ -110,12 +136,11 @@ export const HOTEL_RESERVATION: Diagram = {
       col: 0,
       row: 2,
       detail: {
-        what: "A denormalised, eventually consistent copy of hotel documents with cached minimum prices and coarse availability, plus a geo index behind 'hotels within 5km'. A Redis query cache keyed on (city, date range, guests) sits in front, holding rendered result pages for 60 seconds.",
+        what: "A denormalised, eventually consistent copy of hotel documents with cached minimum prices and coarse availability, sharded by city, plus a geo index behind 'hotels within 5km'. A Redis query cache keyed on (city, date range, guests) sits in front, holding rendered result pages for 60 seconds.",
         why: "It answers 'plausibly available' cheaply, and the booking path answers the real question authoritatively. It never touches the inventory table, which is what keeps a 4k/s peak read load off the write path entirely. The query cache absorbs most of that peak before it reaches the index at all: the key repeats heavily, since Sunday-evening planners search the same twenty cities for the same weekends, and losing the cache costs latency and index load, never correctness.",
         numbers: [
           "5M docs x ~5KB = 25GB primary, ~75GB with replica and analysis",
           "~10GB geo index",
-          "sharded by city",
           "cache: ~70% hit rate, 60s TTL, 4k/s peak in vs ~1.2k/s reaching the index",
         ],
         breaks:
@@ -165,8 +190,8 @@ export const HOTEL_RESERVATION: Diagram = {
       parent: "booking-svc",
       detail: {
         what: "Takes the client's key, inserts it under a unique constraint and, on conflict, returns the booking that already exists instead of starting a second one.",
-        why: "A retried POST after a dropped connection is the most common source of duplicate reservations in production, and this is the only stage that can tell the difference between a retry and a second booking.",
-        numbers: ["one row per booking attempt", "insert commits with the decrement", "~120 attempts/s at peak"],
+        why: "A retried POST after a dropped connection is the most common source of duplicate reservations in production, and this is the only stage that can tell the difference between a retry and a second booking. The insert commits in the same transaction as the decrement.",
+        numbers: ["one row per booking attempt", "~120 attempts/s at peak"],
         breaks:
           "Returning the existing booking is only correct if the first attempt is finished. A retry that arrives while the original is still mid-saga must return the in-progress state rather than a confirmation nobody has earned yet.",
         choice: {
@@ -189,10 +214,10 @@ export const HOTEL_RESERVATION: Diagram = {
       parent: "booking-svc",
       detail: {
         what: "Picks the cheapest legal combination of rate plans across the nights of the stay, as a pure read against a price snapshot, before any lock is taken.",
-        why: "Real inventory is keyed by rate plan as well as date, so a Friday-to-Sunday stay can legally book a flexible rate on night one and a prepaid rate on night two. Resolving that is a search over plans, and it has no business happening with rows locked.",
-        numbers: ["pure read, zero locks held", "3.2 nights average", "capture policy comes from the resolved plan"],
+        why: "Real inventory is keyed by rate plan as well as date, so a Friday-to-Sunday stay can legally book a flexible rate on night one and a prepaid rate on night two. Resolving that is a search over plans, and it has no business happening with rows locked. The capture policy travels with the resolved plan rather than being hard-coded here.",
+        numbers: ["pure read, zero locks held", "3.2 nights average"],
         breaks:
-          "Mixed plans mean two UPDATEs over date sub-ranges, which is fine only while both still run in ascending date order. Break that and the deadlock property goes with it.",
+          "Mixed plans mean two separate update statements over date sub-ranges, which is fine only while both still run in ascending date order. Break that and the deadlock property goes with it.",
         choice: {
           pick: "Resolve the plan combination before the transaction, against a snapshot",
           instead: "Resolve inside the transaction so the price is guaranteed current, or let the client send the resolved plan.",
@@ -213,8 +238,8 @@ export const HOTEL_RESERVATION: Diagram = {
       parent: "booking-svc",
       detail: {
         what: "Drives reserve, authorise, confirm and fan-out as separate persisted steps, with compensations keyed to (booking_id, step_id).",
-        why: "Inventory, payment and notification each commit independently and each can fail on its own, so the coordination has to be an explicit state machine rather than one transaction spanning all three.",
-        numbers: ["5 transitions, state written at every one", "alert when the oldest non-terminal saga exceeds 60s", "compensations are no-ops on retry"],
+        why: "Inventory, payment and notification each commit independently and each can fail on its own, so the coordination has to be an explicit state machine rather than one transaction spanning all three. Compensations are no-ops on retry.",
+        numbers: ["5 transitions, state written at every one", "alert when the oldest non-terminal saga exceeds 60s"],
         breaks:
           "Modelling cancellation as the same transition as compensation is a common and expensive simplification. They converge on sold = sold - 1 and diverge on refund policy, notifications and pricing everywhere else.",
         choice: {
@@ -239,8 +264,8 @@ export const HOTEL_RESERVATION: Diagram = {
       parent: "txn",
       detail: {
         what: "A durable (key, booking_id, state) table with a unique constraint on key, inserted in the same transaction as the decrement. A Redis read-through cache sits in front as a fast path only, answering 'have I seen this key' without a round trip here.",
-        why: "The constraint is the guarantee. A duplicate insert failing is how a retry is detected, and doing it inside the transaction means a rolled-back stay does not leave a key claimed by a booking that never happened. The cache is allowed to be lost because the guarantee lives in the constraint, not in Redis; it earns its place by absorbing the retry storm itself before it reaches the shard holding the inventory rows.",
-        numbers: ["1M rows/day", "insert and decrement commit together", "0 rows returned means retry", "cache: ~120 lookups/s peak, TTL longer than the 10-minute hold"],
+        why: "The constraint is the guarantee. A duplicate insert failing is how a retry is detected, and doing it inside the transaction means a rolled-back stay does not leave a key claimed by a booking that never happened. The insert and the decrement commit together, in one transaction. The cache is allowed to be lost because the guarantee lives in the constraint, not in Redis; it earns its place by absorbing the retry storm itself before it reaches the shard holding the inventory rows.",
+        numbers: ["1M rows/day", "0 rows returned means retry", "cache: ~120 lookups/s peak, TTL longer than the 10-minute hold"],
         breaks:
           "If this record can be lost, the guarantee degrades to a probability, and it degrades exactly during a burst when retries are most likely. The guest then holds two confirmations for the same stay.",
         choice: {
@@ -270,10 +295,10 @@ export const HOTEL_RESERVATION: Diagram = {
         breaks:
           "Deadlock avoidance is an index-order property, not a convention. The range predicate on the primary key forces an ascending scan, so two overlapping stays visit shared nights in the same order. On a small test table the planner may pick a sequential scan and hide the property until production.",
         choice: {
-          pick: "Single conditional UPDATE ... WHERE sold < allowance RETURNING date",
-          instead: "SELECT ... FOR UPDATE then UPDATE, an optimistic version column with client retry, or a per-row single-writer queue.",
+          pick: "One conditional update per stay: increment sold where sold is under allowance, returning the changed dates",
+          instead: "A row-locking read then a separate update, an optimistic version column with client retry, or a per-row single-writer queue.",
           decider:
-            "Attempts per second on the hottest row against the single-row ceiling. Locks live ~2ms so a row absorbs ~500 attempts/s; the mean row sees 1.4 x 10^-4 attempts a day and the worst real burst is ~8/s, which is 1.6% of the ceiling. A queue would add a tier, a failure mode and 10ms to 100% of bookings to help 0.001% of rows.",
+            "Attempts per second on the hottest row against the single-row ceiling. Locks live ~2ms so a row absorbs ~500 attempts/s; the mean row sees ~1.75 x 10^-5 attempts a day and the worst real burst is ~8/s, which is 1.6% of the ceiling. A queue would add a tier, a failure mode and 10ms to 100% of bookings to help 0.001% of rows.",
           flips:
             "A store with no multi-row transaction. On a wide-column or document store you get single-item conditional writes only, so a multi-night stay needs N independent writes plus a hold record and a compensating cleanup, and an explicit serialiser stops being overhead and becomes the mechanism.",
         },
@@ -293,7 +318,7 @@ export const HOTEL_RESERVATION: Diagram = {
         numbers: [
           "5M hotels x 50 room types x 730 days = 182.5B rows",
           "~100B per row, ~18.25TB",
-          "one touch every ~7,000 days on the mean row",
+          "one touch every ~57,000 days on the mean row",
           "forecast: physical + 5-15% oversell, hard-clamped at physical x 1.2, none below ~20 units",
         ],
         breaks:
@@ -318,7 +343,7 @@ export const HOTEL_RESERVATION: Diagram = {
       col: 1,
       row: 2,
       detail: {
-        what: "The reservation record and the saga's persisted state machine: INVENTORY_RESERVED, PaymentAuthorized, CONFIRMED, and the compensation states beside them.",
+        what: "The reservation record and the saga's persisted state machine: InventoryReserved, PaymentAuthorized, Confirmed, and the compensation states beside them.",
         why: "The row is inserted as INVENTORY_RESERVED inside the inventory transaction, and every later transition is written as it happens. Without state at every step a crashed orchestrator cannot tell what it already did.",
         numbers: ["1M/day x 365 x 5 years = 1.825B rows, ~900GB", "row ~500B", "alert when the oldest non-terminal saga exceeds 60s"],
         breaks:
@@ -342,8 +367,8 @@ export const HOTEL_RESERVATION: Diagram = {
       row: 2,
       detail: {
         what: "A third-party card network call made after inventory has committed: authorise the full stay, capture at check-in for flexible rates and immediately for prepaid ones.",
-        why: "An authorisation holds funds without moving them and voids at zero cost, whereas a capture moves money and reversing it means a refund with a per-transaction fee and accounting noise. Holds survive about 7 days, which comfortably covers the saga.",
-        numbers: ["200ms good case, 30s bad case", "holds last ~7 days", "capture driven by the rate plan, not hard-coded"],
+        why: "An authorisation holds funds without moving them and voids at zero cost, whereas a capture moves money and reversing it means a refund with a per-transaction fee and accounting noise. Holds survive about 7 days, which comfortably covers the saga. Capture timing is driven by the resolved rate plan, never hard-coded here.",
+        numbers: ["200ms good case, 30s bad case", "holds last ~7 days"],
         breaks:
           "It is the leg you do not control. When the breaker is open the correct behaviour is to refuse new bookings outright rather than reserve inventory that cannot be paid for and accumulate sagas stuck in INVENTORY_RESERVED.",
         choice: {
@@ -364,13 +389,12 @@ export const HOTEL_RESERVATION: Diagram = {
       col: 2,
       row: 3,
       detail: {
-        what: "The durable topic the saga publishes to once a booking is CONFIRMED, with an independent subscription per downstream consumer: a notification service that renders and sends the confirmation email, SMS and partner callbacks, and a loyalty service that credits points keyed by booking id and runs a periodic reconciliation sweep against the bookings table.",
+        what: "The durable topic the saga publishes to once a booking is confirmed, with an independent subscription per downstream consumer: a notification service that renders and sends the confirmation email, text message and partner callbacks, and a loyalty service that credits points keyed by booking id and runs a periodic reconciliation sweep against the bookings table.",
         why: "The booking is already committed by this point, so everything downstream is an effect rather than a step. Independent subscriptions mean a stalled loyalty consumer cannot delay confirmation emails, and each retries on its own clock. The user already has their reference number from the HTTP response, so a missing email is a support ticket, not a lost booking; a missed accrual is noticed only months later, which is why loyalty additionally reconciles against the bookings table instead of trusting the queue alone.",
         numbers: [
           "1M confirmations/day, 1M accruals/day",
           "published after commit, never inside the ~2ms transaction",
-          "per-consumer backpressure",
-          "notification: best-effort with a resend endpoint; loyalty: event-driven plus reconciliation",
+          "2 independent subscriptions, each with its own backpressure",
         ],
         breaks:
           "Publishing after commit means the publish itself can be lost, so the queue is not a guarantee on its own. Retries cannot recover an event that was never published: notifications cover that with a resend endpoint, loyalty covers it by reconciling against the bookings table, which is the only check that closes the gap for a silently dropped accrual.",
@@ -403,6 +427,14 @@ export const HOTEL_RESERVATION: Diagram = {
         ],
         breaks:
           "The sweeper releasing rows for a booking whose authorisation later succeeds is a real race; the confirm step must void that authorisation rather than confirm a booking with no inventory behind it. A blind decrement running twice gives two rooms back, which is why releases are keyed to (booking_id, step_id).",
+        choice: {
+          pick: "Two separate background jobs, resume worker and sweeper, on deliberately different thresholds",
+          instead: "One combined recovery job, or fold the same logic inline into the booking service.",
+          decider:
+            "The thresholds differ by an order of magnitude on purpose: resume fires at 60 seconds, the sweeper at 10 minutes, and the 10x gap is what lets a normal process crash resolve itself before the sweeper ever releases inventory a paid authorisation is about to confirm.",
+          flips:
+            "A checkout fast enough to complete inside the request, where there is no stuck-saga window for either job to watch.",
+        },
       },
     },
     {
@@ -415,15 +447,15 @@ export const HOTEL_RESERVATION: Diagram = {
       parent: "recovery-svc",
       detail: {
         what: "Picks up sagas that stopped mid-flight and replays them forward from the last persisted step.",
-        why: "The dangerous crash is after the card is authorised and before the booking is written: money is held, inventory is consumed, and nothing is driving the booking to a terminal state. Replaying forward completes it; letting the sweeper release it would throw away a paid-for stay.",
-        numbers: ["alert when the oldest non-terminal saga exceeds 60s", "forward-step keys make replay a no-op", "runs well inside the 10-minute hold"],
+        why: "The dangerous crash is after the card is authorised and before the booking is written: money is held, inventory is consumed, and nothing is driving the booking to a terminal state. Replaying forward completes it; letting the sweeper release it would throw away a paid-for stay. Forward-step idempotency keys make a replay a no-op rather than a double-charge.",
+        numbers: ["alert when the oldest non-terminal saga exceeds 60s", "runs well inside the 10-minute hold"],
         breaks:
           "It races the sweeper by construction. Its threshold is 60 seconds against the sweeper's 10 minutes so it normally wins, and when it does not, the confirm step re-checks inventory state and voids the authorisation rather than confirming a booking with no rooms behind it.",
         choice: {
           pick: "A separate worker replaying persisted steps, ahead of the sweeper's release window",
           instead: "In-process retry inside the orchestrator, or letting the sweeper release everything stuck and making the user rebook.",
           decider:
-            "In-process retry dies with the process, and the failure being recovered from is the process dying. The sweeper alone is worse still: it releases inventory for bookings that were authorised and would have confirmed, which shows up as a paid guest with no room.",
+            "In-process retry dies with the process, and the failure being recovered from is the process dying. The sweeper alone is worse still: its 10-minute release window is 10x wider than a resumable crash needs, so every authorised, would-have-confirmed booking stuck in that gap gets its rooms released anyway, which shows up as a paid guest with no room.",
           flips:
             "A checkout fast enough to complete inside the request, where there is no window to crash in and no partial saga to resume.",
         },
@@ -439,8 +471,8 @@ export const HOTEL_RESERVATION: Diagram = {
       parent: "recovery-svc",
       detail: {
         what: "A leader-elected job that releases the room-nights of any booking still in INVENTORY_RESERVED after 10 minutes, oldest first.",
-        why: "Payment sits outside the inventory transaction, so there is a real window in which room-nights are consumed by a booking that never confirms. Abandonment on a payment form runs at tens of percent, so without this every abandoned checkout removes a room-night from sale permanently.",
-        numbers: ["10-minute hold", "abandonment on payment forms in the tens of percent", "alert on count of INVENTORY_RESERVED older than 10 min"],
+        why: "Payment sits outside the inventory transaction, so there is a real window in which room-nights are consumed by a booking that never confirms. Abandonment on a payment form runs roughly 20-30%, so without this every abandoned checkout removes a room-night from sale permanently.",
+        numbers: ["10-minute hold", "alert on count of INVENTORY_RESERVED older than 10 min"],
         breaks:
           "It creates a race of its own: an authorisation can succeed after the sweeper has released the rows, so the confirm step must re-check state and void the authorisation rather than confirm a booking with no inventory behind it.",
         choice: {
@@ -502,11 +534,11 @@ export const HOTEL_RESERVATION: Diagram = {
       from: "bk-dedupe",
       to: "idem-table",
       tier: "data",
-      label: "INSERT key, unique index",
+      label: "insert key, unique index",
       detail: {
         what: "Inserting (idempotency_key, booking_id) under a unique constraint, in the same transaction as the decrement.",
-        why: "A duplicate insert failing the constraint is how a retry is detected, and the handler returns the existing booking rather than starting a second one. Doing it in the same transaction means a rolled-back stay does not leave a key claimed.",
-        numbers: ["0 rows inserted means retry", "commits with the decrement"],
+        why: "A duplicate insert failing the constraint is how a retry is detected, and the handler returns the existing booking rather than starting a second one. Doing it in the same transaction means a rolled-back stay does not leave a key claimed, and it commits together with the decrement.",
+        numbers: ["0 rows inserted means retry"],
         breaks:
           "If this record can be lost, the guarantee degrades to a probability, and it degrades exactly during a burst when retries are most likely.",
       },
@@ -515,11 +547,11 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e7",
       from: "bk-dedupe",
       to: "bk-rates",
+      tier: "data",
       label: "not a retry: price it",
       detail: {
         what: "The in-process hand-off from dedupe to pricing, once the key is established as new.",
-        why: "It is a function call, not a network hop, which is the whole reason these stages are one service. Anything crossing a wire here would be added latency inside the path whose budget is a ~2ms transaction plus an authorisation.",
-        numbers: ["no network hop", "same request thread"],
+        why: "It is a function call on the same request thread, not a network hop, which is the whole reason these stages are one service. Anything crossing a wire here would be added latency inside the path whose budget is a ~2ms transaction plus an authorisation.",
         breaks:
           "Splitting this boundary into two deployments is the classic over-decomposition: it buys nothing, and every failure between them creates a claimed key with no booking behind it.",
       },
@@ -528,13 +560,14 @@ export const HOTEL_RESERVATION: Diagram = {
       id: "e8",
       from: "bk-rates",
       to: "bk-saga",
+      tier: "data",
       label: "cheapest legal combo",
       detail: {
         what: "The resolved plan-per-night handed to the orchestrator, with the capture policy that comes with it.",
         why: "Capture timing is a property of the rate plan, so the saga reads it here rather than hard-coding it: prepaid captures at booking, flexible captures at check-in.",
         numbers: ["3.2 nights average", "one plan per night, possibly mixed"],
         breaks:
-          "A mixed-plan stay ends up as two UPDATEs over date sub-ranges. Both must still run in ascending date order or the deadlock property is lost across the plan boundary.",
+          "A mixed-plan stay ends up as two separate update statements over date sub-ranges. Both must still run in ascending date order or the deadlock property is lost across the plan boundary.",
       },
     },
     {
@@ -556,11 +589,11 @@ export const HOTEL_RESERVATION: Diagram = {
       from: "inventory-svc",
       to: "inventory-table",
       tier: "hot",
-      label: "conditional UPDATE, ~2ms",
+      label: "conditional update, ~2ms",
       detail: {
-        what: "UPDATE inventory SET sold = sold + 1 WHERE ... AND date >= ? AND date < ? AND sold < allowance RETURNING date.",
-        why: "One statement rather than SELECT ... FOR UPDATE then UPDATE, because the two-round-trip version holds locks across an application hop, a garbage-collection pause and whatever else the service is doing.",
-        numbers: ["locks held ~2ms including commit", "rowcount < nights means ROLLBACK", "~500 attempts/s per row"],
+        what: "One statement: increment sold by one for every night in the stay where sold is still under allowance, and return the dates it actually changed.",
+        why: "One statement rather than a separate read-lock and update, because the two-round-trip version holds locks across an application hop, a garbage-collection pause and whatever else the service is doing. Fewer rows returned than nights in the stay rolls the whole thing back.",
+        numbers: ["locks held ~2ms including commit", "~500 attempts/s per row"],
         breaks:
           "Ascending index order is what stops two overlapping stays deadlocking. It depends on the planner choosing an index scan, and a sequential scan on a small test table hides the property until the table is large.",
       },
@@ -573,8 +606,8 @@ export const HOTEL_RESERVATION: Diagram = {
       label: "authorise, not capture",
       detail: {
         what: "The authorisation call, made after the inventory transaction has already committed.",
-        why: "This is the arrow that must not be inside the transaction. Authorisation takes 200ms to 30 seconds, so holding row locks across it would drop a single row from ~500 attempts/s to about 5/s and pin a database connection per user staring at a card form.",
-        numbers: ["200ms to 30s", "idempotency key = booking_id + ':auth'"],
+        why: "This is the arrow that must not be inside the transaction. Authorisation takes 200ms to 30 seconds, so holding row locks across it would drop a single row from ~500 attempts/s to about 5/s and pin a database connection per user staring at a card form. Its own idempotency key is the booking id plus a fixed 'auth' suffix, so a retried authorisation call cannot double-charge.",
+        numbers: ["200ms to 30s"],
         breaks:
           "If it fails, the compensation decrements sold on the same rows keyed to this booking id. If it succeeds after the sweeper has already released those rows, the confirm step voids it instead.",
       },
@@ -586,9 +619,9 @@ export const HOTEL_RESERVATION: Diagram = {
       tier: "data",
       label: "saga state per step",
       detail: {
-        what: "Writing the booking row as INVENTORY_RESERVED inside the inventory transaction, then persisting each saga transition through to CONFIRMED.",
-        why: "State at every transition is what makes a crash recoverable: a resume worker replays from the last persisted step, and forward-step idempotency keys make re-running it safe.",
-        numbers: ["5 transitions", "oldest non-terminal saga age is the alert"],
+        what: "Writing the booking row as InventoryReserved inside the inventory transaction, then persisting each saga transition through to Confirmed.",
+        why: "State at every transition is what makes a crash recoverable: a resume worker replays from the last persisted step, and forward-step idempotency keys make re-running it safe. The oldest non-terminal saga's age is the alert.",
+        numbers: ["5 transitions"],
         breaks:
           "Modelling cancellation as the same transition as compensation is a common and expensive simplification. They converge on sold = sold - 1 and diverge on refund policy, notifications and pricing everywhere else.",
       },
@@ -598,11 +631,11 @@ export const HOTEL_RESERVATION: Diagram = {
       from: "bk-saga",
       to: "booking-events",
       tier: "data",
-      label: "CONFIRMED: fan out",
+      label: "confirmed: fan out",
       detail: {
         what: "Publishing the confirmed booking once the card is authorised and the record is written.",
         why: "It is emitted after commit, deliberately, so nothing downstream can extend the critical section or fail a booking that has already happened.",
-        numbers: ["1M/day", "published after commit"],
+        numbers: ["1M/day"],
         breaks:
           "A publish after commit can itself be lost, and nothing in the queue can detect that. The reconciliation on the loyalty side is what covers it.",
       },
@@ -615,8 +648,7 @@ export const HOTEL_RESERVATION: Diagram = {
       label: "WAL stream",
       detail: {
         what: "The transactional store's write-ahead log being tailed for inserts and updates to hotels, prices and availability.",
-        why: "Reading the log rather than dual-writing means the index inherits the transaction's durability: a change that committed cannot fail to be published, because publishing is downstream of the commit rather than beside it.",
-        numbers: ["events carry a monotonic log position"],
+        why: "Reading the log rather than dual-writing means the index inherits the transaction's durability: a change that committed cannot fail to be published, because publishing is downstream of the commit rather than beside it. Every event carries the monotonic log position it came from, so a consumer can always tell what it has already applied.",
         breaks:
           "Tailing the log ties the pipeline to the database's replication slots, and a stalled consumer holds WAL on the primary, so a dead reader becomes a disk-space problem on the store it reads from.",
       },
@@ -657,8 +689,8 @@ export const HOTEL_RESERVATION: Diagram = {
       label: "scan INVENTORY_RESERVED",
       detail: {
         what: "Scanning for bookings still in INVENTORY_RESERVED past the 10-minute hold, oldest first.",
-        why: "The reserved state is the observable form of an abandoned checkout, and the sweeper is the only thing watching for it once the user has closed the tab.",
-        numbers: ["10-minute threshold", "processed oldest-first on restart"],
+        why: "The reserved state is the observable form of an abandoned checkout, and the sweeper is the only thing watching for it once the user has closed the tab. On restart it processes the oldest reservations first.",
+        numbers: ["10-minute threshold"],
         breaks:
           "If the sweeper stops, this count rises silently while bookings keep succeeding, so the alarm is on the age of the oldest reserved booking rather than on the sweeper's own uptime.",
       },
@@ -671,8 +703,7 @@ export const HOTEL_RESERVATION: Diagram = {
       label: "release after 10 min",
       detail: {
         what: "Giving the room-nights back: sold = sold - 1 on the same rows, keyed to the booking id so it is a no-op if it runs twice.",
-        why: "Without this arrow, every abandoned payment form permanently removes a room-night from sale, and abandonment runs at tens of percent. This is a correctness component, not housekeeping.",
-        numbers: ["release keyed to (booking_id, step_id)"],
+        why: "Without this arrow, every abandoned payment form permanently removes a room-night from sale, and abandonment runs at tens of percent. This is a correctness component, not housekeeping. The release is keyed to (booking_id, step_id) so it is a no-op if it ever runs twice.",
         breaks:
           "A blind decrement that runs twice gives two rooms back, which is an undersell nobody notices until occupancy reports disagree with the ledger.",
       },

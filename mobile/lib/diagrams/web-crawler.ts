@@ -10,11 +10,26 @@ export const WEB_CRAWLER: Diagram = {
     shape:
       "A crawler is a loop, not a pipeline: every page you fetch produces the URLs that feed the next fetch, so the system's job is deciding what to pull next without drowning in duplicates or getting itself blocked.",
     beats: [
-      "Discovery is a hand-off. A parser on one shard constantly finds links belonging to another, so new URLs go onto a partitioned log keyed by hash(domain) rather than being handled locally. Sharding by domain is what keeps all politeness state for a host on one machine.",
-      "Admission is one service with four rejections in it, cheapest first. The Bloom probe is a memory access, the robots lookup may touch disk, the trap guard needs per-domain counters, and only what survives all three gets scored into a priority band. Every rejection here avoids a TCP connection, a download and a parse.",
-      "The frontier is two tiers because it answers two different questions. Front queues decide what is worth crawling (value); back queues decide when you are allowed to (politeness). Keeping them separate means one queue per host makes the rate limit structural rather than something a lock has to enforce.",
-      "Fetch, parse, normalise and fingerprint are one worker, not four services. The prose's own pseudocode fetches and parses in the same coroutine, and the lease contract only closes if the process that fetched is the process that stores. Concurrency comes from async sockets, not threads, because the work is almost entirely I/O wait — and DNS, uncached at 50ms, is most of that wait.",
-      "Storage closes the loop safely. The acknowledgement must follow the write, never the fetch, or a crash leaves a URL marked crawled with no page behind it and nothing downstream will ever notice.",
+      {
+        text: "Discovery is a hand-off. A parser on one shard constantly finds links belonging to another, so new URLs go onto a partitioned log keyed by hash(domain) rather than being handled locally. Sharding by domain is what keeps all politeness state for a host on one machine.",
+        lights: ["kafka", "frontier-shard", "e1", "e18"],
+      },
+      {
+        text: "Admission is one service with four rejections in it, cheapest first. The Bloom probe is a memory access, the robots lookup may touch disk, the trap guard needs per-domain counters, and only what survives all three gets scored into a priority band. Every rejection here avoids a TCP connection, a download and a parse.",
+        lights: ["admission", "p-dedup", "p-robots", "p-trap", "p-router", "e3", "e5", "e7"],
+      },
+      {
+        text: "The frontier is two tiers because it answers two different questions. Front queues decide what is worth crawling (value); back queues decide when you are allowed to (politeness). Keeping them separate means one queue per host makes the rate limit structural rather than something a lock has to enforce.",
+        lights: ["front-queues", "back-queues", "e8", "e9"],
+      },
+      {
+        text: "Fetch, parse, normalise and fingerprint are one worker, not four services. Fetching and parsing run in the same coroutine, and the lease contract only closes if the process that fetched is the process that stores. Concurrency comes from async sockets, not threads, because the work is almost entirely I/O wait — and DNS, uncached at 50ms, is most of that wait.",
+        lights: ["crawl-worker", "p-fetch", "p-parse", "dns", "e11", "e12", "e13", "e15"],
+      },
+      {
+        text: "Storage closes the loop safely. The acknowledgement must follow the write, never the fetch, or a crash leaves a URL marked crawled with no page behind it and nothing downstream will ever notice.",
+        lights: ["p-fingerprint", "object-store", "back-queues", "e20", "e22"],
+      },
     ],
     crux:
       "Politeness and throughput pull in opposite directions. You want maximum parallelism globally and strict serialisation per host, and the only way to have both is to make the host the unit of scheduling rather than the URL.",
@@ -64,7 +79,7 @@ export const WEB_CRAWLER: Diagram = {
         what: "One shard's worth of the crawler: the admission service, both queue tiers, this shard's slice of the seen index, and the per-domain host state. Everything inside is keyed by host.",
         why: "Politeness is per host, so the scheduling state for a host has to live in exactly one place. Sharding by hash(registrable_domain) guarantees that, which is why cross-shard discoveries go over the bus instead of being handled locally, and why no politeness decision needs a lock or a remote read.",
         numbers: [
-          "shard key = hash(registrable_domain)",
+          "~256 shards, one bucket per hash(registrable_domain)",
           "~10^8 registrable domains in rotation",
           "~200GB of politeness + robots state fleet-wide",
         ],
@@ -93,12 +108,20 @@ export const WEB_CRAWLER: Diagram = {
         what: "The single entry point into a shard's frontier. Four rejections in a fixed order, then a score. Nothing occupies queue space until it has cleared all four.",
         why: "Every filter here is cheaper than the fetch it prevents, and the order is the design: the Bloom probe is a memory access and rejects the large majority of links, the robots lookup may touch disk, the trap guard needs per-domain counters. Running them cheapest-first is what makes admission affordable at 120k discovered URLs per second.",
         numbers: [
-          "rejects the large majority of discovered links",
+          "rejects over 90% of discovered links",
           "~1% Bloom false-positive rate",
           "under 10% of known URLs are ever fetched",
         ],
         breaks:
           "This is one deployable unit, so a slow robots lookup stalls dedup behind it. The stages are ordered, not independently scaled; if one needs its own fleet the split is a real refactor.",
+        choice: {
+          pick: "Four rejections as ordered stages inside one service, cheapest first",
+          instead: "Four independent services chained by queues, each scaled on its own.",
+          decider:
+            "How the traffic thins as it passes through. Dedup rejects over 90% of the 120k discovered URLs a second, so the robots and trap stages only ever see a small fraction of that; queueing between four separately-scaled services would pay a hop at each stage for traffic that is already mostly gone by stage two.",
+          flips:
+            "When one stage's cost genuinely diverges from the rest, for example a robots lookup that starts hitting a slow external service at a rate the other three stages never will, at which point it earns its own fleet and its own scaling knob.",
+        },
       },
     },
     {
@@ -112,14 +135,14 @@ export const WEB_CRAWLER: Diagram = {
       detail: {
         what: "First stage: probe the Bloom filter, and for URLs discovered from a high-band parent, confirm a positive against the on-disk index.",
         why: "It runs first because it is the cheapest rejection available and it rejects the most. A memory probe costs nanoseconds; the fetch it prevents costs a TCP connection, a page download and a parse.",
-        numbers: ["~1% false positives", "negatives never touch disk"],
+        numbers: ["~1% false positives", "0 disk reads for a negative"],
         breaks:
           "A false positive says 'seen' for a page never crawled, and nothing ever revisits it. There is no error and no retry, so the loss is invisible by construction.",
         choice: {
           pick: "Probe always; confirm on disk only for high-band parents",
           instead: "Confirm every positive against the KV index, or never confirm.",
           decider:
-            "Read amplification. On a mature crawl the overwhelming majority of extracted links are already known, so confirming every positive means a disk read on most checks, which is exactly what the filter was bought to avoid. Confirming only for top-band parents bounds the cost while conceding real loss in the tail.",
+            "Read amplification. On a mature crawl over 90% of extracted links are already known, so confirming every positive means a disk read on most of 120k checks a second, which is exactly what the filter was bought to avoid. Confirming only for top-band parents bounds the cost while conceding real loss in the tail.",
           flips:
             "A compliance or archival crawl, where silently dropping 1% of genuinely new URLs is unacceptable and the disk reads are simply the price.",
         },
@@ -162,7 +185,7 @@ export const WEB_CRAWLER: Diagram = {
         why: "A spider trap produces legitimately distinct URLs, so neither URL dedup nor content dedup stops the enqueueing — only the storing. The bounds that work are structural and they have to be applied before the URL takes queue space, which is why the guard lives here rather than downstream.",
         numbers: [
           "novelty rate near 100% is the trap signature",
-          "depth cap and novelty ceiling are per-domain, not global",
+          "thresholds learned per domain across ~10^8 domains, never 1 global setting",
         ],
         breaks:
           "This fights the discovery budget directly: an aggressive novelty ceiling also suppresses genuinely prolific sites, so the ceiling has to be learned per domain rather than set once.",
@@ -170,7 +193,7 @@ export const WEB_CRAWLER: Diagram = {
           pick: "Per-domain learned novelty ceiling plus a depth cap",
           instead: "A global novelty threshold, or relying on content dedup to absorb traps.",
           decider:
-            "Content dedup stops the storing but not the enqueueing, so the frontier still grows without bound and the budget still goes on noise. A global threshold cannot separate a calendar script from a large news site, because both look like unbounded novelty from outside.",
+            "Content dedup stops the storing but not the enqueueing, so the frontier still grows without bound and the ~30% of budget reserved for discovery still goes on noise. A global threshold cannot separate a calendar script from a large news site, because both look like unbounded novelty from outside.",
           flips:
             "A crawl scoped to an allowlist of known hosts, where traps cannot be reached at all and the guard is pure overhead.",
         },
@@ -186,7 +209,7 @@ export const WEB_CRAWLER: Diagram = {
       parent: "admission",
       detail: {
         what: "Last stage: turn the surviving URL's score — domain authority, observed change rate, overdue-ness — into one of ten bands and append it there.",
-        why: "By this point the URL is known to be new, allowed and not part of a trap, so the only remaining question is how much it is worth. A fixed quota, roughly 70/30 refresh against discovery, is enforced here rather than letting one score decide, because a refresh candidate has measured history and a new URL only has what it inherits.",
+        why: "By this point the URL is known to be new, allowed and not part of a trap, so the only remaining question is how much it is worth. A fixed quota, roughly 70/30 refresh against discovery, is enforced here rather than letting one score decide, because a URL due for refresh has measured history and a new URL only has what it inherits.",
         numbers: ["F = ~10 bands", "~70% refresh / ~30% discovery quota"],
         breaks:
           "Scoring at admission freezes the score. A page that becomes important later keeps its old band until it is rediscovered.",
@@ -301,7 +324,7 @@ export const WEB_CRAWLER: Diagram = {
           pick: "Redis sorted sets, one per host, with a min-heap on next-fetch time",
           instead: "Keeping the schedule in process memory, or as rows in the metadata database.",
           decider:
-            "Whether the schedule must outlive a worker. In-memory is fastest but a crash loses every cooldown and the crawler resumes impolitely; a relational table survives but a poll-for-ready-hosts query at this rate is a table scan. A sorted set gives O(log n) next-ready in a store that persists.",
+            "Whether the schedule must outlive a worker. In-memory is fastest but a crash loses every cooldown and the crawler resumes impolitely; a relational table survives but a poll-for-ready-hosts query against ~100M queued URLs is a table scan. A sorted set gives O(log n) next-ready in a store that persists.",
           flips:
             "A single-process crawler where the frontier is already in memory and a crash means a full restart anyway.",
         },
@@ -317,7 +340,7 @@ export const WEB_CRAWLER: Diagram = {
       row: 2,
       detail: {
         what: "The stateless worker tier: lease a host, fetch, parse, normalise, fingerprint, store, then acknowledge. One deployable unit, four stages.",
-        why: "These are drawn as one service rather than four because the lease contract only closes if the process that fetched is the process that stores: the acknowledgement has to follow the storage write, and splitting the stages across services turns that into a distributed transaction. The prose's own fetch pseudocode returns parsed links from inside the fetch coroutine.",
+        why: "These are one service rather than four because the lease contract only closes if the process that fetched is the process that stores: the acknowledgement has to follow the storage write, and splitting the stages across services turns that into a distributed transaction. Fetching and parsing run in the same coroutine, so the fetch returns already-parsed links rather than a raw body handed off elsewhere.",
         numbers: [
           "thousands of concurrent sockets per node",
           "10s per-fetch timeout, 60s lease",
@@ -393,7 +416,7 @@ export const WEB_CRAWLER: Diagram = {
       parent: "crawl-worker",
       detail: {
         what: "Canonicalise every extracted link — scheme and host case, trailing slashes, sort and tracking parameters, session ids, fragments — before publishing it to the bus.",
-        why: "The seen index is only as good as the canonical form fed to it. This is drawn as its own stage because it is the single cheapest place to lose the entire dedup guarantee: a missed rule does not error, it just makes one page arrive under endlessly many spellings that the Bloom filter cannot recognise as duplicates.",
+        why: "The seen index is only as good as the canonical form fed to it. This is its own stage because it is the single cheapest place to lose the entire dedup guarantee: a missed rule does not error, it just makes one page arrive under endlessly many spellings that the Bloom filter cannot recognise as duplicates.",
         numbers: ["~300 links normalised per page", "~120k normalised URLs/s fleet-wide"],
         breaks:
           "Over-aggressive normalisation is the mirror failure: stripping a parameter that is actually significant collapses distinct pages into one and they are never fetched.",
@@ -418,7 +441,7 @@ export const WEB_CRAWLER: Diagram = {
       detail: {
         what: "Near-duplicate detection over page content using SimHash, then the storage write and the acknowledgement.",
         why: "URL dedup and content dedup are different problems. Mirrors, print views and syndicated articles are distinct URLs with identical bodies, and only a content fingerprint catches them. SimHash keeps similar documents close in Hamming distance, so near-duplicates collapse too.",
-        numbers: ["64-bit fingerprint", "match within a small Hamming distance"],
+        numbers: ["64-bit fingerprint", "match within a Hamming distance of ~3 bits"],
         breaks:
           "Too tight a threshold keeps mirrors, too loose discards genuinely distinct pages that share boilerplate. The fingerprinting cost is paid on every page, including the majority that turn out unique.",
         choice: {
@@ -441,7 +464,7 @@ export const WEB_CRAWLER: Diagram = {
       col: 3,
       row: 0,
       detail: {
-        what: "Everyone else's servers. The only part of this diagram you do not control.",
+        what: "Everyone else's servers. The only part of the system you do not control.",
         why: "It is drawn explicitly because it sets the constraints the rest of the design answers to: rate limits, robots.txt, hostile responses, and latency you cannot budget for.",
         numbers: ["~10^8 registrable domains in rotation", "sustained 403/429 means you are being banned"],
         breaks:
@@ -458,7 +481,7 @@ export const WEB_CRAWLER: Diagram = {
       parent: "crawl-worker",
       detail: {
         what: "An in-process resolver with an hour-scale TTL cache, queried before every fetch.",
-        why: "This is the component most candidates never mention and it appears in no textbook diagram. Uncached resolution at ~50ms per lookup dominates wall time at 1000 fetches/second — the page fetch itself becomes the small part of the latency. Warm hits are sub-microsecond.",
+        why: "This is easy to overlook because it never shows up as its own line item, yet uncached resolution at ~50ms per lookup dominates wall time at 1000 fetches/second — the page fetch itself becomes the small part of the latency. Warm hits are sub-microsecond.",
         numbers: ["~50ms uncached, sub-microsecond warm", "~5GB for ~10^8 domain→IP at 50B/entry", "1-hour TTL"],
         breaks:
           "Resolver flakiness shows up as a cache-miss latency spike rather than an error, so it needs a secondary resolver and a per-domain circuit breaker. Losing the cache is survivable — it refills — which is exactly why this is a cache and not a store.",
@@ -552,12 +575,12 @@ export const WEB_CRAWLER: Diagram = {
       id: "e1",
       from: "kafka",
       to: "p-dedup",
+      tier: "hot",
       label: "to owning shard",
-      animated: true,
       detail: {
         what: "Newly discovered URLs travelling from whichever shard found them to the shard that owns their domain.",
         why: "A parser has no idea which shard owns the links it just extracted, and a direct call would couple every shard to every other. The log decouples them and survives a restart, so a hand-off is never lost mid-flight.",
-        numbers: ["partitioned by hash(registrable_domain)", "~120k messages/s fleet-wide"],
+        numbers: ["partitioned across ~256 shards by hash(registrable_domain)", "~120k messages/s fleet-wide"],
         breaks:
           "If the consumer falls behind, discovery lag grows silently: the crawl still looks healthy because fetching continues, but it is working from stale discoveries.",
       },
@@ -566,11 +589,12 @@ export const WEB_CRAWLER: Diagram = {
       id: "e2",
       from: "p-dedup",
       to: "seen",
+      tier: "data",
       label: "seen?",
       detail: {
         what: "The dedup check: has this URL been crawled before?",
         why: "This is the cheapest possible rejection and it happens before anything is queued. A memory probe here saves a full fetch and parse downstream.",
-        numbers: ["~1% false-positive rate", "negatives answered from RAM, never from disk"],
+        numbers: ["~1% false-positive rate", "0 disk reads for a negative, RAM only"],
         breaks:
           "A false positive silently drops a page forever. Link-graph redundancy is the usual defence, but pages linked from many places are the popular ones we would have found anyway; the pages lost are the single-inbound-link ones the crawl exists to find.",
       },
@@ -579,6 +603,7 @@ export const WEB_CRAWLER: Diagram = {
       id: "e3",
       from: "p-dedup",
       to: "p-robots",
+      tier: "data",
       detail: {
         what: "A URL that the seen index says is new, passed to the robots check.",
         why: "The order is deliberate and it is the whole reason admission is cheap: the Bloom probe is a memory access and rejects the large majority, so whatever reaches the robots lookup — which may touch disk — is already a small fraction of the input.",
@@ -590,8 +615,8 @@ export const WEB_CRAWLER: Diagram = {
       id: "e4",
       from: "p-robots",
       to: "robots",
+      tier: "control",
       label: "crawl rules",
-      dashed: true,
       detail: {
         what: "Reading the cached robots rules for the URL's host.",
         why: "One fetch of robots.txt per host per TTL, turned into a lookup for every URL on that host. Rejecting a disallowed path here stops it consuming queue space and guarantees it can never be fetched later by accident.",
@@ -604,6 +629,7 @@ export const WEB_CRAWLER: Diagram = {
       id: "e5",
       from: "p-robots",
       to: "p-trap",
+      tier: "data",
       detail: {
         what: "An allowed URL passed to the spider-trap guard.",
         why: "The trap guard runs last of the three rejections because it is the only one that needs mutable per-domain counters rather than a lookup, and it is the only one that can be wrong about a legitimate site.",
@@ -615,8 +641,8 @@ export const WEB_CRAWLER: Diagram = {
       id: "e6",
       from: "p-trap",
       to: "robots",
+      tier: "control",
       label: "novelty + depth",
-      dashed: true,
       detail: {
         what: "Reading and updating the per-domain novelty rate, crawl depth and pattern blocklist.",
         why: "Trap detection is a per-domain statistic, not a per-URL one: a domain where almost every URL is new but almost every page is a near-duplicate is a trap by definition. Those counters live with the rest of the host state so one shard owns the whole verdict.",
@@ -629,6 +655,7 @@ export const WEB_CRAWLER: Diagram = {
       id: "e7",
       from: "p-trap",
       to: "p-router",
+      tier: "data",
       detail: {
         what: "A URL that survived all three rejections, handed to the priority router for scoring.",
         why: "Scoring is deliberately last. It is the only stage that cannot reject anything, so running it before the filters would compute a score for the large majority of URLs that are about to be thrown away.",
@@ -640,19 +667,21 @@ export const WEB_CRAWLER: Diagram = {
       id: "e8",
       from: "p-router",
       to: "front-queues",
+      tier: "data",
       label: "priority band",
       detail: {
         what: "An admitted, scored URL appended to one of ten priority bands.",
         why: "By this point the URL is known to be new, allowed and not part of a trap, so the only remaining question is how much it is worth — which is what the band encodes, to one significant figure.",
         numbers: ["~70% of the budget to refresh, ~30% to discovery"],
         breaks:
-          "The quota is enforced here rather than emerging from the score, because a refresh candidate has measured history and a new URL has only what it inherits; in one ranking the measured always outbids the guessed.",
+          "The quota is enforced here rather than emerging from the score, because a URL due for refresh has measured history and a new URL has only what it inherits; in one ranking the measured always outbids the guessed.",
       },
     },
     {
       id: "e9",
       from: "front-queues",
       to: "back-queues",
+      tier: "data",
       label: "one host per queue",
       detail: {
         what: "Refilling a drained back queue: pull from a weighted-random front queue until a URL for an unassigned host appears, then that host owns the queue until it empties.",
@@ -666,8 +695,8 @@ export const WEB_CRAWLER: Diagram = {
       id: "e10",
       from: "back-queues",
       to: "robots",
+      tier: "control",
       label: "next-fetch time",
-      dashed: true,
       detail: {
         what: "Reading a host's crawl delay and next-fetch timestamp to order the min-heap.",
         why: "The heap is keyed on next_allowed_time, and that value comes from here. This is the read that turns a published Crawl-Delay into actual scheduling behaviour.",
@@ -680,10 +709,10 @@ export const WEB_CRAWLER: Diagram = {
       id: "e11",
       from: "back-queues",
       to: "p-fetch",
+      tier: "hot",
       fromSide: "right",
       toSide: "left",
       label: "ready host, leased",
-      animated: true,
       detail: {
         what: "A host whose cooldown has elapsed, leased to a worker: the URL is hidden for a 60s lease window rather than dequeued.",
         why: "Leasing rather than handing out the URL outright is what stops two workers crawling the same host at once, so the lease is the mutual exclusion and no global lock is needed. It is also the crash-recovery mechanism: anything unacknowledged reappears when its lease expires, which makes restart and retry the same code path.",
@@ -696,8 +725,8 @@ export const WEB_CRAWLER: Diagram = {
       id: "e12",
       from: "p-fetch",
       to: "web",
+      tier: "hot",
       label: "HTTP GET",
-      animated: true,
       detail: {
         what: "The actual HTTP request to somebody else's server.",
         why: "Everything upstream exists to make this one call safe to make: known-new, allowed, not a trap, and correctly paced.",
@@ -710,12 +739,12 @@ export const WEB_CRAWLER: Diagram = {
       id: "e13",
       from: "p-fetch",
       to: "dns",
+      tier: "control",
       label: "resolve host",
-      dashed: true,
       detail: {
         what: "Resolving the host to an IP before the request goes out.",
         why: "Drawn explicitly because it is the step that dominates real deployments and appears in no textbook diagram: uncached at ~50ms, resolution is most of the wall clock and the page fetch becomes the small part.",
-        numbers: ["~50ms uncached", "sub-microsecond warm", "1-hour TTL"],
+        numbers: ["~50ms uncached", "under 1µs warm", "1-hour TTL"],
         breaks:
           "A cache miss storm — a resolver restart, or a wave of never-seen hosts — puts 50ms back on the front of every fetch at once, and it shows up as a latency spike rather than an error.",
       },
@@ -724,8 +753,8 @@ export const WEB_CRAWLER: Diagram = {
       id: "e14",
       from: "web",
       to: "robots",
+      tier: "control",
       label: "robots.txt, TTL cached",
-      dashed: true,
       detail: {
         what: "Fetching robots.txt on first contact with a host and caching the parsed rules with a TTL.",
         why: "One request per host rather than per URL. This is a control path: it carries no crawl output and exists purely to constrain the crawler.",
@@ -738,8 +767,8 @@ export const WEB_CRAWLER: Diagram = {
       id: "e15",
       from: "p-fetch",
       to: "p-parse",
+      tier: "hot",
       label: "HTML",
-      animated: true,
       detail: {
         what: "The fetched response body handed to the parser, in-process.",
         why: "This stays inside one worker rather than crossing a queue because the lease is still held: the worker cannot acknowledge until the page is stored, so handing the body to another service would only move the ack problem somewhere harder.",
@@ -752,10 +781,10 @@ export const WEB_CRAWLER: Diagram = {
       id: "e16",
       from: "p-parse",
       to: "render",
+      tier: "control",
       fromSide: "left",
       toSide: "right",
       label: "thin HTML, JS-heavy",
-      dashed: true,
       detail: {
         what: "Escalating a page to the browser pool when the extracted text is under ~500 bytes but script density is high.",
         why: "The verdict cannot be made before fetching, because a single-page app is indistinguishable from a normal page until you have its HTML. Deciding here, after parsing, means the cheap path is always tried first and only the failures cost a render.",
@@ -768,6 +797,7 @@ export const WEB_CRAWLER: Diagram = {
       id: "e17",
       from: "p-parse",
       to: "p-normalise",
+      tier: "data",
       label: "links + text",
       detail: {
         what: "The ~300 extracted anchors passed to normalisation before anything is published.",
@@ -781,10 +811,10 @@ export const WEB_CRAWLER: Diagram = {
       id: "e18",
       from: "p-normalise",
       to: "kafka",
+      tier: "hot",
       fromSide: "right",
       toSide: "top",
       label: "~300 links/page",
-      animated: true,
       offset: 100,
       detail: {
         what: "Canonicalised links published back onto the discovery bus. This is the arrow that makes it a crawl.",
@@ -798,6 +828,7 @@ export const WEB_CRAWLER: Diagram = {
       id: "e19",
       from: "p-normalise",
       to: "p-fingerprint",
+      tier: "data",
       label: "canonical URL",
       detail: {
         what: "The page content, now with its canonical URL, passed to content dedup.",
@@ -810,8 +841,8 @@ export const WEB_CRAWLER: Diagram = {
       id: "e20",
       from: "p-fingerprint",
       to: "object-store",
+      tier: "hot",
       label: "WARC write",
-      animated: true,
       detail: {
         what: "Writing the page itself to durable storage as a WARC record.",
         why: "This write is the one that must complete before the URL is acknowledged as crawled, because the acknowledgement is what makes the work unrepeatable.",
@@ -824,6 +855,7 @@ export const WEB_CRAWLER: Diagram = {
       id: "e21",
       from: "p-fingerprint",
       to: "metadata",
+      tier: "data",
       label: "status, hash, ts",
       detail: {
         what: "Recording fetch status, content hash, SimHash and timestamps for the URL.",
@@ -837,14 +869,14 @@ export const WEB_CRAWLER: Diagram = {
       id: "e22",
       from: "p-fingerprint",
       to: "back-queues",
+      tier: "control",
       fromSide: "right",
       toSide: "bottom",
       label: "ack, lease released",
-      dashed: true,
       detail: {
         what: "The acknowledgement back to the frontier, sent strictly after the storage write completes.",
         why: "This edge is the whole crash-safety story and it is drawn because its ordering is the design. Ack after the write means a crash anywhere before it simply lets the lease expire and the URL become visible again; ack after the fetch means a crash leaves a URL marked crawled with no page behind it.",
-        numbers: ["ack strictly after the write", "60s lease window"],
+        numbers: ["ack sent 1 step after the write, never before", "60s lease window"],
         breaks:
           "Nothing downstream ever notices an ack-before-write bug, because the seen index agrees the work is finished. The only detection is a sampled audit of the archive against the seen set.",
       },

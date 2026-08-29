@@ -10,12 +10,30 @@ export const TWITTER: Diagram = {
     shape:
       "One durable write on the left, three independent derived systems hanging off a single event stream, and a read path on the right that assembles a timeline from two sources and has to collapse the duplicates a retweet cascade puts in front of it.",
     beats: [
-      "The write path is deliberately tiny. The tweet service takes a Snowflake id, writes one ~1KB row to a wide-column store partitioned by author_id, acknowledges the poster, and publishes an event. Media never enters that row: it goes to object storage and the row carries references, because 50M media tweets a day at ~500KB is 25TB against a 1KB row.",
-      "Ids are load-bearing rather than incidental. 41 bits of millisecond timestamp, 10 of machine, 12 of sequence means sorting by id sorts by time, so the timeline stores no separate timestamp, an entry is 8 bytes, and merging two delivery routes is a merge of two sorted integer lists rather than a sort.",
-      "Distribution is where this question parts company with the generic feed. Question 8 owns the push-versus-pull derivation and should not be re-derived here. What is different is that the cut is drawn per edge, at ~1M active followers, and only into readers who opened the app in the last 7 days, because the binding constraint is the per-tweet burst budget of 200k appends per second against a 5s freshness SLO.",
-      "Then the cascade, which is the part nobody arrives with. Excluding a 100M-follower account from push saves 100M writes; 500k ordinary accounts retweeting that same tweet at ~500 mean followers each generate 250M pushed entries in twenty minutes, 2.5x the volume the celebrity rule existed to avoid. A rate-triggered cutover at ~1,000 retweets per minute turns later retweets into edges in a per-original index that the read-side merge already consults.",
-      "The read path has a 300ms p99 and exactly one term in it that scales with the graph: the pipelined fan-in over above-cut followees. Raising the cut from 10k to 1M takes that from ~38 fetches to 2 to 4. Everything else, the merge, the retweet_of dedupe, ranking and hydrating 20 bodies, is bounded by the candidate window and the page.",
-      "Search and trending are consumers of the same stream and never sit in the write path, so an indexer falling behind cannot stop anyone tweeting. Search is a second architecture rather than a box: an append-only in-memory index of the last 7 days in descending id order, and a batch-built relevance-ordered archive behind the same query API.",
+      {
+        text: "The write path is deliberately tiny. The poster's request reaches the tweet service, which takes a Snowflake id, writes one ~1KB row to a wide-column store partitioned by author_id, acknowledges the poster, and publishes an event. Media never enters that row: it goes to object storage and the row carries references, because 50M media tweets a day at ~500KB is 25TB against a 1KB row.",
+        lights: ["poster", "tweet-service", "tweet-store", "event-stream", "e1", "e2", "e4"],
+      },
+      {
+        text: "Ids are load-bearing rather than incidental. 41 bits of millisecond timestamp, 10 of machine, 12 of sequence means sorting by id sorts by time, so the timeline stores no separate timestamp, an entry is 8 bytes, and merging two delivery routes is a merge of two sorted integer lists rather than a sort.",
+        lights: ["timeline-caches", "timeline-service"],
+      },
+      {
+        text: "Distribution is where this question parts company with a generic feed's push-versus-pull derivation. The cut is drawn per edge, at ~1M active followers, and only into readers who opened the app in the last 7 days, because the binding constraint is the per-tweet burst budget of 200k appends per second against a 5s freshness SLO.",
+        lights: ["fanout", "follow-graph", "timeline-caches", "e5", "e6", "e7"],
+      },
+      {
+        text: "Then the cascade, which is the part nobody arrives with. Excluding a 100M-follower account from push saves 100M writes; 500k ordinary accounts retweeting that same tweet at ~500 mean followers each generate 250M pushed entries in twenty minutes, 2.5x the volume the celebrity rule existed to avoid. A rate-triggered cutover at ~1,000 retweets per minute turns later retweets into edges in a per-original list that the Timeline service's merge already consults.",
+        lights: ["fanout", "timeline-service"],
+      },
+      {
+        text: "The read path has a 300ms p99 and exactly one term in it that scales with the graph: the pipelined fan-in over above-cut followees. Raising the cut from 10k to 1M takes that from ~38 fetches to 2 to 4. Everything else, the merge, the retweet_of dedupe, ranking and hydrating 20 bodies, is bounded by the candidate window and the page.",
+        lights: ["timeline-service", "hydrator", "reader", "e11", "e12", "e14", "e17"],
+      },
+      {
+        text: "Search and trending are consumers of the same stream and never sit in the write path, so an indexer falling behind cannot stop anyone tweeting. Search is a second architecture rather than a box: an append-only in-memory index of the last 7 days in descending id order, and a batch-built relevance-ordered archive behind the same query API.",
+        lights: ["search", "trending", "e9", "e10"],
+      },
     ],
     crux:
       "The celebrity is a solved problem and costs one line of policy. The content you kept off the push path comes back onto it wearing a different hat: a retweet cascade routes the same tweet id through fan-out at 2.5x the volume you avoided and in a fraction of the time, from accounts three orders of magnitude below the cut.",
@@ -34,16 +52,46 @@ export const TWITTER: Diagram = {
       detail: {
         what: "The two stream consumers that are not distribution: search indexing and trending.",
         why: "Both are built from the same tweet event stream as fan-out, so neither can be a dependency of posting. A search cluster falling behind must degrade search, not stop the write path.",
-        numbers: ["searchable within 10s", "trend list refreshed every minute"],
+        numbers: ["searchable within 10s", "trend list refreshed once a minute"],
         breaks:
           "Both are rebuildable caches with different staleness, so every correctness question about them is a reconciliation problem rather than a transaction.",
+      },
+    },
+    {
+      id: "poster",
+      label: "Poster",
+      sub: "posts, waits on the durable row",
+      kind: "client",
+      col: 0,
+      row: 0,
+      detail: {
+        what: "The author's app, sending one post request and waiting only for the tweet row to be acknowledged.",
+        why: "The poster's whole experience is this one round trip. Everything past the durable write, fan-out, search, trending, is invisible to this client and allowed to be both asynchronous and stale.",
+        numbers: ["2.3k posts/s steady, ~50k/s peak", "ack after 1 durable write, not after fan-out"],
+        breaks:
+          "A client that retries a slow ack without an idempotency key can double-post, which is why the key travels with the request rather than being assigned server-side after the fact.",
+      },
+    },
+    {
+      id: "reader",
+      label: "Reader",
+      sub: "20 cards per page",
+      kind: "client",
+      col: 0,
+      row: 3,
+      detail: {
+        what: "The app rendering a page of the home timeline: 20 cards with bodies, media and counts, on the first screen of every session.",
+        why: "This is the client the entire read path is sized for: a 300ms p99 and a fixed-size response regardless of how many accounts the reader follows or how large a cascade is running underneath.",
+        numbers: ["20 cards per page", "~58k timeline loads/s steady, ~120k/s peak"],
+        breaks:
+          "A stale block on this client shows a timeline that has not moved in minutes, which is why a missing block triggers a cold rebuild rather than serving silently empty.",
       },
     },
     {
       id: "tweet-service",
       label: "Tweet service",
       kind: "service",
-      col: 0,
+      col: 1,
       row: 0,
       sub: "Snowflake id; ack on durable row",
       detail: {
@@ -67,7 +115,7 @@ export const TWITTER: Diagram = {
       label: "Tweet event stream",
       sub: "Kafka, one stream, three consumers",
       kind: "queue",
-      col: 0,
+      col: 1,
       row: 1,
       detail: {
         what: "The durable log every derived system reads: fan-out, the search indexer and trending all consume the same tweet events.",
@@ -90,12 +138,17 @@ export const TWITTER: Diagram = {
       label: "Tweet store",
       sub: "Cassandra, partition by author_id",
       kind: "database",
-      col: 1,
+      col: 2,
       row: 0,
       detail: {
-        what: "The only authoritative record: one ~1KB row per tweet, partitioned by author_id, holding text, parent_id, retweet_of and media references.",
+        what: "The only authoritative record: one ~1KB row per tweet, partitioned by author_id, holding text, parent_id, retweet_of and 32 bytes of media references. The bytes themselves live in object storage behind a CDN, uploaded before the post request and only referenced here, because 50M media tweets a day at ~500KB post-transcode is ~25TB against a ~1KB row: inlining media would multiply this store roughly 125x and put bytes nobody has requested yet on the write path.",
         why: "Partitioning by author makes writes cheap and makes the profile timeline a single partition scan. It cannot answer everything I follow, newest first, at all, and that is deliberate: the distribution layer exists precisely because this store refuses that query.",
-        numbers: ["200M rows/day, ~200GB/day raw", "~600GB/day at RF=3", "~1.1PB replicated over 5 years"],
+        numbers: [
+          "200M rows/day, ~200GB/day raw",
+          "~600GB/day at RF=3",
+          "~1.1PB replicated over 5 years",
+          "~25TB/day of media held off the row, hot for 30 days",
+        ],
         breaks:
           "A prolific author is one partition, so a single account posting at machine rate concentrates writes and profile reads on one replica set.",
         choice: {
@@ -109,41 +162,24 @@ export const TWITTER: Diagram = {
       },
     },
     {
-      id: "media-cdn",
-      label: "Media store + CDN",
-      sub: "row holds refs, bytes go direct",
-      kind: "database",
-      col: 2,
-      row: 0,
-      detail: {
-        what: "Object storage for images and video, CDN in front, with the tweet row carrying only media ids.",
-        why: "Media is three orders of magnitude larger than the text it accompanies, so it must never travel through the tweet write path or the timeline cache. Uploads go straight to object storage and the post request references an already-stored object, which keeps the write path fixed-cost regardless of attachment size.",
-        numbers: ["50M media tweets/day, 25% of all tweets", "~500KB post-transcode", "~25TB/day, hot for 30 days"],
-        breaks:
-          "A viral tweet concentrates media reads on a handful of objects, so origin protection is the CDN's job; a cache miss storm on one video reaches the object store directly.",
-        choice: {
-          pick: "Object storage plus CDN, tweet row stores 32 bytes of references",
-          instead: "Storing media blobs alongside the tweet in the same store.",
-          decider:
-            "25TB/day of media against 200GB/day of tweet rows. Inlining media multiplies the authoritative store by ~125x, drags replication and compaction across it, and puts bytes nobody has requested yet on the write path. References keep the row at ~1KB and let the bytes be served from an edge the database never sees.",
-          flips:
-            "Very small media volumes, where one store is less to operate and the CDN and transcode pipeline are cost with no traffic to justify them.",
-        },
-      },
-    },
-    {
       id: "fanout",
       label: "Fan-out service",
       sub: "per-edge cut, ~1M active followers",
       kind: "service",
-      col: 1,
+      col: 2,
       row: 1,
       detail: {
-        what: "Consumes tweet events, appends the id to the author's own recent list, and for below-cut authors pushes it into the timelines of followers who were active in the last 7 days.",
-        why: "Question 8 is the deep treatment of push versus pull and should be answered there. What is specific here is that the test is not one number per author: it is active follower count against the cut, and then reader activity per edge inside the loop, because a typical follow set is thick with mid-tier accounts sitting just above any flat threshold.",
-        numbers: ["cut at ~1M active followers", "~200k appends/s dedicated to one tweet", "pool sized ~5M appends/s against 1.2M/s steady"],
+        what: "Consumes tweet events, appends the id to the author's own recent list, and for below-cut authors pushes it into the timelines of followers who were active in the last 7 days. Also records every retweet against its original in a per-original retweeter list and bumps a rate counter on it: above ~1,000 retweets/minute, later retweets of that original become edges in this list instead of individual timeline pushes.",
+        why: "Push versus pull is a general derivation and the specific test here is narrower: it is active follower count against the cut, and then reader activity per edge inside the loop, because a typical follow set is thick with mid-tier accounts sitting just above any flat threshold. The retweet cutover exists because excluding a 100M-follower account from push saves 100M writes, but 500k ordinary accounts retweeting that tweet at ~500 mean followers each would generate 250M pushed entries in twenty minutes, 2.5x the volume the celebrity rule avoided; the rate trigger bounds that by when it fires rather than by how viral the tweet gets, and the read-side merge already knows how to consult the resulting edge list.",
+        numbers: [
+          "cut at ~1M active followers",
+          "~200k appends/s dedicated to one tweet",
+          "pool sized ~5M appends/s against 1.2M/s steady",
+          "cutover above 1,000 retweets/minute",
+          "500k retweets x ~500 followers = 250M entries avoided",
+        ],
         breaks:
-          "Aggregate burst, not any single tweet. A 20x tweet-rate spike wants ~24M appends/s against a ~5M/s pool, and the queue simply grows; the shed is to tighten the activity window from 7 days to an hour, which is roughly 9x fewer readers and pushes that cohort onto the cold rebuild path.",
+          "Aggregate burst, not any single tweet. A 20x tweet-rate spike wants ~24M appends/s against a ~5M/s pool, and the queue simply grows; the shed is to tighten the activity window from 7 days to an hour, which is roughly 9x fewer readers and pushes that cohort onto the cold rebuild path. The retweet trigger is only as good as its lag: firing 90 seconds late has already let roughly 150k retweets through, which is most of the peak, so that measurement path has to run in seconds, not minutes.",
         choice: {
           pick: "Cut on active followers at ~1M and push only into readers active in the last 7 days",
           instead: "The standard hybrid: a flat cut at ~10k total followers, applied to every follower regardless of whether they read.",
@@ -159,7 +195,7 @@ export const TWITTER: Diagram = {
       label: "Follow graph",
       sub: "forward + inverse + fetch-path set",
       kind: "database",
-      col: 2,
+      col: 3,
       row: 3,
       detail: {
         what: "Two views of the same edge, follower to followee and followee to follower, plus a small denormalised per-user set of the above-cut authors that user follows.",
@@ -182,7 +218,7 @@ export const TWITTER: Diagram = {
       label: "Timeline + recent caches",
       sub: "packed 8B ids: tl 800, author 200",
       kind: "database",
-      col: 2,
+      col: 3,
       row: 1,
       detail: {
         what: "Two id-only structures in the same cluster: one home timeline per user capped at ~800 ids, and one recent-tweets list per author capped at ~200 that the fetch path reads.",
@@ -201,41 +237,23 @@ export const TWITTER: Diagram = {
       },
     },
     {
-      id: "retweeters",
-      label: "Retweeter index",
-      sub: "cutover above ~1k retweets/min",
-      kind: "database",
-      col: 0,
-      row: 3,
-      detail: {
-        what: "Per original tweet, the list of accounts that retweeted it, plus a rate counter that trips the cascade cutover.",
-        why: "It serves attribution, three people you follow retweeted this, and it is the fallback distribution path once a cascade is large enough that fanning out individual retweets stops being affordable. Above the trip point later retweets become edges here instead of 500 timeline appends each.",
-        numbers: ["cutover at ~1,000 retweets/minute", "500k retweets x ~500 followers = 250M entries avoided", "~200k writes/s sustained for twenty minutes if not tripped"],
-        breaks:
-          "The trigger is only as good as its lag. Firing 90 seconds late has already let roughly 150k retweets through, which is most of the peak, so the measurement path has to be seconds not minutes.",
-        choice: {
-          pick: "Retweets fan out under the retweeter's own rules, with a rate-triggered cutover to an edge list",
-          instead: "Never fanning out a retweet of an above-cut original at all: the retweet is always an edge and the read-side merge always does the work.",
-          decider:
-            "250M pushed entries for one original at ~200k/s for twenty minutes, 2.5x the 100M the celebrity rule existed to avoid. The cutover bounds that by when the trigger fires rather than by how viral the tweet gets. Against it, the always-edge option adds an unconditional merge source for every reader, including the majority who follow nobody above the cut.",
-          flips:
-            "When every read is already doing an on-demand merge pass, so an extra source is nearly free and the rate counter is state with no payoff. Also when retweet rate cannot be measured within a few seconds.",
-        },
-      },
-    },
-    {
       id: "timeline-service",
       label: "Timeline service",
       sub: "fan-in, k-way merge, dedupe, rank",
       kind: "service",
-      col: 2,
+      col: 3,
       row: 2,
       detail: {
-        what: "The read path: prebuilt block, resolve fetch-path followees, one pipelined multi-get of their recent lists, merge by id, collapse retweet_of duplicates, filter and rank.",
-        why: "Only one step scales with the graph, the fan-in over above-cut followees, and everything else is bounded by the candidate window and the page. That is why the push cut is chosen to control read fan-in rather than write volume: at a 10k cut the varying term is ~38 fetches, at 1M it is 2 to 4.",
-        numbers: ["300ms p99 budget", "~58k timeline loads/s steady, ~120k/s peak", "3 keys pipelined is ~1ms; 38 keys done naively is ~20ms"],
+        what: "The read path: prebuilt block, resolve fetch-path followees, one pipelined multi-get of their recent lists, merge by id, collapse retweet_of duplicates, filter and rank. During a cascade the merge also draws on a per-original retweeter list held in the fan-out tier, once that original has crossed the ~1,000 retweets/minute cutover and stopped fanning out individually.",
+        why: "Only one step scales with the graph, the fan-in over above-cut followees, and everything else is bounded by the candidate window and the page. That is why the push cut is chosen to control read fan-in rather than write volume: at a 10k cut the varying term is ~38 fetches, at 1M it is 2 to 4. The cascade source is where the cutover's cost actually lands: it moves fan-out for a viral retweet off the write path and onto every reader's merge instead, and it is also where attribution comes from, surfacing the original once with the earliest in-network retweeter named.",
+        numbers: [
+          "300ms p99 budget",
+          "~58k timeline loads/s steady, ~120k/s peak",
+          "3 keys pipelined is ~1ms; 38 keys done naively is ~20ms",
+          "1 extra merge source while a cascade is tripped, collapsing to 1 entry per original",
+        ],
         breaks:
-          "A cold mailbox has nothing at step 1 and every followee becomes a fetch-path author: 150 recent-list reads instead of 3, tens of milliseconds pipelined and seconds if looped, arriving correlated when lapsed users return during a global event.",
+          "A cold mailbox has nothing at step 1 and every followee becomes a fetch-path author: 150 recent-list reads instead of 3, tens of milliseconds pipelined and seconds if looped, arriving correlated when lapsed users return during a global event. Without dedupe on retweet_of, one cascading original arrives from dozens of followees and takes most of a reader's 20 visible slots, which is immediately visible to a user during exactly the moment they are paying attention.",
         choice: {
           pick: "A k-way merge over an arbitrary list of sorted sources, deduplicated by retweet_of",
           instead: "A two-way union of the pushed timeline and the pulled celebrity lists.",
@@ -251,14 +269,19 @@ export const TWITTER: Diagram = {
       label: "Hydration + counters",
       sub: "20 bodies, tombstones, counters",
       kind: "service",
-      col: 1,
+      col: 2,
       row: 3,
       detail: {
-        what: "Turns the top 20 ranked ids into rendered tweets: bodies from the tweet cache, tombstone checks, blocks and mutes, and engagement counts summed across counter shards.",
-        why: "This is the only step that touches the tweet store, and it is where late binding pays off. A deleted tweet vanishes from every timeline at once because hydration finds a tombstone, without rewriting any of the 250M cached entries that point at it.",
-        numbers: ["~1.2M hydrations/s before caching", "99% cache hit leaves ~12k store reads/s", "~1B engagement increments/day, ~12k/s"],
+        what: "Turns the top 20 ranked ids into rendered tweets: bodies from the tweet cache, tombstone checks, blocks and mutes, engagement counts summed across counter shards, and media ids resolved into CDN URLs the client fetches directly.",
+        why: "This is the only step that touches the tweet store, and it is where late binding pays off. A deleted tweet vanishes from every timeline at once because hydration finds a tombstone, without rewriting any of the 250M cached entries that point at it. Media resolution happens here for the same reason bodies do: the row carries only a reference, media bytes never pass through this tier, so a card with a viral video costs the CDN and not the timeline path, and stays a fixed-size JSON response regardless of attachment size.",
+        numbers: [
+          "~1.2M hydrations/s before caching",
+          "99% cache hit leaves ~12k store reads/s",
+          "~1B engagement increments/day, ~12k/s",
+          "media hot in the CDN for 30 days",
+        ],
         breaks:
-          "A hot tweet concentrates load on exactly one cache key, so that key needs client-side replication across cache nodes rather than the usual single-owner hashing, and its counters need tens of thousands of increments per second spread across shards.",
+          "A hot tweet concentrates load on exactly one cache key, so that key needs client-side replication across cache nodes rather than the usual single-owner hashing, and its counters need tens of thousands of increments per second spread across shards. A deleted tweet's media can also outlive the tombstone at the CDN edge, so removal has to invalidate the CDN as well as the row.",
         choice: {
           pick: "Hydrate ids late from a cache fronting the tweet store, with counters sharded per tweet",
           instead: "Materialising bodies and counts into the timeline at fan-out time.",
@@ -274,7 +297,7 @@ export const TWITTER: Diagram = {
       label: "Search index tier",
       sub: "in-memory 7d + batch archive",
       kind: "database",
-      col: 0,
+      col: 1,
       row: 2,
       parent: "derived-group",
       detail: {
@@ -296,22 +319,22 @@ export const TWITTER: Diagram = {
     {
       id: "trending",
       label: "Trending pipeline",
-      sub: "top-K per geo, see #53",
+      sub: "top-K per geo",
       kind: "service",
-      col: 1,
+      col: 2,
       row: 2,
       parent: "derived-group",
       detail: {
-        what: "A streaming top-K over the same tweet events, holding bounded sketch and heap state per geo partition and refreshing the trend list every minute.",
-        why: "It is named here so it is not mistaken for a storage problem or a new pipeline. It is a ranking problem over an existing stream, and the right move in an interview is to say so in one sentence and go back to distribution.",
-        numbers: ["~200 geo partitions", "a few MB of state each", "refreshed every minute"],
+        what: "A streaming top-K over the same tweet events, holding bounded sketch and heap state per geo partition and refreshing the trend list once a minute.",
+        why: "It is named here so it is not mistaken for a storage problem or a new pipeline: it is a ranking problem over an existing stream, sharing nothing with fan-out or search but the event log it reads from.",
+        numbers: ["~200 geo partitions", "under 10MB of state per partition", "refreshed once a minute"],
         breaks:
           "Bot spam poisons hashtag counts, and counting alone cannot tell a botnet from a moment. Score by entity diversity, unique posters and networks and account age, and suppress low-diversity bursts.",
         choice: {
           pick: "Bounded sketch plus heap per geo partition, consuming the shared event stream",
           instead: "Exact counts per term in a datastore, queried on a schedule.",
           decider:
-            "State size against a stream at ~2.3k tweets/s carrying tens of thousands of distinct terms. Sketch and heap is a few MB per partition across ~200 partitions; exact counting is unbounded cardinality and a growing table for an answer that only needs the top few dozen. The full derivation is question 53.",
+            "State size against a stream at ~2.3k tweets/s carrying tens of thousands of distinct terms. Sketch and heap is a few MB per partition across ~200 partitions; exact counting is unbounded cardinality and a growing table for an answer that only needs the top few dozen.",
           flips:
             "A small corpus with a bounded term vocabulary, where exact counts are cheap and give a defensible answer to why something trended.",
         },
@@ -323,8 +346,8 @@ export const TWITTER: Diagram = {
       id: "e2",
       from: "tweet-service",
       to: "tweet-store",
+      tier: "hot",
       label: "durable row, then ack",
-      animated: true,
       detail: {
         what: "The one write in this design that must not be lost: the ~1KB tweet row, partitioned by author_id.",
         why: "This is the only strongly consistent step. Everything after it is a derived cache with its own staleness, so the correctness of the whole product rests on this single write and the fact that the acknowledgement follows it.",
@@ -334,25 +357,11 @@ export const TWITTER: Diagram = {
       },
     },
     {
-      id: "e3",
-      from: "tweet-service",
-      to: "media-cdn",
-      label: "refs only, bytes uploaded",
-      dashed: true,
-      detail: {
-        what: "Media ids recorded on the tweet row after the bytes have already gone to object storage.",
-        why: "Keeping bytes off the write path is what keeps the post request fixed-cost. A 2MB video and a text-only tweet take the same journey through the tweet service because both are ~1KB of row by the time they get there.",
-        numbers: ["32B of media refs on the row", "~500KB average post-transcode", "~25TB/day into object storage"],
-        breaks:
-          "An orphaned upload whose tweet never lands, or a row referencing an object that transcoding has not finished with, so hydration renders a broken card.",
-      },
-    },
-    {
       id: "e4",
       from: "tweet-service",
       to: "event-stream",
+      tier: "hot",
       label: "publish after ack",
-      animated: true,
       detail: {
         what: "The tweet event, published only once the row is durable and the poster has been acknowledged.",
         why: "This ordering is the whole shape of the design. Publishing after the ack means distribution, indexing and trending are all downstream of a fact rather than a prediction, so any of them can fail, be retried, or be rebuilt from the log without consulting the write path.",
@@ -365,8 +374,8 @@ export const TWITTER: Diagram = {
       id: "e5",
       from: "event-stream",
       to: "fanout",
+      tier: "hot",
       label: "tweet event",
-      animated: true,
       detail: {
         what: "Tweet events consumed by the distribution tier.",
         why: "Fan-out is a consumer like any other, which is what lets it lag under load without touching posting. Under a correlated spike the mitigation is to tighten the activity window and shed readers, never to drop tweets.",
@@ -379,8 +388,8 @@ export const TWITTER: Diagram = {
       id: "e6",
       from: "fanout",
       to: "follow-graph",
+      tier: "control",
       label: "followers, active only",
-      dashed: true,
       detail: {
         what: "Reading the author's follower list from the inverse index and intersecting it with the recently-active set.",
         why: "The activity filter is applied here rather than at read time because a push into a mailbox nobody opens is pure waste. With ~350M of 500M accounts active weekly it only removes ~30% of edges, so take it for the read-path effect on the cut rather than for the write saving.",
@@ -393,8 +402,8 @@ export const TWITTER: Diagram = {
       id: "e7",
       from: "fanout",
       to: "timeline-caches",
+      tier: "hot",
       label: "append 8-byte id",
-      animated: true,
       detail: {
         what: "The push itself: appending the tweet id to each surviving follower's timeline block, plus one unconditional append to the author's own recent list.",
         why: "The author append happens for every tweet regardless of the cut, because it is the fetch path's only source. Above the cut it is the entire distribution: one write, one cache key, shared by 100M followers.",
@@ -404,23 +413,10 @@ export const TWITTER: Diagram = {
       },
     },
     {
-      id: "e8",
-      from: "fanout",
-      to: "retweeters",
-      label: "retweet edge + rate",
-      dashed: true,
-      detail: {
-        what: "Recording every retweet against its original and bumping the per-original rate counter that trips the cutover.",
-        why: "This is the measurement that decides whether the next retweet fans out at all. It has to be cheap and it has to be current, because the whole value of the cutover is bounded by how quickly the trigger fires.",
-        numbers: ["trips above ~1,000 retweets/minute", "~150k retweets slip through a 90s lag"],
-        breaks:
-          "The counter is itself a hot key during exactly the cascade it exists to detect, so it needs the same sharding treatment as engagement counts.",
-      },
-    },
-    {
       id: "e9",
       from: "event-stream",
       to: "search",
+      tier: "data",
       label: "docs, searchable in 10s",
       detail: {
         what: "Tweet events tokenised into documents and appended to the hot index in descending id order.",
@@ -434,12 +430,12 @@ export const TWITTER: Diagram = {
       id: "e10",
       from: "event-stream",
       to: "trending",
+      tier: "control",
       label: "counts per geo partition",
-      dashed: true,
       detail: {
         what: "The same events feeding a bounded sketch and heap per geographic partition.",
-        why: "Trending is drawn as a third consumer rather than a component of search or of the feed, because it shares nothing with them but the stream. Question 53 is where the top-K algorithm is actually derived.",
-        numbers: ["~200 partitions", "refreshed every minute"],
+        why: "Trending is a third consumer rather than a component of search or of the feed, because it shares nothing with them but the stream it reads.",
+        numbers: ["~200 partitions", "refreshed once a minute"],
         breaks:
           "The stream carries spam as faithfully as it carries news, so suppression has to happen inside this consumer, not upstream.",
       },
@@ -448,8 +444,8 @@ export const TWITTER: Diagram = {
       id: "e11",
       from: "timeline-service",
       to: "follow-graph",
+      tier: "control",
       label: "fetch-path set, 2 to 4",
-      dashed: true,
       detail: {
         what: "Step 2 of the read path: one small read returning the above-cut authors this reader follows.",
         why: "This is maintained rather than computed so that a timeline load never walks 150 edges and 150 follower counts inside a 300ms budget. It is the number that decides how wide the next hop is.",
@@ -462,8 +458,8 @@ export const TWITTER: Diagram = {
       id: "e12",
       from: "timeline-service",
       to: "timeline-caches",
+      tier: "hot",
       label: "prebuilt block + fan-in",
-      animated: true,
       detail: {
         what: "One read of the reader's packed timeline block, then one pipelined multi-get of the recent lists for their fetch-path authors.",
         why: "The fan-in must be a single pipelined round trip, never N sequential ones. Throughput is not the failure mode; the failure mode is read latency becoming a function of how many famous accounts a user happened to follow, which is not a property you want inside a p99.",
@@ -473,24 +469,11 @@ export const TWITTER: Diagram = {
       },
     },
     {
-      id: "e13",
-      from: "retweeters",
-      to: "timeline-service",
-      label: "cascade merge source",
-      detail: {
-        what: "During a cascade, the read-side merge consults the retweeter index for originals that stopped fanning out.",
-        why: "This is where the cutover's cost lands: it moves the cascade off the write path and onto every reader's merge for the duration. It is also where attribution comes from, surfacing the original once with the earliest in-network retweeter named.",
-        numbers: ["one extra source while the trigger is tripped", "collapses to one entry per original"],
-        breaks:
-          "Without dedupe on retweet_of, the same original arrives from dozens of followees and takes most of a reader's 20 visible slots, which is immediately visible to a user during exactly the moment they are paying attention.",
-      },
-    },
-    {
       id: "e14",
       from: "timeline-service",
       to: "hydrator",
+      tier: "hot",
       label: "top 20 ids after ranking",
-      animated: true,
       detail: {
         what: "The ranked ids handed on for hydration, after merge, dedupe, blocks, mutes and scoring.",
         why: "Ranking runs here rather than at write time because the strongest signals, engagement in the last hour, do not exist when the tweet is distributed. Caching the unranked candidate set instead of the ranked result means a model change invalidates nothing.",
@@ -503,6 +486,7 @@ export const TWITTER: Diagram = {
       id: "e15",
       from: "hydrator",
       to: "tweet-store",
+      tier: "data",
       label: "bodies on cache miss",
       detail: {
         what: "Fetching tweet bodies for the ids that missed the tweet cache.",
@@ -513,17 +497,31 @@ export const TWITTER: Diagram = {
       },
     },
     {
-      id: "e16",
-      from: "hydrator",
-      to: "media-cdn",
-      label: "CDN URLs on the card",
-      dashed: true,
+      id: "e1",
+      from: "poster",
+      to: "tweet-service",
+      tier: "hot",
+      label: "POST tweet",
       detail: {
-        what: "Resolving media references into CDN URLs the client fetches directly.",
-        why: "The bytes never pass through this tier. Hydration returns a card with edge URLs, so a viral video costs the CDN and not the timeline path, which stays a fixed-size JSON response regardless of attachments.",
-        numbers: ["media hot in the CDN for 30 days"],
+        what: "The post request itself: text, optional media ids already uploaded, and the client's idempotency key.",
+        why: "Everything the write path is optimised for starts here: the poster must not wait on distribution, so this hop and the durable write behind it are the only latency the author actually feels.",
+        numbers: ["2.3k tweets/s steady, ~50k/s peak", "~1KB request body"],
         breaks:
-          "A deleted tweet's media can outlive the tombstone at the edge, so removal has to invalidate the CDN as well as the row.",
+          "A retried post without an idempotency key creates a second tweet rather than returning the first, which is indistinguishable from a double-post bug once it reaches the timeline.",
+      },
+    },
+    {
+      id: "e17",
+      from: "hydrator",
+      to: "reader",
+      tier: "hot",
+      label: "20 rendered cards",
+      detail: {
+        what: "The finished response: 20 hydrated tweets with bodies, media CDN URLs and counts, returned for one page of the reader's timeline.",
+        why: "This is the arrow the whole read path exists to serve. Everything upstream, the cut, the merge, the rank, is spent so this response is a fixed-size JSON payload regardless of how many people the reader follows or how viral the tweets in it are.",
+        numbers: ["20 cards per page", "300ms p99 budget end to end"],
+        breaks:
+          "A page that mixes cached and freshly-hydrated cards inconsistently reads as a broken feed, which is why hydration always runs over the whole page rather than only over cache misses.",
       },
     },
   ],

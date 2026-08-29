@@ -10,12 +10,30 @@ export const AUTH_SERVICE: Diagram = {
     shape:
       "Two paths with a 100x gap between them: a slow, stateful login path that is allowed to cost 170ms, and a stateless verification path that runs 500k times a second in-process with no call back to the issuer.",
     beats: [
-      "Derive the asymmetry before drawing anything. 50M DAU at ~1.5 authentications a day is ~5k logins/s at peak; the same users making ~200 authenticated API calls a day is ~500k verifications/s. Any design that puts a network call on the verification path converts a 5k/s service into a 500k/s one and makes it a synchronous dependency of every request on the platform.",
-      "So the login path is deliberately expensive. Authorization-code with PKCE, an identity lookup by email_hash, then an isolated argon2id pool that costs 75ms and 64MB on purpose, then a second factor, then a one-time code redeemed on the back channel for three artefacts: a ~10 minute access JWT, an OIDC id_token, and an opaque rotating refresh token.",
-      "The verification path never leaves the process. A resource service reads the kid from the token header, finds the matching public key in its JWKS cache refreshed every 5 minutes, verifies an Ed25519 signature in ~40µs, checks exp, iss and aud, and calls nobody. That is ~20 cores spread across the entire fleet, against ~250 extra auth instances if it introspected instead.",
-      "The price is the whole question. A self-contained signed token is verifiable everywhere with zero network calls, which is precisely why it is popular and precisely why you cannot revoke it. Buy revocation back in cheap pieces rather than reintroducing a lookup: a short TTL bounds the worst case, a rotating refresh token is checked on every use at ~2k/s instead of 500k/s, and a denylist of revoked jti values plus a per-user tokens_valid_after timestamp is pushed to verifiers rather than polled by them.",
-      "Authorization stays out of the token. The token proves who; the resource service decides what, against a policy engine holding roles and permissions. Coarse role claims only, because a permission list in the token is both stale the moment a role changes and ~3.2 Gbps of Authorization header at 500k/s.",
-      "Then say the residual out loud. Revocation lands in under a second when the pub/sub feed is healthy and degrades to the 10 minute access-token TTL when it is not, and the feed fails open, so the guarantee lapses silently and only a per-verifier lag gauge notices. That number is the SLO, not a footnote.",
+      {
+        text: "Derive the asymmetry first. 50M DAU at ~1.5 authentications a day is ~5k logins/s at peak; the same users making ~200 authenticated API calls a day is ~500k verifications/s. Any design that puts a network call on the verification path converts a 5k/s service into a 500k/s one and makes it a synchronous dependency of every request on the platform.",
+        lights: ["auth-service", "resource-services", "e1", "e9"],
+      },
+      {
+        text: "So the login path is deliberately expensive. Authorization-code with PKCE, an identity lookup by email_hash, then an isolated argon2id pool that costs 75ms and 64MB on purpose, then a second factor, then a one-time code redeemed on the back channel for three artefacts: a ~10 minute access JWT, an OIDC id_token, and an opaque rotating refresh token.",
+        lights: ["auth-service", "identity-db", "hashing-pool", "mfa", "token-mint", "e2", "e3", "e4", "e5", "e8"],
+      },
+      {
+        text: "The verification path never leaves the process. A resource service reads the kid from the token header, finds the matching public key in its JWKS cache refreshed every 5 minutes, verifies an Ed25519 signature in ~40µs, checks exp, iss and aud, and calls nobody. That is ~20 cores spread across the entire fleet, against ~250 extra auth instances if it introspected instead.",
+        lights: ["verify-zone", "resource-services", "jwks", "e13"],
+      },
+      {
+        text: "The price is the whole question. A self-contained signed token is verifiable everywhere with zero network calls, which is precisely why it is popular and precisely why you cannot revoke it. Buy revocation back in cheap pieces rather than reintroducing a lookup: a short TTL bounds the worst case, a rotating refresh token is checked on every use at ~2k/s instead of 500k/s, and a denylist of revoked jti values plus a per-user tokens_valid_after timestamp is pushed to verifiers rather than polled by them.",
+        lights: ["token-mint", "session-store", "revocation-feed", "resource-services", "e7", "e11", "e12", "e14"],
+      },
+      {
+        text: "Authorization stays out of the token. The token proves who; the resource service decides what, against a policy engine holding roles and permissions. Coarse role claims only, because a permission list in the token is both stale the moment a role changes and ~3.2 Gbps of Authorization header at 500k/s.",
+        lights: ["resource-services", "policy-engine", "e15"],
+      },
+      {
+        text: "The residual left over is the actual SLO. Revocation lands in under a second when the pub/sub feed is healthy and degrades to the 10 minute access-token TTL when it is not, and the feed fails open, so the guarantee lapses silently and only a per-verifier lag gauge notices.",
+        lights: ["revocation-feed", "resource-services", "e14"],
+      },
     ],
     crux:
       "Revocation is what breaks the elegant stateless story. The token is the authority and nothing consults you again until it expires, so every fix reintroduces exactly the shared, network-visible state that statelessness existed to remove. There is no clean escape, only a deliberate position on the spectrum and an honest number for the staleness it leaves.",
@@ -230,7 +248,7 @@ export const AUTH_SERVICE: Diagram = {
       detail: {
         what: "The public halves of the signing keys, indexed by kid, served from a CDN and cached in-process by every verifier.",
         why: "This is what makes local verification possible at all: the verifier holds the key rather than asking for a decision. It is also the hidden single point of failure for the whole platform, because a verifier that cannot resolve a kid rejects every request.",
-        numbers: ["refreshed every 5 minutes, jittered", "retired keys kept published for a full token lifetime"],
+        numbers: ["refreshed every 5 minutes, jittered", "retired keys kept published ≥ 10 min (one token lifetime)"],
         breaks:
           "A region restarting after a deploy sends thousands of simultaneous fetches, and a cold cache with an unreachable endpoint means 401 everywhere. Never expire the cache hard, serve stale, and bake a bootstrap key set into the image.",
         choice: {
@@ -301,7 +319,7 @@ export const AUTH_SERVICE: Diagram = {
       detail: {
         what: "Evaluates whether this subject may perform this action on this resource, at the resource service, against a cached role and permission set.",
         why: "The token proves who and the resource service decides what. Baking permissions into the token makes a role downgrade invisible until expiry and inflates every request, so the token carries at most one or two coarse role claims and the real decision happens here.",
-        numbers: ["sub-microsecond against a cached role set", "~3.2 Gbps of headers avoided by not embedding permissions"],
+        numbers: ["~1µs against a cached role set", "~3.2 Gbps of headers avoided by not embedding permissions"],
         breaks:
           "A contractor downgraded from admin to viewer mid-session keeps the old claim if you embedded it. With the check here the downgrade takes effect on the next request, which is the whole reason it lives here.",
         choice: {
@@ -367,7 +385,7 @@ export const AUTH_SERVICE: Diagram = {
       detail: {
         what: "A successful credential comparison escalating to the second factor rather than issuing anything.",
         why: "The password is treated as breached until a second factor says otherwise, so this hop always happens for enrolled users and happens on device mismatch even when the password is correct.",
-        numbers: ["~200ms of WebAuthn ceremony", "human TOTP entry excluded from the SLO"],
+        numbers: ["~200ms of WebAuthn ceremony", "human TOTP entry (~15s) excluded from the SLO"],
         breaks:
           "A user with no factor enrolled skips straight through, so the enrolled share, currently ~30%, is the real ceiling on what this step protects.",
       },
@@ -497,7 +515,7 @@ export const AUTH_SERVICE: Diagram = {
       detail: {
         what: "Each verifier pulling the key set on a jittered 5 minute schedule and holding it in process.",
         why: "It is a pull rather than a push because keys change every 90 days and staleness is harmless: a retired key's tokens have already expired. The verifier never asks about a specific token, only for the keys.",
-        numbers: ["refreshed every 5 minutes", "stale-while-revalidate, never a hard expiry"],
+        numbers: ["refreshed every 5 minutes", "0 hard TTL, only stale-while-revalidate"],
         breaks:
           "This path fails closed. A verifier that cannot resolve a kid rejects every request, which is why the cache serves stale indefinitely and a bootstrap set ships in the image.",
       },
@@ -525,7 +543,7 @@ export const AUTH_SERVICE: Diagram = {
       detail: {
         what: "The authorization check itself, run at the resource service against a cached role and permission set once the token has been verified.",
         why: "Authentication and authorization are separated on purpose: the token is a cached identity claim minted minutes ago, while permissions change during a session and must be read fresh enough to notice.",
-        numbers: ["sub-microsecond against a cached role set", "at most 1 to 2 coarse role claims in the token"],
+        numbers: ["~1µs against a cached role set", "at most 1 to 2 coarse role claims in the token"],
         breaks:
           "Bounded staleness is fine for reading a dashboard and not fine for a wire transfer. High-consequence boundaries need a synchronous check that does not inherit the feed's fail-open default, and sorting actions between the two paths is done by hand.",
       },

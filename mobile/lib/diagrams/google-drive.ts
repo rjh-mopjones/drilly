@@ -10,12 +10,30 @@ export const GOOGLE_DRIVE: Diagram = {
     shape:
       "The file is not the unit. Every file is sliced into 4MB chunks named by the SHA-256 of their bytes, so sync becomes a conversation about hashes rather than a transfer of files, and the bytes only move for the chunks nobody already holds.",
     beats: [
-      "The client is where the difficulty lives, and it is one program rather than a tier: a filesystem watcher, a local index holding three trees, and a chunker, all in one process on hardware you do not control. Diffing against the third tree, the last state at which local and server were known to agree, is the only way to tell 'I deleted this' from 'they created this'.",
-      "Chunking and hashing turn a file into an ordered list of 4MB SHA-256 hashes. That one move buys delta sync, resumable upload and cross-user dedup at the same time, because a chunk that two users happen to share collides by construction rather than because anybody built a dedup feature.",
-      "Upload is a handshake, not a transfer. The client sends the hash list, the server answers with only the subset it lacks, and the client uploads that. A 1GB corporate installer is 250 chunks of which perhaps 10 are user-specific, so roughly 40MB crosses the wire instead of 1GB.",
-      "Metadata and bytes are deliberately different systems. Metadata is small, mutable, transactional and needs ordering, at roughly 18PB replicated; chunks are large, immutable and need durability, at roughly 11EB. Two orders of magnitude apart in size and opposite in every access property, so they get separate stores.",
-      "Commit is a compare and swap on the parent version, and that single operation is also the conflict detector. It writes the version row, increments chunk refcounts and appends one journal entry in one transaction. The ordering is not negotiable: chunks durable, then commit, then notify.",
-      "Convergence runs off the journal, an append-only log per namespace with a monotonic id. A device stores a cursor and asks for everything after it, so a sync costs O(changes) rather than O(files), which is the whole reason a 10M-file namespace is syncable at all. The pub/sub bus and the socket fleet above it only make that poll arrive sooner, which is exactly why they are allowed to lose messages.",
+      {
+        text: "The client is where the difficulty lives, and it is one program rather than a tier: a filesystem watcher, a local index holding three trees, and a chunker, all in one process on hardware you do not control. Diffing against the third tree, the last state at which local and server were known to agree, is the only way to tell 'I deleted this' from 'they created this'.",
+        lights: ["sync-agent", "watcher", "three-tree", "chunker"],
+      },
+      {
+        text: "Chunking and hashing turn a file into an ordered list of 4MB SHA-256 hashes. That one move buys delta sync, resumable upload and cross-user dedup at the same time, because a chunk that two users happen to share collides by construction rather than because anybody built a dedup feature.",
+        lights: ["chunker"],
+      },
+      {
+        text: "Upload is a handshake, not a transfer. The client sends the hash list, the server answers with only the subset it lacks, and the client uploads that. A 1GB corporate installer is 256 chunks of which perhaps 10 are user-specific, so roughly 40MB crosses the wire instead of 1GB.",
+        lights: ["chunker", "meta-svc", "e4", "e5"],
+      },
+      {
+        text: "Metadata and bytes are deliberately different systems. Metadata is small, mutable, transactional and needs ordering, at roughly 18PB replicated; chunks are large, immutable and need durability, at roughly 11EB. Two orders of magnitude apart in size and opposite in every access property, so they get separate stores.",
+        lights: ["metadata-db", "object-store", "chunk-index"],
+      },
+      {
+        text: "Commit is a compare and swap on the parent version, and that single operation is also the conflict detector. It writes the version row, increments chunk refcounts and appends one journal entry in one transaction. The ordering is not negotiable: chunks durable, then commit, then notify.",
+        lights: ["meta-svc", "metadata-db", "journal", "e9", "e11", "e12"],
+      },
+      {
+        text: "Convergence runs off the journal, an append-only log per namespace with a monotonic id. A device stores a cursor and asks for everything after it, so a sync costs O(changes) rather than O(files), which is the whole reason a 10M-file namespace is syncable at all. The pub/sub bus and the socket fleet above it only make that poll arrive sooner, which is exactly why they are allowed to lose messages.",
+        lights: ["journal", "pubsub", "notify", "devices", "e14", "e15", "e16"],
+      },
     ],
     crux:
       "The system cannot read the files. It sees opaque bytes with no notion of a line or a paragraph, so there is no merge function, so two devices that edited the same file offline genuinely cannot be reconciled. The design's job is to make conflicts rare and then hand the survivors to a human as a second file on disk.",
@@ -34,7 +52,7 @@ export const GOOGLE_DRIVE: Diagram = {
       row: 1,
       detail: {
         what: "One program on the user's laptop or phone: the filesystem watcher, the three-tree diff, the local index that holds those trees plus the journal cursor, and the chunker that hashes and uploads.",
-        why: "Drawn as one service made of stages rather than as several peers, because that is what it is. It ships as a single binary, the stages share memory and a process lifetime, and a crash takes all of them together. Nearly all the difficulty of the product lives in here, and it is the one component running on hardware you do not control, which is why the server treats everything it says as a claim rather than a fact. The local index — the three trees, each file's chunk list, and the journal cursor — has to survive a reboot too, or the synced tree and cursor are gone and the client falls back to a full tree diff against the server manifest, the expensive path the whole design exists to avoid.",
+        why: "It is one service made of stages rather than several peers, because that is what it is. It ships as a single binary, the stages share memory and a process lifetime, and a crash takes all of them together. Nearly all the difficulty of the product lives in here, and it is the one component running on hardware you do not control, which is why the server treats everything it says as a claim rather than a fact. The local index — the three trees, each file's chunk list, and the journal cursor — has to survive a reboot too, or the synced tree and cursor are gone and the client falls back to a full tree diff against the server manifest, the expensive path the whole design exists to avoid.",
         numbers: [
           "~2.5 devices per user",
           "one cursor per namespace",
@@ -43,6 +61,14 @@ export const GOOGLE_DRIVE: Diagram = {
         ],
         breaks:
           "It is the only part of the system that ever holds a whole file, so every bug here shows up as user data that silently failed to sync. Nothing server-side can see that it happened. Losing or corrupting the local index destroys the synced tree and cursor together, forcing that same full diff and risking a false 'everything deleted' read if the local tree is not fully mounted.",
+        choice: {
+          pick: "One client binary running watcher, diff and chunker as in-process stages",
+          instead: "Split the client into separate cooperating processes, or move the diff and chunking onto the server.",
+          decider:
+            "Where the bytes and the file handles already are. Every stage needs the local filesystem, so splitting into processes buys isolation at the cost of IPC on every one of a user's ~10k files, and moving the diff server-side means shipping whole files across a network connection you do not trust to stay up, for a decision that only needs metadata.",
+          flips:
+            "A managed device fleet where a privileged watcher process must be isolated from the unprivileged uploader for security reasons, at which point the IPC cost is worth paying.",
+        },
       },
     },
     {
@@ -55,11 +81,8 @@ export const GOOGLE_DRIVE: Diagram = {
       parent: "sync-agent",
       detail: {
         what: "The stage that learns a local file changed: OS change notifications for latency, plus a periodic full rescan of the tree as the backstop.",
-        why: "It is the only input to the whole upload path, and it is unreliable by construction. Separating it from the diff matters because the two fail differently: the watcher loses events, the diff misreads the events it gets.",
-        numbers: [
-          "full rescan of a 500k-file tree is minutes of disk I/O",
-          "rescan on a timer and after every reconnect",
-        ],
+        why: "It is the only input to the whole upload path, and it is unreliable by construction. Separating it from the diff matters because the two fail differently: the watcher loses events, the diff misreads the events it gets. The rescan reruns on a timer and again after every reconnect, not only from OS events.",
+        numbers: ["full rescan of a 500k-file tree is minutes of disk I/O"],
         breaks:
           "All three major OS watchers coalesce under load and drop events, and none guarantees a rename arrives as a rename, so a folder rename can surface as 10k deletes followed by 10k creates. Version history breaks and the bytes re-upload.",
         choice: {
@@ -83,8 +106,8 @@ export const GOOGLE_DRIVE: Diagram = {
       parent: "sync-agent",
       detail: {
         what: "Decides what actually changed by diffing three views of the folder: the local filesystem now, the server state as of the cursor, and `synced`, the last state at which the two were known to agree.",
-        why: "This is the stage that makes the diff decidable. Local against synced yields local changes, server against synced yields remote changes, a path in both is a conflict, a path in neither is untouched. With only local and server you cannot distinguish 'I deleted this' from 'they created this', which is where nearly every sync bug in this class comes from.",
-        numbers: ["3 trees, not 2", "a path in both diffs is a conflict", "renames matched on content hash + size"],
+        why: "This is the stage that makes the diff decidable. Local against synced yields local changes, server against synced yields remote changes, a path in both is a conflict, a path in neither is untouched. With only local and server you cannot distinguish 'I deleted this' from 'they created this', which is where nearly every sync bug in this class comes from. Renames are matched by content hash and size rather than by path.",
+        numbers: ["3 trees, not 2"],
         breaks:
           "Run against a partially-populated local tree, say an external drive that has not mounted, and the diff concludes the user deleted everything. The client has to refuse when the root is missing or the file count drops past a threshold, and ask instead.",
         choice: {
@@ -136,11 +159,7 @@ export const GOOGLE_DRIVE: Diagram = {
       detail: {
         what: "Answers the have_blocks handshake with the hashes it lacks, then applies the commit as a compare and swap on the parent version and publishes the result.",
         why: "It is the only component that decides anything. Every other box either moves bytes or carries news, so all ordering, all authorisation and all conflict detection have to live in the one place that can run a transaction.",
-        numbers: [
-          "commit carries (file_id, parent_version, chunk_list)",
-          "409 returns the current version",
-          "~100k conflict copies/day",
-        ],
+        numbers: ["409 returns the current version", "~100k conflict copies/day"],
         breaks:
           "Ordering. Commit before the chunks are durable and you publish a version pointing at bytes nobody has; notify before commit and a device is told about a version that does not exist yet.",
         choice: {
@@ -218,7 +237,7 @@ export const GOOGLE_DRIVE: Diagram = {
       detail: {
         what: "The pub/sub topic the metadata service publishes to on commit, and the notify fleet subscribes to. Carries `{ namespace_id, jid }` and nothing else.",
         why: "It decouples the transaction from the fan-out. The commit path must not wait on, or fail because of, however many sockets happen to be open for a 500-member shared folder, and the socket fleet must be able to scale and restart without the metadata tier knowing. Sending the id rather than the change is what allows a 100-file refactor to collapse into one message per namespace instead of 100 fanned to 50 collaborators.",
-        numbers: ["~12k messages/s steady, ~60k/s peak", "payload is an id, not a change"],
+        numbers: ["~12k messages/s steady, ~60k/s peak"],
         breaks:
           "It is fire-and-forget on purpose, so a partition or a slow consumer silently drops events and every affected device is stale until its next poll. That is only survivable because the poll exists; treat this as durable delivery and you have hidden a correctness bug behind a metric.",
         choice: {
@@ -240,11 +259,8 @@ export const GOOGLE_DRIVE: Diagram = {
       row: 2,
       detail: {
         what: "Receives the chunks the handshake said were missing, verifies the bytes actually hash to the claimed key, writes them to the object store and registers them in the chunk index.",
-        why: "Chunks are immutable and content-addressed, so this path needs no transactions and no ordering at all. That is exactly what lets uploads run fully parallel and lets a partial upload survive a process restart or resume on a different device.",
-        numbers: [
-          "per-chunk acks, resume from the last acked chunk",
-          "~10TB/day net new, ~30TB/day after 3x replication",
-        ],
+        why: "Chunks are immutable and content-addressed, so this path needs no transactions and no ordering at all. That is exactly what lets uploads run fully parallel, and per-chunk acks let a partial upload survive a process restart or resume on a different device from the last acked chunk.",
+        numbers: ["~10TB/day net new, ~30TB/day after 3x replication"],
         breaks:
           "Trusting a client's claim to already hold a hash turns that hash into an access token, so anyone who obtains one can attach another user's chunk to their own file and read it.",
         choice: {
@@ -368,7 +384,7 @@ export const GOOGLE_DRIVE: Diagram = {
       detail: {
         what: "The user's other machines and every collaborator's machine. Each runs the identical sync agent drawn above, with its own local index and its own cursor per namespace.",
         why: "They are drawn explicitly because they set the constraints the rest answers to: a week offline is the baseline case, not the edge case, and they are the reason convergence has to be pull-driven rather than push-driven. The agent above is just the one that happened to write.",
-        numbers: ["~2.5 devices per user", "downloads only the chunks the local tree lacks", "a 4MB edit to a 200MB file costs 4MB"],
+        numbers: ["~2.5 devices per user", "a 4MB edit to a 200MB file costs 4MB"],
         breaks:
           "A full tree diff against a partially-populated local tree, say an external drive that has not mounted, concludes the user deleted everything, so the client must refuse and ask instead.",
       },
@@ -383,7 +399,7 @@ export const GOOGLE_DRIVE: Diagram = {
       detail: {
         what: "Decrements refcounts when versions expire, deletes refcount-zero chunks after a grace period, and periodically recomputes reachability from the metadata store.",
         why: "Chunks are written before any version references them and outlive every version that did, so nothing else in the design has a reason to delete a byte. Without this the store only grows.",
-        numbers: ["7-day grace period before deletion", "weekly mark-and-sweep against the metadata store"],
+        numbers: ["7-day grace period before deletion", "mark-and-sweep runs once a week against the metadata store"],
         breaks:
           "Deleting on a drifted refcount destroys a chunk that live versions still reference, and content addressing means every file sharing those bytes breaks at once.",
         choice: {
@@ -402,12 +418,11 @@ export const GOOGLE_DRIVE: Diagram = {
       id: "e1",
       from: "watcher",
       to: "three-tree",
+      tier: "hot",
       label: "changed paths",
-      animated: true,
       detail: {
         what: "Paths the OS reported as changed, handed to the diff to be interpreted.",
-        why: "The watcher reports events; only the diff can say what they mean. Keeping the hand-off explicit is what lets the diff treat an incoming event as a hint rather than as truth, and re-derive the answer from the trees.",
-        numbers: ["events coalesce under load", "rescan supplies what the events missed"],
+        why: "The watcher reports events; only the diff can say what they mean. Keeping the hand-off explicit is what lets the diff treat an incoming event as a hint rather than as truth, and re-derive the answer from the trees. Events coalesce under load and the periodic rescan supplies what they missed.",
         breaks:
           "If the watcher missed the event this edge never fires, and the file is silently unsynced until the next full rescan closes the window.",
       },
@@ -416,12 +431,11 @@ export const GOOGLE_DRIVE: Diagram = {
       id: "e3",
       from: "three-tree",
       to: "chunker",
+      tier: "hot",
       label: "changed files to hash",
-      animated: true,
       detail: {
         what: "The set of files the diff decided genuinely changed locally, handed to the chunker.",
-        why: "The diff runs on metadata and costs nothing; chunking reads every byte of the file. Deciding what changed before touching bytes is what keeps an idle folder free and a 10k-file rename cheap.",
-        numbers: ["local vs synced yields local changes", "a rename ideally moves no bytes at all"],
+        why: "The diff runs on metadata and costs nothing; chunking reads every byte of the file. Deciding what changed before touching bytes is what keeps an idle folder free, and a rename recognised as a rename ideally moves no bytes at all.",
         breaks:
           "A rename the diff failed to recognise arrives here as an unrelated delete plus create, so the whole file re-hashes and re-uploads and its version history restarts.",
       },
@@ -449,7 +463,7 @@ export const GOOGLE_DRIVE: Diagram = {
       offset: 60,
       detail: {
         what: "The subset of hashes the server does not hold, returned to the client.",
-        why: "This reply is where the dedup saving is actually realised. In a corporate tenant a 1GB installer collapses to about 40MB of transfer because 240 of its 250 chunks already exist from prior uploads.",
+        why: "This reply is where the dedup saving is actually realised. In a corporate tenant a 1GB installer collapses to about 40MB of transfer because 246 of its 256 chunks already exist from prior uploads.",
         numbers: ["~30% dedup consumer, 50 to 80% corporate", "1GB installer to ~40MB transferred"],
         breaks:
           "Answering it honestly for chunks the user never uploaded leaks information: chunk existence becomes an oracle for 'someone else has this file'.",
@@ -463,8 +477,8 @@ export const GOOGLE_DRIVE: Diagram = {
       label: "PUT missing chunks",
       detail: {
         what: "The bytes of the missing chunks, uploaded in parallel with a per-chunk ack.",
-        why: "Chunks are immutable and unreferenced until commit, so they can go up in any order, from any device, across any number of connections. That is what makes a 10GB upload over flaky mobile resumable.",
-        numbers: ["resume from the last acked chunk", "4MB bounds a single retransmit"],
+        why: "Chunks are immutable and unreferenced until commit, so they can go up in any order, from any device, across any number of connections, resuming from the last acked chunk. That is what makes a 10GB upload over flaky mobile resumable.",
+        numbers: ["4MB bounds a single retransmit"],
         breaks:
           "Chunks uploaded and never committed are garbage until GC collects them, so an abandoned upload leaks storage for the grace period.",
       },
@@ -506,8 +520,8 @@ export const GOOGLE_DRIVE: Diagram = {
       offset: 40,
       detail: {
         what: "The commit carrying file_id, parent_version and the full ordered chunk list, sent only once every chunk is durable.",
-        why: "This is the atomic step and the only place a conflict can be detected. Sending the parent version rather than just the new state is what turns concurrent editing into a detectable event instead of a silent overwrite.",
-        numbers: ["applied only if current version still equals parent_version", "409 returns the current version"],
+        why: "This is the atomic step and the only place a conflict can be detected. Sending the parent version rather than just the new state is what turns concurrent editing into a detectable event instead of a silent overwrite: it applies only if the current version still equals the parent version.",
+        numbers: ["409 returns the current version"],
         breaks:
           "A failed compare and swap is the conflict, and the loser's bytes become a sibling conflict copy named for the losing device, because merging two divergent edits to a binary format produces corruption rather than a merge.",
       },
@@ -590,8 +604,8 @@ export const GOOGLE_DRIVE: Diagram = {
       label: "push over WebSocket",
       detail: {
         what: "The push telling connected devices to pull the journal now rather than at their next poll.",
-        why: "It exists purely to cut the gap between commit and convergence. Because it decides nothing, it is allowed to be lossy and unordered, and a dropped message costs latency rather than correctness.",
-        numbers: ["carries an id, not a change", "a disconnected device gets nothing and does not need to"],
+        why: "It exists purely to cut the gap between commit and convergence. Because it decides nothing, it is allowed to be lossy and unordered, and a dropped message costs latency rather than correctness. A disconnected device simply gets nothing and does not need to.",
+        numbers: ["0 file bytes carried, only a namespace id and a journal id"],
         breaks:
           "A device that treated this as its only signal would diverge permanently on a single dropped message, which is why the pull below is not optional.",
       },
@@ -604,8 +618,8 @@ export const GOOGLE_DRIVE: Diagram = {
       label: "GET /journal?since=cursor",
       detail: {
         what: "The pull: everything after the device's stored cursor for that namespace, replayed in order.",
-        why: "This is the actual convergence mechanism and it runs whether or not a push arrived. Cost is proportional to what changed, which is what makes a 10M-file namespace syncable after a week offline.",
-        numbers: ["O(changes), not O(files)", "90 day retention window"],
+        why: "This is the actual convergence mechanism and it runs whether or not a push arrived. Cost is proportional to what changed rather than to how many files the namespace holds, which is what makes a 10M-file namespace syncable after a week offline.",
+        numbers: ["90 day retention window"],
         breaks:
           "A cursor older than the retention window falls back to a full tree diff, which is minutes of CPU and disk and risks concluding the user deleted everything if the local tree is not fully mounted.",
       },
@@ -632,7 +646,7 @@ export const GOOGLE_DRIVE: Diagram = {
       label: "origin fetch on miss",
       detail: {
         what: "The edge pulling a chunk it does not hold from the blob tier.",
-        why: "It is drawn as the rare path on purpose. For shared content the edge absorbs almost all of the fan-out, so origin sees one fetch per hot chunk rather than thousands.",
+        why: "It is the rare path on purpose. For shared content the edge absorbs almost all of the fan-out, so origin sees one fetch per hot chunk rather than thousands.",
         numbers: ["one origin read per hot chunk per edge"],
         breaks:
           "A cold chunk that has aged into the erasure-coded tier takes seconds to warm up, so the first reader after a long idle period pays a latency the hot path never sees.",
@@ -647,7 +661,7 @@ export const GOOGLE_DRIVE: Diagram = {
       detail: {
         what: "Version expiry and file purges feeding refcount decrements, plus the full reachability scan the sweep runs against.",
         why: "The metadata store is the only component that knows which chunks are still referenced, because a chunk itself carries no back-pointer to the files using it. Reachability has to be computed from this side.",
-        numbers: ["~3 retained versions per file", "weekly mark-and-sweep"],
+        numbers: ["~3 retained versions per file", "mark-and-sweep runs once a week"],
         breaks:
           "Reading this while commits are in flight gives a snapshot that undercounts references, which is exactly why deletion waits out a grace period rather than acting on one scan.",
       },
@@ -674,8 +688,8 @@ export const GOOGLE_DRIVE: Diagram = {
       label: "verify counts",
       detail: {
         what: "Comparing stored refcounts against the reachability the sweep computed, and correcting the drift.",
-        why: "The counter is a fast path that lets commit avoid a scan, not the truth. Treating it as truth is how a live chunk gets deleted, so it is reconciled rather than trusted.",
-        numbers: ["orphan-chunk count and refcount drift are paged on"],
+        why: "The counter is a fast path that lets commit avoid a scan, not the truth. Treating it as truth is how a live chunk gets deleted, so it is reconciled rather than trusted, and the orphan-chunk count and refcount drift are both paged on.",
+        numbers: ["1 reconciliation pass per week"],
         breaks:
           "Drift in the safe direction leaks storage quietly, so the metric matters as much as the repair: nobody notices orphans until the bill does.",
       },

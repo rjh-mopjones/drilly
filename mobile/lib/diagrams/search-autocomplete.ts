@@ -10,13 +10,34 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
     shape:
       "Two systems that share nothing but a file: an hourly batch pipeline that computes the answer to every prefix worth serving in advance, and a serving path that does no computing at all, only a walk of a few characters and a pointer read.",
     beats: [
-      "Debounce and the edge come first because between them they decide how big the fleet is. The client suppresses prefixes under three characters and debounces 150ms, which collapses roughly six eligible keystrokes into about five suggest calls per search, and a 60 second edge TTL then absorbs about 95% of the resulting 2M peak QPS.",
-      "What survives to the origin is a lookup rather than a search. Each serving node holds the entire 12GB FST in memory, walks one character per typed character, and reads the top-10 list already sitting at that node. That costs about a microsecond, so the network round trip, not the computation, spends the 50ms server budget.",
-      "The precomputation is the whole design. An hourly job reads a rolling 24 hours of query logs, keeps the ~100M distinct strings that clear a floor of five occurrences a day, builds a trie over them and walks it post-order, so every parent's top-10 is selected from the union of its children's top-10 lists in a single pass.",
-      "Compilation is what deletes the routing layer. A hashmap trie carrying those top-K payloads is about 76GB and does not fit a 64GB box, which would force sharding by first character and hand you the hot-prefix skew as a permanent tax. Minimising to an FST lands at about 12GB, so every node holds everything and there is nothing left to route.",
-      "Freshness is bolted on beside the snapshot rather than expressed inside it. A streaming job rebuilds a 50 to 100MB overlay trie every 60 seconds from the live query stream and the serving node merges the two lists for about 5 microseconds, which is the only mutable thing anywhere on the request path.",
-      "Publishing is the part that actually hurts. Nodes pull the 12GB snapshot from object storage rather than from the build host, because 200 nodes times 12GB is 2.4TB an hour, then verify a checksum, run about 1000 canary prefixes, and flip one atomic pointer in 10% waves with a two-minute soak between them.",
-      "Safety is two filters at two speeds, and the diagram draws both. The build-time blocklist and classifier run before anything can reach a node's top-K, which is the cheap place to do it; the serve-time filter exists because the 60 second overlay can put a term in front of a user that no build-time pass has ever seen, and because a takedown clock measured in hours cannot wait for the next build.",
+      {
+        text: "Debounce and the edge come first because between them they decide how big the fleet is. The client suppresses prefixes under three characters and debounces 150ms, which collapses roughly six eligible keystrokes into about five suggest calls per search, and a 60 second edge TTL then absorbs about 95% of the resulting 2M peak QPS.",
+        lights: ["client", "cdn"],
+      },
+      {
+        text: "What survives to the origin is a lookup rather than a search. Each serving node holds the entire 12GB FST in memory, walks one character per typed character, and reads the top-10 list already sitting at that node. That costs about a microsecond, so the network round trip, not the computation, spends the 50ms server budget.",
+        lights: ["serving-node", "suggest", "fst-index"],
+      },
+      {
+        text: "The precomputation is the whole design. An hourly job reads a rolling 24 hours of query logs, keeps the ~100M distinct strings that clear a floor of five occurrences a day, builds a trie over them and walks it post-order, so every parent's top-10 is selected from the union of its children's top-10 lists in a single pass.",
+        lights: ["build-job", "aggregate", "topk"],
+      },
+      {
+        text: "Compilation is what deletes the routing layer. A hashmap trie carrying those top-K payloads is about 76GB and does not fit a 64GB box, which would force sharding by first character and hand you the hot-prefix skew as a permanent tax. Minimising to an FST lands at about 12GB, so every node holds everything and there is nothing left to route.",
+        lights: ["compile", "fst-index"],
+      },
+      {
+        text: "Freshness is bolted on beside the snapshot rather than expressed inside it. A streaming job rebuilds a 50 to 100MB overlay trie every 60 seconds from the live query stream and the serving node merges the two lists for about 5 microseconds, which is the only mutable thing anywhere on the request path.",
+        lights: ["overlay", "stream-agg"],
+      },
+      {
+        text: "Publishing is the part that actually hurts. Nodes pull the 12GB snapshot from object storage rather than from the build host, because 200 nodes times 12GB is 2.4TB an hour, then verify a checksum, run about 1000 canary prefixes, and flip one atomic pointer in 10% waves with a two-minute soak between them.",
+        lights: ["object-store", "loader", "fst-index"],
+      },
+      {
+        text: "Safety is two filters at two speeds. The build-time blocklist and classifier run before anything can reach a node's top-K, which is the cheap place to do it; the serve-time filter exists because the 60 second overlay can put a term in front of a user that no build-time pass has ever seen, and because a takedown clock measured in hours cannot wait for the next build.",
+        lights: ["safety", "policy-filter"],
+      },
     ],
     crux:
       "Prefix traffic is far more skewed than the query distribution underneath it, because every long query passes through the same short prefixes on its way. The prefix 'th' alone is roughly 60K requests per second at peak while a partition owning 'z' sits idle. You do not balance that skew, you delete it: make the structure small enough that every node holds all of it, and let the edge absorb the short prefixes before they reach a server.",
@@ -145,7 +166,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       parent: "serving-node",
       detail: {
         what: "The whole request path in one function: walk the prefix through the FST, read the finished top-10, look the same prefix up in the overlay, merge the two lists, serialise ~350B of JSON.",
-        why: "It is one stage rather than four boxes because there is nothing between the steps: no queue, no I/O, no failure that stops at one of them and not the others. The four lines of pseudocode in the answer are the deployable unit, and drawing them as peers would imply a network hop inside a 50μs path.",
+        why: "It is one stage rather than four boxes because there is nothing between the steps: no queue, no I/O, no failure that stops at one of them and not the others. The four steps are effectively one function, and splitting them into peers would imply a network hop inside a 50μs path.",
         numbers: [
           "~50μs of CPU per request end to end",
           "~1μs base lookup, ~5μs overlay merge",
@@ -168,7 +189,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
         why: "Filtering belongs at build time because it costs nothing there, but two things outrun the build. The overlay can serve a term that was unseen 60 seconds ago and that no build-time pass has ever looked at, and jurisdictional takedowns arrive with a clock measured in hours against a cadence measured in one. This is the only place either can take effect before the next snapshot.",
         numbers: [
           "~0.2ms, against a ~50ms server budget",
-          "takedown clock in hours vs an hourly build cadence",
+          "takedown clock measured in hours vs a 1-hour build cadence",
           "a suppression is still served from the edge for up to 60s",
         ],
         breaks:
@@ -248,7 +269,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       row: 3,
       detail: {
         what: "A small mutable trie of the same node shape, rebuilt every 60 seconds from the recent query stream and merged with the base result at request time.",
-        why: "The base snapshot is up to an hour old, and popularity moves faster than that. If a term starts trending at 2:47pm it will not appear until the 3pm snapshot, so freshness shorter than the build cadence has to sit beside the snapshot rather than inside it. It is drawn as a cache because dropping it is a supported operating mode: the node then serves from the base alone.",
+        why: "The base snapshot is up to an hour old, and popularity moves faster than that. If a term starts trending at 2:47pm it will not appear until the 3pm snapshot, so freshness shorter than the build cadence has to sit beside the snapshot rather than inside it. It is treated as a cache because dropping it is a supported operating mode: the node then serves from the base alone.",
         numbers: ["50 to 100MB per serving node", "adds ~5μs to a lookup", "60 second rebuild cadence"],
         breaks:
           "It is the only mutable thing on the serving path and therefore the least tested. A term can go from unseen to served in 60 seconds, which no human review process can match, so this is the path that leaks something.",
@@ -279,6 +300,14 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
         ],
         breaks:
           "It is a feedback loop. Suggesting a query causes people to run it, which raises its count, which causes it to be suggested more, and nothing in the log distinguishes 'popular because wanted' from 'popular because we put it there'.",
+        choice: {
+          pick: "One durable Kafka log read independently by both the hourly batch job and the streaming aggregator",
+          instead: "Separate topics per consumer, one tuned for batch reads and one for streaming.",
+          decider:
+            "Whether the two rankings can ever disagree about what a query is. One shared log at ~10B searches/day means both paths count the exact same events, just over different windows (24h vs 60s); splitting the log risks the two paths drifting on delivery guarantees or missing events differently.",
+          flips:
+            "If the two consumers needed very different retention or partitioning, for example the streaming path needing sub-second latency the batch topic's larger segment sizes cannot give, at which point a dedicated low-latency topic mirrored from the durable log would be worth the duplication.",
+        },
       },
     },
     {
@@ -291,7 +320,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
         what: "One offline job in four stages: aggregate a rolling day of logs, drop what policy forbids, roll up top-10 over a trie, compile the result to an immutable artifact.",
         why: "They are stages rather than services because a run passes through all four or produces nothing. They share one schedule and one host sized for the ~76GB intermediate structure, they fail together, and none of them can be scaled without the others. The frame is also where the design's central line is drawn: everything inside it tolerates minutes, everything on the serve path has 50ms.",
         numbers: [
-          "hourly cadence, tens of minutes of work",
+          "1-hour cadence, ~30 min of work",
           "~417M queries arrive per hour",
           "build host sized for the ~76GB intermediate trie",
         ],
@@ -349,15 +378,15 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
         numbers: [
           "runs over ~100M strings, once an hour",
           "zero cost on a path that serves ~100K QPS",
-          "jurisdictional suppression maintained as per-region overlays",
+          "jurisdictional suppression: 1 overlay per region",
         ],
         breaks:
           "It is string matching against people who are deliberately working around string matching, and offensive or defamatory combinations are composed continuously. A blocklist is a snapshot of yesterday's adversary.",
         choice: {
-          pick: "Filter the candidate strings before the top-K roll-up",
+          pick: "Filter the surviving strings before the top-K roll-up",
           instead: "Let the build finish and strip blocked strings out of the finished top-10 lists.",
           decider:
-            "The roll-up's own invariant. A parent's top-10 is selected from the union of its children's top-10 lists, so a blocked string that survives into a child's list has already displaced a legitimate completion from every ancestor's candidate set. Removing it afterwards leaves you a nine-item list, not a corrected one, and the tenth entry no longer exists anywhere to promote.",
+            "The roll-up's own invariant. A parent's top-10 is selected from the union of its children's top-10 lists, so a blocked string that survives into a child's list has already displaced a legitimate completion from every ancestor's list. Removing it afterwards leaves you a nine-item list, not a corrected one, and the tenth entry no longer exists anywhere to promote.",
           flips:
             "A suppression set that is genuinely per-request, such as one that varies by user age or account setting. Then it cannot be applied at build time at all and has to run over the finished list at serve time.",
         },
@@ -380,14 +409,14 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
           "O(nodes x branching x K), ~1B nodes",
         ],
         breaks:
-          "The roll-up is only valid while a score is a property of the completion alone. Length normalisation and prefix-position boosts make the score depend on the (prefix, completion) pair, and then the union of children's lists is no longer a sufficient candidate set.",
+          "The roll-up is only valid while a score is a property of the completion alone. Length normalisation and prefix-position boosts make the score depend on the (prefix, completion) pair, and then the union of children's lists is no longer sufficient on its own.",
         choice: {
           pick: "Precompute top-10 at every node down to depth 12",
-          instead: "Store only the candidate set and rank at request time.",
+          instead: "Store only the raw completions and rank at request time.",
           decider:
             "CPU per request against request rate inside a 50ms budget. A three-character prefix covers on the order of 100,000 completions; gathering and heap-selecting ten is 1 to 3ms, against ~1μs for a precomputed read. At 100K origin QPS that is 100 to 300 cores of pure ranking versus about 0.1 of one. The depth cap is what holds the top-K payload at ~16GB rather than growing with the longest string.",
           flips:
-            "When the candidate set is small or the ranking depends on request-time inputs. Under a few thousand candidates a scan finishes in under 100μs, and once the answer varies by region, stock and live promotion the build-time cross product explodes: 10 regions x in-stock x 20 promotions is 400 variants of every list.",
+            "When the completion set is small or the ranking depends on request-time inputs. Under a few thousand completions a scan finishes in under 100μs, and once the answer varies by region, stock and live promotion the build-time cross product explodes: 10 regions x in-stock x 20 promotions is 400 variants of every list.",
         },
       },
     },
@@ -405,7 +434,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
         numbers: [
           "~76GB uncompressed to 8-16GB, call it 12GB",
           "~60B per hashmap node amortises to ~10B",
-          "compile takes tens of minutes, entirely offline",
+          "compile takes ~30 min, entirely offline",
         ],
         breaks:
           "Minimisation is global, so the output is read-only and the step is all-or-nothing: there is no partial artifact to publish and no way to patch the one you have.",
@@ -536,7 +565,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       detail: {
         what: "One character walked per typed character, ending at a node whose finished top-10 is read straight out of memory.",
         why: "This is the payoff for the entire build pipeline: serving cost does not depend on how many completions the prefix covers. The alternative, gathering and ranking the subtree, is 1 to 3ms for a three-character prefix and would be 100 to 300 cores at origin rate.",
-        numbers: ["~1μs, O(prefix length)", "in-process mmap, no network hop"],
+        numbers: ["~1μs, O(prefix length)", "in-process mmap, 0 network hops"],
         breaks:
           "Past depth 12 there is no stored top-K, so the node scans a small subtree instead, which costs ~20μs and is fine only because those subtrees are genuinely small.",
       },
@@ -550,7 +579,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       detail: {
         what: "The overlay lookup whose top few entries are merged with the base list before the policy filter and serialisation.",
         why: "It is the only way to serve something that started trending after the last snapshot was built, and it is deliberately a merge rather than a write into the base structure, because the compiled FST cannot be edited in place at all.",
-        numbers: ["adds ~5μs", "overlay contributes up to 5 candidates"],
+        numbers: ["adds ~5μs", "overlay contributes up to 5 entries"],
         breaks:
           "This is the sharpest safety edge in the system: an entry can go from unseen to served in 60 seconds, faster than any human review, so overlay entries are rate-limited and filtered harder than the base index and still leak first.",
       },
@@ -560,11 +589,11 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       from: "suggest",
       to: "policy-filter",
       tier: "data",
-      label: "10 merged candidates",
+      label: "10 merged entries",
       detail: {
         what: "The merged list handed to the suppression pass before it is serialised.",
-        why: "Second-line defence, in-process, on a list of ten strings. It is drawn as its own step because it is the only point where a suppression newer than the last build, or one that applies to this jurisdiction and not the global index, can take effect.",
-        numbers: ["~0.2ms of a ~50ms budget", "10 candidates in, at most 10 out"],
+        why: "Second-line defence, in-process, on a list of ten strings. It is its own step because it is the only point where a suppression newer than the last build, or one that applies to this jurisdiction and not the global index, can take effect.",
+        numbers: ["~0.2ms of a ~50ms budget", "10 entries in, at most 10 out"],
         breaks:
           "A filter that fails open is invisible: the response is the right size, the right shape and the right latency, and the only thing wrong with it is the content.",
       },
@@ -578,7 +607,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       detail: {
         what: "The filtered response travelling back through the load balancer to the edge, to be cached for 60 seconds under the (prefix, locale) key.",
         why: "The TTL is chosen to match the streaming overlay cadence: caching longer would cache away exactly the freshness the overlay exists to provide, and caching shorter erodes the hit rate that holds the origin at ~100K QPS.",
-        numbers: ["Cache-Control: public, max-age=60", "Vary: none"],
+        numbers: ["Cache-Control: public, max-age=60", "0 Vary dimensions: cacheable for everyone"],
         breaks:
           "If a policy suppression ships while a bad answer is cached, that answer keeps being served for up to 60 seconds unless purge-by-tag works, and the first time you use purge is during an incident.",
       },
@@ -619,7 +648,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       label: "blocked strings dropped",
       detail: {
         what: "The permitted strings, sorted lexicographically, streamed into the trie builder.",
-        why: "Sorted input is what lets the trie be built in one streaming pass holding only a single root-to-leaf path in memory, so the builder never needs the whole structure resident while constructing it. Filtering before this point is what keeps the roll-up's candidate sets honest.",
+        why: "Sorted input is what lets the trie be built in one streaming pass holding only a single root-to-leaf path in memory, so the builder never needs the whole structure resident while constructing it. Filtering before this point is what keeps everything reaching the roll-up honest.",
         numbers: ["~1B trie nodes at ~20 chars each", "one streaming pass, one root-to-leaf path resident"],
         breaks:
           "A blocklist that runs after this stage cannot repair anything: the blocked string has already displaced a legitimate completion out of every ancestor's top-10.",
@@ -690,7 +719,7 @@ export const SEARCH_AUTOCOMPLETE: Diagram = {
       detail: {
         what: "The same log consumed continuously rather than in hourly batches, counted in 60 second windows.",
         why: "Sharing the input with the batch job is deliberate: both paths rank the same thing by the same signal, so the overlay never disagrees with the base snapshot about what a query is, only about how recently it got popular.",
-        numbers: ["60 second windows", "same source as the hourly build"],
+        numbers: ["60 second windows", "reads the 1 same log as the hourly build"],
         breaks:
           "A coordinated query flood reaches this path in a minute, long before the frequency floor on the batch side would have absorbed it.",
       },

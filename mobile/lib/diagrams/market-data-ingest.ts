@@ -8,14 +8,32 @@ export const MARKET_DATA_INGEST: Diagram = {
   itemId: 43,
   overview: {
     shape:
-      "Fan in, sequence, fan out, plus one rule about what you are allowed to drop: many venue feeds converge on a single writer that stamps one total order, and that order is then split by instrument and handed to the matching cores of question 42.",
+      "Fan in, sequence, fan out, plus one rule about what you are allowed to drop: many venue feeds converge on a single writer that stamps one total order, and that order is then split by instrument and handed to the per-instrument matching cores that execute trades.",
     beats: [
-      "The edge is deliberately stupid. One thin handler per inbound stream does nothing but drain the socket and decode the venue's frame, because the moment a reader blocks on downstream work the kernel receive buffer fills, and on UDP multicast that is silent packet loss at the worst possible place.",
-      "Normalisation is where three protocols become one. FIX, an ITCH-style binary and a proprietary frame all decode into the same fixed canonical event, into pre-allocated structs rather than fresh objects, because a per-message allocation at 2M msg/s is a garbage collection pause and a pause blows a microsecond budget.",
-      "The sequencer is the whole correctness claim. A single writer assigns the next monotonic number and writes a pre-allocated slot, which gives one gap-free total order across every instrument without a lock, plus a journal that is the source of truth for replay. One writer is the mechanism, not a compromise.",
-      "Fan out is partitioning, never load balancing. Dispatch by hash(instrumentId) so a book always lands on the same consumer in sequence order; round-robin would interleave one book across shards and destroy the only ordering guarantee that downstream matching depends on.",
-      "Overload is decided per message class, not per system. Ticks are snapshots you overwrite, so a lagging shard gets conflation, the latest tick per instrument replacing the stale one. Order flow accumulates and can never be silently dropped, so it gets backpressure or an explicit busy reject, and every buffer between stages is bounded so overload has a defined outcome instead of an out-of-memory.",
-      "What actually gets drilled is the hole in the feed. The venue's own per-feed sequence is the only thing that makes loss visible, and the recovery ladder runs fastest first: the redundant B copy in tens of microseconds, a retransmit request at 5 to 50 ms, then a snapshot refresh for anything unbounded, with the affected instruments marked stale and unpublishable while the gap is open.",
+      {
+        text: "The edge is deliberately stupid. One thin handler per inbound stream does nothing but drain the socket and decode the venue's frame, because the moment a reader blocks on downstream work the kernel receive buffer fills, and on UDP multicast that is silent packet loss at the worst possible place.",
+        lights: ["edge-group", "feed-handlers", "e1"],
+      },
+      {
+        text: "Normalisation is where three protocols become one. FIX, an ITCH-style binary and a proprietary frame all decode into the same fixed canonical event, into pre-allocated structs rather than fresh objects, because a per-message allocation at 2M msg/s is a garbage collection pause and a pause blows a microsecond budget.",
+        lights: ["normaliser", "e6", "e8"],
+      },
+      {
+        text: "The sequencer is the whole correctness claim. A single writer assigns the next monotonic number and writes a pre-allocated slot, which gives one gap-free total order across every instrument without a lock, plus a journal that is the source of truth for replay. One writer is the mechanism, not a compromise.",
+        lights: ["sequencer", "ordered-ring", "journal", "e9", "e10"],
+      },
+      {
+        text: "Fan out is partitioning, never load balancing. Dispatch by hash(instrumentId) so a book always lands on the same consumer in sequence order; round-robin would interleave one book across shards and destroy the only ordering guarantee that downstream matching depends on.",
+        lights: ["dispatch", "shards", "e14"],
+      },
+      {
+        text: "Overload is decided per message class, not per system. Ticks are snapshots you overwrite, so a lagging shard gets conflation, the latest tick per instrument replacing the stale one. Order flow accumulates and can never be silently dropped, so it gets backpressure or an explicit busy reject, and every buffer between stages is bounded so overload has a defined outcome instead of an out-of-memory.",
+        lights: ["conflation", "order-gateway", "e12", "e15"],
+      },
+      {
+        text: "What actually gets drilled is the hole in the feed. The venue's own per-feed sequence is the only thing that makes loss visible, and the recovery ladder runs fastest first: the redundant B copy in tens of microseconds, a retransmit request at 5 to 50 ms, then a snapshot refresh for anything unbounded, with the affected instruments marked stale and unpublishable while the gap is open.",
+        lights: ["gap-arb", "venue-feeds", "e2", "e3", "e4"],
+      },
     ],
     crux:
       "You have to classify traffic before you size any buffer. Under overload the question is not how deep the queue is, it is which messages are state you overwrite and which are state you accumulate. Get that split wrong and the pipeline either loses trades or dies of memory exhaustion, and no amount of tuning rescues either.",
@@ -32,7 +50,7 @@ export const MARKET_DATA_INGEST: Diagram = {
       label: "Ingest edge (must never block)",
       detail: {
         what: "The per-stream handlers plus the gap and arbitration logic that watches the venue's own sequence numbers on every feed.",
-        why: "Drawn as one zone because everything inside it is bound by a single rule: no work here may ever stall the socket drain. Business logic, gap repair and staleness decisions all run off the drain path, so the kernel buffer stays empty even when the rest of the pipeline is saturated.",
+        why: "It is one zone because everything inside it is bound by a single rule: no work here may ever stall the socket drain. Business logic, gap repair and staleness decisions all run off the drain path, so the kernel buffer stays empty even when the rest of the pipeline is saturated.",
         numbers: ["one handler per inbound stream, pinned to a core", "reorder buffer 1024 slots x 64B = 64KB per feed"],
         breaks:
           "Any blocking call that creeps into a handler, a lock, a log format, a metrics allocation, turns backpressure into dropped multicast packets that nothing upstream will ever tell you about.",
@@ -67,12 +85,12 @@ export const MARKET_DATA_INGEST: Diagram = {
       row: 0,
       detail: {
         what: "The control-plane path for order flow: submit_order and cancel_order arrive here, are counted against a per-participant quota, and either enter the pipeline or are rejected explicitly.",
-        why: "Order flow is the traffic class that may never be silently dropped, so its admission has to be rationed somewhere. Counting at the edge means one participant's cancel-and-replace storm is rejected before it consumes shard capacity, rather than after it has already filled a ring the market data path shares.",
-        numbers: ["ACCEPTED, REJECTED or BUSY per request", "orderflow.nack_rate should sit at zero"],
+        why: "Order flow is the traffic class that may never be silently dropped, so its admission has to be rationed somewhere. Every request is answered accepted, rejected or told busy, and counting at the edge means one participant's cancel-and-replace storm is rejected before it consumes shard capacity, rather than after it has already filled a ring the market data path shares.",
+        numbers: ["orderflow.nack_rate should sit at zero"],
         breaks:
           "Sustained order-flow overload has no graceful answer. Backpressure penalises everyone on that producer connection and a reject is a visible failure to a paying client; buffering only relocates the failure and makes it bigger.",
         choice: {
-          pick: "Per-participant message credits at the gateway, with a documented BUSY reject code",
+          pick: "Per-participant message credits at the gateway, with a documented busy reject code",
           instead: "One shared bounded queue in front of the shards, buffering whoever arrives.",
           decider: "Blast radius under a single participant's burst. A shared queue at 2^20 slots absorbs about 0.5s of a 2M msg/s burst and then rejects everybody, including the quiet participants; per-participant credits reject only the one client whose burst caused it, and keep the gateway thin because it counts rather than parses.",
           flips: "A venue with a handful of trusted internal producers, where quota accounting costs more than it saves and a single bounded queue is honest enough.",
@@ -89,8 +107,8 @@ export const MARKET_DATA_INGEST: Diagram = {
       parent: "edge-group",
       detail: {
         what: "One thin process or thread per inbound stream whose entire job is to pull packets off the socket as fast as they arrive and hand them to a bounded per-stream ring.",
-        why: "The reader must never block on downstream work. On TCP a slow reader becomes backpressure onto the sender; on UDP multicast the kernel receive buffer fills and packets are dropped with no error anywhere, which corrupts the feed view at exactly the moment the market is busiest.",
-        numbers: ["~50-80 MB/s binary ingress at 2M msg/s", "handlers pinned to cores, busy-polling"],
+        why: "The reader must never block on downstream work. On TCP a slow reader becomes backpressure onto the sender; on UDP multicast the kernel receive buffer fills and packets are dropped with no error anywhere, which corrupts the feed view at exactly the moment the market is busiest. Handlers are pinned to cores and busy-poll rather than block on the socket.",
+        numbers: ["~50-80 MB/s binary ingress at 2M msg/s"],
         breaks:
           "A handler process dying takes one feed dark, and the symptom is a message rate that falls to zero rather than an error; the per-feed heartbeat is what catches it, and gap detection replays the missed range on restart.",
         choice: {
@@ -104,7 +122,7 @@ export const MARKET_DATA_INGEST: Diagram = {
     {
       id: "gap-arb",
       label: "Arbitration + gap detect",
-      sub: "A/B dedup, expected counter",
+      sub: "dual-feed dedup, expected counter",
       kind: "service",
       col: 0,
       row: 2,
@@ -112,7 +130,7 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "Per feed, an expected counter over the venue's sequence plus a small reorder buffer: keep whichever of the A or B copies lands first, discard the duplicate, and start a timer when a message arrives above expected.",
         why: "Multicast will never report a loss, so the venue's own per-feed number is the only evidence a packet went missing. A gap is often just reordering, which is why the timer exists at all rather than firing a retransmit on the first out-of-order message.",
-        numbers: ["reorder buffer 1024 slots x 64B = 64KB per feed", "gap timer 5-10 ms colocated", "B copy typically arrives within tens of µs"],
+        numbers: ["reorder buffer 1024 slots x 64B = 64KB per feed", "gap timer 5-10 ms colocated", "B copy typically arrives within tens of µs, well under the 5-50ms retransmit"],
         breaks:
           "Too aggressive a timer floods the venue's recovery service at precisely the moment every other participant is doing the same; too slow a timer and the instrument sits stale and unpublishable for longer than it needed to.",
         choice: {
@@ -196,7 +214,7 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "The sequenced log persisted by sequential append, plus periodic snapshots of consumer state each labelled with the sequence it is current as of.",
         why: "The log, not any in-memory buffer, is the source of truth. Recovery is loading the newest snapshot and replaying forward from its sequence, which is also exactly what a hot standby does continuously, so failover is a promotion rather than a cold rebuild.",
-        numbers: ["snapshot every 30s bounds replay to 30s", "RPO zero for anything journalled before ack", "RTO seconds"],
+        numbers: ["snapshot every 30s bounds replay to 30s", "RPO zero for anything journalled before ack", "RTO within the ~30s replay bound"],
         breaks:
           "Replay is only useful if it is deterministic, and determinism is a discipline: one wall-clock read, one hash-map iteration or one branch on arrival timing on the processing path and a replay silently stops reproducing the day it is meant to reconstruct.",
         choice: {
@@ -238,9 +256,9 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "One slot per instrument holding the latest unconsumed tick, so a new tick for an instrument overwrites the previous queued one instead of joining a queue behind it.",
         why: "A tick is a stateless snapshot, so nobody needs the price from 3 ms ago when a newer one is already waiting. This is the entire mechanism by which the pipeline sheds load without losing anything that matters, and it is why the tick path can be lossy at all.",
-        numbers: ["one slot per instrument, ~10k slots", "marketdata.conflation_rate rises under load by design"],
+        numbers: ["one slot per instrument, ~10k slots"],
         breaks:
-          "It owns exactly one rule and must never be widened: an ORDER or CANCEL placed in this map is a lost trade, because conflation means overwriting state that was meant to accumulate.",
+          "It owns exactly one rule and must never be widened: an order or cancel placed in this map is a lost trade, because conflation means overwriting state that was meant to accumulate.",
         choice: {
           pick: "A per-instrument latest-value slot for TICK events only",
           instead: "A deeper bounded queue per shard that drops the oldest when full.",
@@ -258,8 +276,8 @@ export const MARKET_DATA_INGEST: Diagram = {
       row: 3,
       detail: {
         what: "The per-instrument consumers, each draining its own cursor in batches and applying events for its instruments strictly in sequence order.",
-        why: "Shared-nothing per book is what makes the pipeline parallel without coordination: no shard needs a lock, and no shard's lag can reorder another's stream. Each also carries the per-instrument stale flag, which has to be visible in what it publishes.",
-        numbers: ["consumer.lag = producer cursor minus consumer cursor", "hot books get dedicated cores with NUMA-local memory"],
+        why: "Shared-nothing per book is what makes the pipeline parallel without coordination: no shard needs a lock, and no shard's lag can reorder another's stream. Each also carries the per-instrument stale flag, which has to be visible in what it publishes. Lag is measured as the producer cursor minus the consumer cursor, and the hottest books get dedicated cores with NUMA-local memory.",
+        numbers: [],
         breaks:
           "A lagging shard must never propagate back to the socket drain; its ticks conflate and its order flow backpressures at the producer, but the edge keeps draining regardless.",
         choice: {
@@ -272,15 +290,15 @@ export const MARKET_DATA_INGEST: Diagram = {
     },
     {
       id: "matching-cores",
-      label: "Matching cores (Q42)",
+      label: "Matching cores",
       sub: "downstream sink, one per shard",
       kind: "external",
       col: 3,
       row: 4,
       detail: {
-        what: "The per-instrument matching engines of question 42, which take ordered events from this pipeline and turn them into executed trades. This is where the pipeline's responsibility ends.",
-        why: "Drawn as the boundary because it is what makes every guarantee upstream non-negotiable. A matching core is a deterministic function of its input, so a reordered or dropped message here is not an estimate that gets corrected later, it is a wrong trade.",
-        numbers: ["one core per shard, single threaded", "consumes strictly in seq order"],
+        what: "The per-instrument matching engines, which take ordered events from this pipeline and turn them into executed trades. This is where the pipeline's responsibility ends.",
+        why: "It is the boundary because it is what makes every guarantee upstream non-negotiable. A matching core is a deterministic function of its input, so a reordered or dropped message here is not an estimate that gets corrected later, it is a wrong trade.",
+        numbers: ["one core per shard, single threaded"],
         breaks:
           "It has no defence of its own. If this pipeline hands it a book it silently repaired or an event out of order, the core will match against it and produce an execution nobody can undo.",
       },
@@ -334,8 +352,8 @@ export const MARKET_DATA_INGEST: Diagram = {
       label: "range or snapshot",
       detail: {
         what: "The repair coming back: either the resent messages for the missing range, or a full per-instrument snapshot labelled with the sequence it is current as of.",
-        why: "Two different rungs for two different sizes of hole. Retransmit is right for tens of messages; only the snapshot recovers an unbounded gap, and taking it means discarding every buffered incremental at or below its sequence.",
-        numbers: ["snapshot interval 1-30 s", "venues cap resend size and request rate"],
+        why: "Two different rungs for two different sizes of hole. Retransmit is right for tens of messages; only the snapshot recovers an unbounded gap, and taking it means discarding every buffered incremental at or below its sequence. Venues cap both the resend size and the request rate on this channel.",
+        numbers: ["snapshot interval 1-30 s"],
         breaks: "Failing to discard buffered incrementals at or below the snapshot sequence double-applies them, which corrupts the book more quietly than the gap did.",
       },
     },
@@ -348,7 +366,7 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "Arbitrated and gap-repaired messages rejoining the main path, in the venue's own sequence order.",
         why: "Repair has to complete before the event is stamped with our internal sequence, because our sequence is gap-free by construction and cannot have a hole reserved in it for a message that has not arrived yet.",
-        numbers: ["drain_reorder_buffer on each fill"],
+        numbers: ["drains up to 1024 buffered slots on each fill"],
         breaks: "A fill that arrives after the pipeline gave up leaves the buffered successors stranded, which is why the reorder buffer is sized for the largest plausible burst behind a hole rather than the average.",
       },
     },
@@ -360,8 +378,8 @@ export const MARKET_DATA_INGEST: Diagram = {
       label: "raw frames, bounded ring",
       detail: {
         what: "Decoded venue frames moving from the drain thread into normalisation over a bounded per-stream ring.",
-        why: "The ring is what decouples the socket from everything slower without letting the decoupling become unbounded. It is bounded so that a stalled normaliser produces a defined outcome rather than growing memory until the process dies.",
-        numbers: ["per-stream ring sized for burst, not average"],
+        why: "The ring is what decouples the socket from everything slower without letting the decoupling become unbounded, sized for burst rather than average throughput. It is bounded so that a stalled normaliser produces a defined outcome rather than growing memory until the process dies.",
+        numbers: [],
         breaks: "If the handler ever waits on a full ring instead of shedding, the block propagates to the socket and the kernel buffer starts dropping multicast packets.",
       },
     },
@@ -370,7 +388,7 @@ export const MARKET_DATA_INGEST: Diagram = {
       from: "order-gateway",
       to: "normaliser",
       tier: "data",
-      label: "ORDER / CANCEL, lossless",
+      label: "order / cancel, lossless",
       detail: {
         what: "Accepted order flow joining the same canonical path as market data, so both classes end up in one sequence space.",
         why: "Order flow and ticks must be totally ordered against each other, because an order matching against a book depends on which ticks preceded it. They share the path but never the overload policy.",
@@ -402,7 +420,7 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "The event written into a claimed ring slot carrying its monotonic sequence number, after which consumers advance their own cursors independently.",
         why: "Single writer means claiming a slot needs no lock and no CAS contention, and it removes any ambiguity about which of two near-simultaneous events came first. That decision is made exactly once here and inherited as fact by everything downstream.",
-        numbers: ["gap-free by construction", "sub-microsecond hand-off, no copy"],
+        numbers: ["hand-off in under 1µs, no copy"],
         breaks: "This pipeline has no second chance at ordering: get it wrong here and every consumer, replay and audit inherits the wrong answer with no way to detect it.",
       },
     },
@@ -440,8 +458,8 @@ export const MARKET_DATA_INGEST: Diagram = {
       label: "TICK, shard behind",
       detail: {
         what: "A market-data tick diverted into the per-instrument latest-value slot when its target shard cannot keep up.",
-        why: "This is the overwrite half of the rule. Ticks are state you replace, so the correct response to a lagging consumer is to bin the stale intermediates and keep the freshest, not to queue deeper.",
-        numbers: ["marketdata.conflation_rate per instrument per second"],
+        why: "This is the overwrite half of the rule. Ticks are state you replace, so the correct response to a lagging consumer is to bin the stale intermediates and keep the freshest, not to queue deeper. The conflation rate per instrument is the metric that tracks it, and it rises under load by design.",
+        numbers: [],
         breaks: "A conflation rate that spikes is the early warning that a shard is falling behind, and it is the only signal you get before the ring depth alarm fires.",
       },
     },
@@ -476,11 +494,11 @@ export const MARKET_DATA_INGEST: Diagram = {
       from: "dispatch",
       to: "order-gateway",
       tier: "control",
-      label: "BUSY: backpressure",
+      label: "busy: backpressure",
       detail: {
         what: "The accumulate half of the rule: order flow that cannot be absorbed causes the producer to be slowed or the client to be rejected explicitly, never silently dropped.",
-        why: "An order is state that accumulates, so the sender has to learn that it did not make it. An explicit reject is a visible failure a client can handle; a silent drop is a trade that both sides believe happened differently.",
-        numbers: ["orderflow.nack_rate alerts on any sustained value"],
+        why: "An order is state that accumulates, so the sender has to learn that it did not make it. An explicit reject is a visible failure a client can handle; a silent drop is a trade that both sides believe happened differently. The nack rate alerts on any sustained non-zero value.",
+        numbers: [],
         breaks: "Backpressure penalises everyone sharing that producer connection, which is why the quota lives per participant at the gateway rather than as one global valve.",
       },
     },
@@ -495,7 +513,7 @@ export const MARKET_DATA_INGEST: Diagram = {
       detail: {
         what: "Recovery: a restarted or promoted consumer loads its newest snapshot and replays the sequenced log forward from that snapshot's sequence number.",
         why: "Snapshot plus log is the entire recovery story, and it is the same mechanism a hot standby runs continuously, which is why failover is a promotion rather than a rebuild. Sequential replay reads far faster than line rate.",
-        numbers: ["at most 30s of replay at a 30s snapshot cadence", "RTO seconds"],
+        numbers: ["at most 30s of replay at a 30s snapshot cadence"],
         breaks: "Replay only reproduces the original if the processing path is deterministic, so a byte-for-byte replay equality check belongs in CI; determinism regressions stay silent until the day you actually need to recover.",
       },
     },
@@ -504,10 +522,10 @@ export const MARKET_DATA_INGEST: Diagram = {
       from: "shards",
       to: "matching-cores",
       tier: "hot",
-      label: "in seq order, Q42 sink",
+      label: "in seq order, to matching",
       detail: {
         what: "The hand-off that ends this pipeline: ordered per-instrument events delivered to the matching core that owns that book.",
-        why: "The boundary is drawn here on purpose. Everything upstream exists to make this one delivery safe: gap-free, in order, and flagged if the book behind it is not trustworthy.",
+        why: "This boundary exists on purpose. Everything upstream exists to make this one delivery safe: gap-free, in order, and flagged if the book behind it is not trustworthy.",
         numbers: ["p99 ingest to dispatch in tens of µs"],
         breaks: "Order flow arriving for a stale instrument must be rejected here rather than matched, because matching against a book you know is incomplete produces an execution nobody can undo.",
       },

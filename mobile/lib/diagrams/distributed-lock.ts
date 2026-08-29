@@ -10,12 +10,30 @@ export const DISTRIBUTED_LOCK: Diagram = {
     shape:
       "Two mechanisms, not one: a consensus cluster grants time-bounded ownership of a key, and the protected resource refuses any write carrying a token older than the last one it accepted.",
     beats: [
-      "A call site picks its lock class before it picks a lock. Correctness locks, roughly 1k acquires per second across ten money-moving services, go to consensus and come back with a token. The other 9k per second, cache refills and cron dedupe, go to Redis, where a duplicate holder is waste rather than damage.",
-      "The grant side is deliberately thin. Three etcd nodes acknowledge nothing until a majority holds it durably, so a leader change or a partition cannot record two grants for the same key, and every grant carries a 30 second TTL so a holder that dies does not wedge the key forever.",
-      "The token is the only part of the grant that matters downstream. It is the Raft revision at which the lock key was created, so monotonicity is a property of the log rather than a feature someone implemented and could get subtly wrong. A separate counter service would be a second consensus problem you now own.",
-      "Then the holder pauses. A 35 second stop-the-world collection under a 20 second lease expires the lease while the process is frozen, so the next holder acquires with token 34 and writes, and the first resumes mid-function believing nothing happened. Nothing at the lock service prevents this, because the service behaved correctly at every step.",
-      "So the check lives at the resource, inside the same statement as the write. The conditional UPDATE compares and advances max_seen_token atomically; zero rows affected means fenced out, and the caller has to treat that as terminal rather than something to retry. A read, then a compare in application code, then a write reopens exactly the gap the fence exists to close.",
-      "Enforce it in the storage layer rather than requesting it of clients, because the guarantee is only as strong as the least disciplined writer: one nightly batch job or one operator applying a manual fix bypasses a client-side fence with no signal anywhere. And accept that some resources cannot be fenced at all, at which point the lock is advisory and you should say so.",
+      {
+        text: "A call site picks its lock class before it picks a lock. Correctness locks, roughly 1k acquires per second across ten money-moving services, go to consensus and come back with a token. The other 9k per second, cache refills and cron dedupe, go to Redis, where a duplicate holder is waste rather than damage.",
+        lights: ["router", "etcd", "redis", "e2", "e3"],
+      },
+      {
+        text: "The grant side is deliberately thin. Three etcd nodes acknowledge nothing until a majority holds it durably, so a leader change or a partition cannot record two grants for the same key, and every grant carries a 30 second TTL so a holder that dies does not wedge the key forever.",
+        lights: ["grant-side", "etcd", "lease", "e5"],
+      },
+      {
+        text: "The token is the only part of the grant that matters downstream. It is the Raft revision at which the lock key was created, so monotonicity is a property of the log rather than a feature someone implemented and could get subtly wrong. A separate counter service would be a second consensus problem you now own.",
+        lights: ["fence-token", "etcd", "e6"],
+      },
+      {
+        text: "Then the holder pauses. A 35 second stop-the-world collection under a 20 second lease expires the lease while the process is frozen, so the next holder acquires with token 34 and writes, and the first resumes mid-function believing nothing happened. Nothing at the lock service prevents this, because the service behaved correctly at every step.",
+        lights: ["worker-a", "worker-b", "fence-token", "e7", "e8", "e9"],
+      },
+      {
+        text: "So the check lives at the resource, inside the same statement as the write. The conditional UPDATE compares and advances max_seen_token atomically; zero rows affected means fenced out, and the caller has to treat that as terminal rather than something to retry. A read, then a compare in application code, then a write reopens exactly the gap the fence exists to close.",
+        lights: ["fence-check", "resource", "e10", "e11", "e12"],
+      },
+      {
+        text: "Enforce it in the storage layer rather than requesting it of clients, because the guarantee is only as strong as the least disciplined writer: one nightly batch job or one operator applying a manual fix bypasses a client-side fence with no signal anywhere. And accept that some resources cannot be fenced at all, at which point the lock is advisory and you should say so.",
+        lights: ["fence-check", "resource"],
+      },
     ],
     crux:
       "A holder cannot verify it still holds the lock at the instant of its write, because any check it performs can be followed by another pause before the write lands. The only party that sees both writes is the resource, so the resource is the only place safety can live. Everything the lock service does is contention control wearing the word safety.",
@@ -33,8 +51,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       kind: "zone",
       detail: {
         what: "The part of the design that hands out time-bounded ownership: a majority-commit cluster, the lease that expires it, and the log position that names it.",
-        why: "It is drawn as one zone because none of its three pieces is independently useful. A grant with no expiry wedges the key when a holder dies, and an expiry with no token is a promise nobody downstream can check.",
-        numbers: ["3 or 5 nodes", "majority commit per grant", "30s TTL"],
+        why: "It is one zone because none of its three pieces is independently useful. A grant with no expiry wedges the key when a holder dies, and an expiry with no token is a promise nobody downstream can check.",
+        numbers: ["3 or 5 nodes", "majority (2 of 3) commit per grant", "30s TTL"],
         breaks:
           "Everything in this zone can be flawless and two workers still write the same record, because the conflict happens one hop further down at the resource.",
       },
@@ -48,10 +66,18 @@ export const DISTRIBUTED_LOCK: Diagram = {
       row: 1,
       detail: {
         what: "The process that acquired the lock first, did some work, and then stopped running for 35 seconds inside a stop-the-world garbage collection pause.",
-        why: "It is drawn as a first-class component because it is the failure the whole design answers to. A holder that is merely slow rather than dead is indistinguishable from a dead one at the lock service, and it wakes up with no notification that its lease expired.",
-        numbers: ["20s lease", "35s pause", "renewal thread frozen too"],
+        why: "It is a first-class component because it is the failure the whole design answers to. A holder that is merely slow rather than dead is indistinguishable from a dead one at the lock service, and it wakes up with no notification that its lease expired.",
+        numbers: ["20s lease", "35s pause", "0 renewals sent during the freeze"],
         breaks:
           "It resumes mid-function still believing it holds the lock and issues a write with token 33, which is stale by the time it lands.",
+        choice: {
+          pick: "Let the lease simply expire and rely on the resource-side fence to reject the stale write",
+          instead: "Have the worker watch its own lease and abort mid-function the instant it is revoked.",
+          decider:
+            "Whether a frozen process can run its own abort code. A 35s stop-the-world pause freezes every thread, the watch callback included, so self-detection is unavailable during exactly the failure that matters; the only party still running when the stale write lands is the resource itself.",
+          flips:
+            "Pauses caused by blocked I/O rather than a frozen runtime, where a watch thread keeps scheduling and can genuinely cancel the pending write before it is sent.",
+        },
       },
     },
     {
@@ -63,10 +89,18 @@ export const DISTRIBUTED_LOCK: Diagram = {
       row: 3,
       detail: {
         what: "The second process, which acquires the key legitimately once A's lease expires and writes to the resource with a strictly higher token.",
-        why: "It exists in the diagram to make the race concrete. Without a second acquirer the lease expiry is harmless; with one, two live processes each believe they are the holder and both issue writes into the same row.",
-        numbers: ["acquires at t=22", "token 34", "write accepted"],
+        why: "It exists to make the race concrete. Without a second acquirer the lease expiry is harmless; with one, two live processes each believe they are the holder and both issue writes into the same row.",
+        numbers: ["acquires at t=22", "token 34", "1 write accepted, fence_token 34"],
         breaks:
           "Its correct write is the one that gets silently overwritten if the resource does not fence, so the visible symptom is corruption attributed to B rather than to A.",
+        choice: {
+          pick: "Poll for the key with jittered backoff after a null acquire",
+          instead: "Block on a server-side wait queue and be woken when the key frees.",
+          decider:
+            "Visibility against latency. A wait queue wakes the next holder in roughly one round trip, but hides queue depth inside the service; polling costs an extra request per attempt but leaves per-key contention visible as a metric the caller can act on.",
+          flips:
+            "A single hot key with many waiters, where the O(waiters) cost of everyone polling every interval genuinely dominates and a FIFO wait queue is worth the lost visibility.",
+        },
       },
     },
     {
@@ -75,7 +109,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       kind: "service",
       col: 0,
       row: 0,
-      sub: "lock class; or a version CAS",
+      sub: "picks lock class per call site",
       detail: {
         what: "The client-side decision, made per call site rather than globally, about which backend a given lock goes to and whether it returns a fencing token at all.",
         why: "Sizing only works if the two lock classes are counted separately, because they land on different backends and only one of them is anywhere near a ceiling. Putting all 10k acquires/s on consensus wastes headroom; putting all of them on Redis makes money movement unsafe.",
@@ -150,7 +184,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "A number returned with every grant that strictly increases across successive grants, taken from the position of that grant in the consensus log.",
         why: "It is the one thing the lock service produces that the resource can check. It has to come from something that already has a single agreed order, and a renewal deliberately does not mint a new one, or an in-flight write from the correct holder would be rejected by your own fence.",
-        numbers: ["strictly increasing per key", "globally increasing for free", "renewal keeps the same token"],
+        numbers: ["1 strictly increasing value per key", "no 2nd system needed, increases globally for free", "0 new tokens minted on renewal"],
         breaks:
           "A token minted anywhere other than the log. A separate counter service is a second consensus problem, and a counter that resets or lags on failover fences out the wrong writer.",
         choice: {
@@ -243,7 +277,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "The acquire call, carrying the lock key and the TTL the caller wants.",
         why: "The API is deliberately three calls, acquire, release and renew, because anything richer tempts callers into holding state the service cannot verify. The TTL is passed per call because a 2 second ledger post and a 60 second batch step want very different expiries.",
-        numbers: ["acquire, release, renew", "TTL passed per call"],
+        numbers: ["3 calls: acquire, release, renew", "1 TTL argument passed per call"],
         breaks:
           "A caller that sizes the TTL against expected work rather than worst-case pause gets expired mid-section routinely, which is survivable only because the fence exists.",
       },
@@ -285,7 +319,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "Worker B's acquire while A still holds the key, which returns null rather than blocking.",
         why: "Returning null and letting the caller decide keeps the lock service out of the caller's scheduling. A blocking acquire hides queue depth inside the service, where you cannot see which key is pathological.",
-        numbers: ["null means held, come back later", "wait-queue depth tracked per key"],
+        numbers: ["0 blocking; null means held, come back later", "1 wait-queue depth metric tracked per key"],
         breaks:
           "Redis SETNX has no queue at all, so everyone polls and an arbitrary poller wins, leaving wait times unbounded for the unlucky.",
       },
@@ -299,7 +333,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "The grant being bound to a lease, a TTL'd object identified by a lease id, with the lock key attached to it.",
         why: "Binding the key to a lease rather than writing an expiry into the value is what makes release automatic: when the lease is revoked or expires, the key attached to it disappears without anyone having to run cleanup.",
-        numbers: ["TTL 30s", "key dies with the lease"],
+        numbers: ["TTL 30s", "1 key tied to 1 lease; dies with it"],
         breaks:
           "A holder that crashes between acquiring and starting work still holds the key for the full TTL, so TTL directly bounds how long a dead holder blocks everyone else.",
       },
@@ -313,7 +347,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "The revision at which the lock key was created being read back out as the token for this grant.",
         why: "Nothing is computed here, which is the point. The number already exists as a consequence of committing to the log, so its monotonicity is inherited rather than implemented and there is no counter to get wrong on failover.",
-        numbers: ["mod_revision in etcd", "czxid in ZooKeeper"],
+        numbers: ["0 extra computation: etcd uses mod_revision", "0 extra computation: ZooKeeper uses czxid"],
         breaks:
           "Systems without a shared log cannot supply this edge at all, which is exactly why a resource-side fence cannot be retrofitted onto Redlock.",
       },
@@ -328,7 +362,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       detail: {
         what: "The first grant returning to Worker A: ownership of the key plus token 33.",
         why: "The token travels back to the client because the client is what will attach it to every write. This is the moment ownership becomes something a third party can verify, rather than something only the lock service knows.",
-        numbers: ["token 33", "lease starts here"],
+        numbers: ["token 33", "1 lease created here, TTL 30s"],
         breaks:
           "This is the last notification A ever gets. Nothing tells it when the lease expires, so from here on its belief about ownership is a memory of the past.",
       },
