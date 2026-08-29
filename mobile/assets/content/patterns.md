@@ -522,7 +522,7 @@ With three replicas, waiting for all three to answer every request would make th
 Worked example, the counterexample worth carrying. A write to N=3 with W=2 reaches replica 1, and the coordinator dies before reaching replica 2, so the write is never actually acknowledged to the client. A later R=2 read hitting replicas 1 and 3 returns the new value. A read straight after that, hitting replicas 2 and 3, does not. Two reads, no write in between, two different answers, which a linearizable store forbids.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Any W=2 acknowledging set and any R=2 responding set out of 3 replicas must share a member; the shared member is what a read is guaranteed to see">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 358 253" role="img" aria-label="Any W=2 acknowledging set and any R=2 responding set out of 3 replicas must share a member; the shared member is what a read is guaranteed to see">
   <style>
     .set{fill:var(--accent);fill-opacity:.12;stroke:var(--accent);stroke-width:1.5}
     .set2{fill:currentColor;fill-opacity:.08;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
@@ -758,7 +758,7 @@ The uniqueness guarantee assumes `(timestamp, sequence)` never repeats within on
 Worked example. A VM is live-migrated and its clock jumps back three seconds, from `1740000003000` to `1740000000000`. Under the bad version, the generator keeps issuing, and every ID it mints in the next three seconds duplicates one it already issued moments earlier. Under the great version, the guard sees `now < last_ts`, halts issuance, alerts, and rejoins only once the wall clock genuinely passes `last_ts` again, never overlapping its own earlier output.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Wall clock steps backward three seconds; the guard halts at the moment of the step and only resumes once real time passes the last timestamp used, never overlapping earlier output">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 393 195" role="img" aria-label="Wall clock steps backward three seconds; the guard halts at the moment of the step and only resumes once real time passes the last timestamp used, never overlapping earlier output">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .before{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}
@@ -773,9 +773,9 @@ Worked example. A VM is live-migrated and its clock jumps back three seconds, fr
   <rect class="halt" x="135" y="85" width="130" height="30"/><text class="lbl" x="200" y="105">HALT</text>
   <rect class="after" x="275" y="85" width="105" height="30"/><text class="lbl" x="327" y="105">resume</text>
   <text class="lbl" x="200" y="70">clock steps back 3s here</text>
-  <text class="sub" x="8" y="150">normal: issuing, last_ts climbing</text>
-  <text class="sub" x="8" y="167">HALT: now &lt; last_ts → halt, alert, refuse to issue</text>
-  <text class="sub" x="8" y="184">resume: once real time passes last_ts again</text>
+  <text class="sub" x="8" y="150" style="text-anchor:start">normal: issuing, last_ts climbing</text>
+  <text class="sub" x="8" y="167" style="text-anchor:start">HALT: now &lt; last_ts → halt, refuse to issue</text>
+  <text class="sub" x="8" y="184" style="text-anchor:start">resume: once real time passes last_ts again</text>
 </svg>
 ```
 
@@ -793,7 +793,7 @@ The `now < last_ts` check works only as long as `last_ts` survives. What happens
 A crash restart inside the reserved window simply sleeps until the wall clock passes the watermark, so the cost lands entirely on restart latency, up to ten seconds, rather than on correctness. Tune the window against how often the process actually restarts, and log the sleep loudly, since a crash-looping process with this guard in front of it looks like a hang rather than a crash.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="The watermark is fsynced ten seconds ahead of issuance; a crash restart inside that window sleeps until real time catches up, rather than reissuing anything">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 393 193" role="img" aria-label="The watermark is fsynced ten seconds ahead of issuance; a crash restart inside that window sleeps until real time catches up, rather than reissuing anything">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .issued{fill:var(--accent);fill-opacity:.2;stroke:var(--accent);stroke-width:1.4}
@@ -806,9 +806,9 @@ A crash restart inside the reserved window simply sleeps until the wall clock pa
   <rect class="issued" x="20" y="85" width="185" height="30"/><text class="lbl" x="112" y="105">issued</text>
   <rect class="reserved" x="205" y="85" width="175" height="30"/><text class="lbl" x="292" y="105">reserved</text>
   <text class="lbl" x="292" y="70">watermark: fsynced now+10s</text>
-  <text class="sub" x="8" y="150">issued: real issuance so far, real time</text>
-  <text class="sub" x="8" y="167">crash + restart lands here: sleep until real</text>
-  <text class="sub" x="8" y="182">time passes the watermark, nothing reissued</text>
+  <text class="sub" x="8" y="150" style="text-anchor:start">issued: real issuance so far, real time</text>
+  <text class="sub" x="8" y="167" style="text-anchor:start">crash + restart: sleep until real time</text>
+  <text class="sub" x="8" y="182" style="text-anchor:start">passes the watermark, nothing reissued</text>
 </svg>
 ```
 
@@ -1016,7 +1016,7 @@ Deletion has to reach every copy of a redirect for a takedown to actually work, 
 The choice between 301 and 302 is really this same trade-off, stated once at creation time instead of once per takedown. A 301 lets the browser skip asking again entirely, which is the cheapest possible answer for a link that will never change and where nobody is paying for click data. It also means that browser can never be reached again by any mechanism this design controls: the redirect it cached is unreachable, permanently, the moment the destination needs to change. A 302 keeps every client re-checking on a short cycle, at the cost of that cycle's worth of continuous edge traffic, in exchange for keeping the ability to retract or redirect the link at all.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="A deletion reaches four layers at different speeds: origin instantly, the memory cache on the same write, the CDN edge within its TTL or an explicit purge, and a browser holding a 301 not at all">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 388 179" role="img" aria-label="A deletion reaches four layers at different speeds: origin instantly, the memory cache on the same write, the CDN edge within its TTL or an explicit purge, and a browser holding a 301 not at all">
   <style>
     .fast{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
     .slow{fill:currentColor;fill-opacity:.1;stroke:currentColor;stroke-opacity:.55;stroke-width:1.4}
@@ -1241,7 +1241,7 @@ Some sites generate URLs without limit, one boilerplate page repeated under an e
 **Great: track novelty rate against content similarity, per domain, and throttle when they diverge.** A domain where nearly every extracted URL is new, and nearly every fetched page is a near-duplicate by content fingerprint, is a trap by definition: distinct addresses, indistinguishable content. Tracking the two signals together catches what neither catches alone, because a domain that is genuinely prolific has both new URLs and new content, while a trap has only the first.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Four domains plotted by URL novelty rate against content fingerprint diversity; only the quadrant with high novelty and low content diversity is a trap">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 415 229" role="img" aria-label="Four domains plotted by URL novelty rate against content fingerprint diversity; only the quadrant with high novelty and low content diversity is a trap">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.45;stroke-width:1.3}
     .trap{fill:var(--accent);fill-opacity:.18;stroke:var(--accent);stroke-width:1.4}
@@ -1434,7 +1434,7 @@ Throughput here is nothing. What actually needs protecting is a person's patienc
 The bypass flag is also the mechanism's weak point, and it has to be guarded on purpose. Once a category can skip the cap, every team has an incentive to mark its own traffic transactional, and the gate stops protecting anyone once enough traffic bypasses it. The usable rule: treat any category running above roughly 20% bypass volume as evidence its classification has drifted, and review it.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="Notification volume per user is heavily skewed: the average user gets under one a day, while the p99 user is above forty; a cap sized for the average protects nobody">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 196" role="img" aria-label="Notification volume per user is heavily skewed: the average user gets under one a day, while the p99 user is above forty; a cap sized for the average protects nobody">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .bar{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.4}
@@ -1442,7 +1442,7 @@ The bypass flag is also the mechanism's weak point, and it has to be guarded on 
     .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{text-anchor:middle}
   </style>
-  <text class="lbl" x="8" y="16">the cap is sized at the tail, not the median</text>
+  <text class="lbl" x="8" y="16" style="text-anchor:start">the cap is sized at the tail, not the median</text>
   <line class="axis" x1="15" y1="160" x2="385" y2="160"/>
   <rect class="bar" x="40" y="150" width="34" height="10"/><text class="sub" x="57" y="180">median: ~0.6/day</text>
   <rect class="bar" x="160" y="120" width="34" height="40"/><text class="sub" x="177" y="180">p90: a few/day</text>
@@ -1592,7 +1592,7 @@ The threshold is not a single number picked by instinct. It is the middle of a b
 Worked example. At a 10,000 threshold, about 4% of follow edges point above the line, so a typical 200-follow reader carries roughly 8 pull sources, comfortably under the 25-source cap. Drop the threshold to 1,000 and that share rises to about 20%, pushing the same reader to roughly 40 sources, past the merge budget the read side allows. The threshold is a config value with a floor and a ceiling, not a constant, and it should move when either side of the capacity changes.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 190" role="img" aria-label="The threshold sits in a band: a read-side floor near 1,000 followers set by the merge budget, and a write-side ceiling near 30,000 set by cache write capacity">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-110 -4 499 183" role="img" aria-label="The threshold sits in a band: a read-side floor near 1,000 followers set by the merge budget, and a write-side ceiling near 30,000 set by cache write capacity">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.45;stroke-width:1.4}
     .band{fill:var(--accent);fill-opacity:.16;stroke:var(--accent);stroke-width:1.4}
@@ -1600,15 +1600,15 @@ Worked example. At a 10,000 threshold, about 4% of follow edges point above the 
     .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{text-anchor:middle}
   </style>
-  <text class="sub" x="8" y="16" text-anchor="start">floor: ~30ms merge budget</text>
-  <text class="sub" x="8" y="32" text-anchor="start">ceiling: ~15M/s cache write capacity</text>
+  <text class="sub" x="8" y="16" text-anchor="start" style="text-anchor:start">floor: ~30ms merge budget</text>
+  <text class="sub" x="8" y="32" text-anchor="start" style="text-anchor:start">ceiling: ~15M/s cache write capacity</text>
   <line class="axis" x1="20" y1="110" x2="380" y2="110"/>
   <rect class="band" x="110" y="88" width="170" height="44"/>
   <text class="lbl" x="195" y="110">defensible band</text>
   <text class="sub" x="110" y="75">~1,000</text>
   <text class="sub" x="280" y="75">~30,000</text>
-  <text class="sub" x="8" y="152" text-anchor="start">10,000 sits near the middle of this band,</text>
-  <text class="sub" x="8" y="168" text-anchor="start">not derived from either bound alone</text>
+  <text class="sub" x="8" y="152" text-anchor="start" style="text-anchor:start">10,000 sits near the middle of this band,</text>
+  <text class="sub" x="8" y="168" text-anchor="start" style="text-anchor:start">not derived from either bound alone</text>
 </svg>
 ```
 
@@ -1652,7 +1652,7 @@ The pull-side merge is capped at roughly 25 sources for the ranking budget's sak
 Worked example. The median reader carries about 8 pull sources, well inside the 25-source cap and effectively unaffected by it. The p99 reader, disproportionately a new account, carries 60 or more, so 35 of those sources contribute nothing to any single load. That is a measurable completeness gap this design accepts rather than closes, because closing it, either by raising the cap for everyone or by adding a per-reader dynamic cap, spends latency budget that the 200ms target does not have.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="Pull sources per reader by percentile: the median reader carries about 8, well under the 25-source cap, while the p99 reader carries 60 or more, well over it">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -5 422 216" role="img" aria-label="Pull sources per reader by percentile: the median reader carries about 8, well under the 25-source cap, while the p99 reader carries 60 or more, well over it">
   <style>
     .axis{stroke:currentColor;stroke-opacity:.4;stroke-width:1.3}
     .bar{fill:var(--accent);fill-opacity:.28;stroke:var(--accent);stroke-width:1.4}
@@ -3108,7 +3108,7 @@ The producer's `acks=all` call has just returned successfully. Where is the data
 **Great: committed means present in the page cache of every in-sync replica.** The leader tracks each follower's log-end-offset and advances the high watermark to the minimum across the in-sync set. Consumers may not read past the high watermark, and `acks=all` is released only once the watermark passes the batch. So "committed" is a claim about replication, never a claim about any disk.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="At the moment acks=all returns, the batch sits in the page cache of the leader and two followers, none of them yet flushed to disk">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -5 400 232" role="img" aria-label="At the moment acks=all returns, the batch sits in the page cache of the leader and two followers, none of them yet flushed to disk">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
@@ -3662,7 +3662,7 @@ RETURNING date;
 Fewer rows returned than nights requested means at least one night is unavailable, and the whole transaction rolls back, returning every lock it briefly held. The all-or-nothing property comes free from that rollback. Deadlock avoidance is a side effect of the primary key rather than a rule anyone has to remember: a range predicate over `(hotel_id, room_type_id, date)` forces an ascending index scan, so two overlapping stays, say the 10th to 12th and the 11th to 13th, both visit the shared nights of the 11th and 12th in the same order, and the second transaction simply waits rather than deadlocking.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="Two overlapping stays both acquire locks in ascending date order, so the later transaction waits on the shared nights instead of deadlocking">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 187" role="img" aria-label="Two overlapping stays both acquire locks in ascending date order, so the later transaction waits on the shared nights instead of deadlocking">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
@@ -3670,16 +3670,16 @@ Fewer rows returned than nights requested means at least one night is unavailabl
     .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="8" y="16" text-anchor="start">Stay A: 10th, 11th, 12th</text>
+  <text class="lbl" x="8" y="16" style="text-anchor:start">Stay A: 10th, 11th, 12th</text>
   <rect class="box acc" x="8" y="26" width="90" height="30" rx="5"/><text class="sub" x="53" y="41">10th</text>
   <rect class="box acc" x="106" y="26" width="90" height="30" rx="5"/><text class="sub" x="151" y="41">11th</text>
   <rect class="box acc" x="204" y="26" width="90" height="30" rx="5"/><text class="sub" x="249" y="41">12th</text>
-  <text class="lbl" x="8" y="88" text-anchor="start">Stay B: 11th, 12th, 13th</text>
+  <text class="lbl" x="8" y="88" style="text-anchor:start">Stay B: 11th, 12th, 13th</text>
   <rect class="box" x="106" y="98" width="90" height="30" rx="5"/><text class="sub" x="151" y="113">11th</text>
   <rect class="box" x="204" y="98" width="90" height="30" rx="5"/><text class="sub" x="249" y="113">12th</text>
   <rect class="box" x="302" y="98" width="90" height="30" rx="5"/><text class="sub" x="347" y="113">13th</text>
-  <text class="sub" x="8" y="156">both scans visit 11th before 12th:</text>
-  <text class="sub" x="8" y="172">A locks first, B waits, nobody deadlocks</text>
+  <text class="sub" x="8" y="156" style="text-anchor:start">both scans visit 11th before 12th:</text>
+  <text class="sub" x="8" y="172" style="text-anchor:start">A locks first, B waits, no deadlock</text>
 </svg>
 ```
 
@@ -4176,7 +4176,7 @@ An index on score makes top-100 trivial in almost any database. It does nothing 
 **Great: a skip list that carries a count on every pointer.** The **Sorted set primary** stores each board as a skip list paired with a hash table. Every forward pointer in the skip list carries a span, the number of nodes it jumps over. Rank is computed by descending from the top level and accumulating spans on the way down, so it costs the same O(log N) as the lookup the structure was already doing, with no separate counting pass.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Descending a skip list tower accumulates the span at each level; the sum of spans passed on the way down is the player's rank, with no separate count of everyone above them">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 183" role="img" aria-label="Descending a skip list tower accumulates the span at each level; the sum of spans passed on the way down is the player's rank, with no separate count of everyone above them">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
@@ -4184,17 +4184,17 @@ An index on score makes top-100 trivial in almost any database. It does nothing 
     .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="8" y="14" text-anchor="start">Level 3</text>
+  <text class="lbl" x="8" y="14" style="text-anchor:start">Level 3</text>
   <rect class="box" x="40" y="6" width="352" height="22" rx="4"/><text class="sub" x="216" y="18">span 40 → target</text>
-  <text class="lbl" x="8" y="58" text-anchor="start">Level 2</text>
+  <text class="lbl" x="8" y="58" style="text-anchor:start">Level 2</text>
   <rect class="box" x="40" y="50" width="170" height="22" rx="4"/><text class="sub" x="125" y="62">span 12</text>
   <rect class="box" x="222" y="50" width="170" height="22" rx="4"/><text class="sub" x="307" y="62">span 20</text>
-  <text class="lbl" x="8" y="102" text-anchor="start">Level 1</text>
+  <text class="lbl" x="8" y="102" style="text-anchor:start">Level 1</text>
   <rect class="box" x="40" y="94" width="80" height="22" rx="4"/><text class="sub" x="80" y="106">4</text>
   <rect class="box" x="128" y="94" width="80" height="22" rx="4"/><text class="sub" x="168" y="106">3</text>
   <rect class="box acc" x="222" y="94" width="170" height="22" rx="4"/><text class="sub" x="307" y="106" fill="var(--accent)">span 5 → player</text>
-  <text class="sub" x="8" y="150">rank = 12 (level 2) + 5 (level 1)</text>
-  <text class="sub" x="8" y="166">= 17th place, no scan of everyone above</text>
+  <text class="sub" x="8" y="150" style="text-anchor:start">rank = 12 (level 2) + 5 (level 1)</text>
+  <text class="sub" x="8" y="166" style="text-anchor:start">= 17th, no scan of everyone above</text>
 </svg>
 ```
 
@@ -4225,7 +4225,7 @@ Two players finish with identical scores. Something has to order them, and the o
 **Great: encode the tiebreaker directly into the score.** `packed = points × 2³¹ + (2³¹ − 1 − t)`, where `t` is seconds since a fixed epoch. Points take 20 bits, the inverted time takes 31, for 51 bits total, inside the 53 bits of exact integer precision an IEEE-754 double carries. Earlier finishers at the same point total naturally rank higher, computed entirely within the one field the structure already sorts on.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 165" role="img" aria-label="A packed score fits 20 bits of points and 31 bits of inverted time into 51 bits, inside the 53 bits of exact integer precision a double carries; a third field would not fit">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-117 -2 462 154" role="img" aria-label="A packed score fits 20 bits of points and 31 bits of inverted time into 51 bits, inside the 53 bits of exact integer precision a double carries; a third field would not fit">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.4}
     .acc{stroke:var(--accent);stroke-width:1.8}
@@ -4233,7 +4233,7 @@ Two players finish with identical scores. Something has to order them, and the o
     .sub{fill:currentColor;opacity:.75;font:11px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="sub" x="8" y="14" text-anchor="start">53 bits of exact integer precision in a double</text>
+  <text class="sub" x="8" y="14" text-anchor="start" style="text-anchor:start">53 bits of exact integer precision in a double</text>
   <rect class="box acc" x="8" y="24" width="116" height="30" rx="4"/><text class="sub" x="66" y="43" fill="var(--accent)">points, 20b</text>
   <rect class="box" x="124" y="24" width="180" height="30" rx="4"/><text class="sub" x="214" y="43">inverted time t, 31b</text>
   <rect class="box" x="304" y="24" width="32" height="30" rx="4" stroke-dasharray="4 3"/><text class="sub" x="320" y="43">2b</text>
@@ -5455,7 +5455,7 @@ Ordinarily the top-ranked candidate's lease succeeds almost every time and this 
 Worked example: a stadium empties, 10,000 people leave, and roughly 3,000 of them open the app inside a minute in one area holding about 300 free cars. The first 300 requests take the available drivers; the remaining 2,700 find nothing. Left unbounded, each of those 2,700 requests walks all ~50 candidates and retries every 2 seconds for a minute: 2,700 × 50 × 30 ≈ **4 million conditional writes** in that one minute, roughly 67,000/s aimed at a few hundred hot keys, against a normal global load of ~2,900/s. Capping the walk at five attempts drops that to 2,700 × 5 × 30 ≈ **405,000**, and the growing backoff interval takes a further factor off it. This is not a performance tweak; it is the difference between a shortage that degrades and one that takes the whole city's dispatch tier down with it.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A bounded walk: five candidate attempts fail at 2km, then the radius widens to 3km and backoff grows before the next pass">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 189" role="img" aria-label="A bounded walk: five candidate attempts fail at 2km, then the radius widens to 3km and backoff grows before the next pass">
   <style>
     .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .fail{fill:currentColor;fill-opacity:.14}
@@ -5464,7 +5464,7 @@ Worked example: a stadium empties, 10,000 people leave, and roughly 3,000 of the
     .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">2km radius: 5 leases attempted, all fail</text>
+  <text class="b" x="8" y="14" style="text-anchor:start">2km radius: 5 leases attempted, all fail</text>
   <g transform="translate(8,24)">
     <rect class="r fail" x="0" y="0" width="66" height="30" rx="6"/><text class="t" x="33" y="15">#1 ✗</text>
     <rect class="r fail" x="74" y="0" width="66" height="30" rx="6"/><text class="t" x="107" y="15">#2 ✗</text>
@@ -5472,14 +5472,14 @@ Worked example: a stadium empties, 10,000 people leave, and roughly 3,000 of the
     <rect class="r fail" x="222" y="0" width="66" height="30" rx="6"/><text class="t" x="255" y="15">#4 ✗</text>
     <rect class="r fail" x="296" y="0" width="66" height="30" rx="6"/><text class="t" x="329" y="15">#5 ✗</text>
   </g>
-  <text class="t" x="8" y="76" text-anchor="start">back off 2s, widen to 3km, retry</text>
+  <text class="t" x="8" y="76" style="text-anchor:start">back off 2s, widen to 3km, retry</text>
   <g transform="translate(8,86)">
     <rect class="r fail" x="0" y="0" width="90" height="30" rx="6"/><text class="t" x="45" y="15">#1 ✗</text>
     <rect class="r fail" x="98" y="0" width="90" height="30" rx="6"/><text class="t" x="143" y="15">#2 ✗</text>
     <rect class="ok" x="196" y="0" width="90" height="30" rx="6"/><text class="t" x="241" y="15">#3 ✓</text>
   </g>
-  <text class="b" x="8" y="150" text-anchor="start">unbounded: 2,700×50×30/min ≈ 4,000,000 writes</text>
-  <text class="b" x="8" y="172" text-anchor="start">bounded: 2,700×5×30/min ≈ 405,000 writes</text>
+  <text class="b" x="8" y="150" style="text-anchor:start">unbounded: 2,700×50×30/min ≈ 4,000,000 writes</text>
+  <text class="b" x="8" y="172" style="text-anchor:start">bounded: 2,700×5×30/min ≈ 405,000 writes</text>
 </svg>
 ```
 
@@ -5870,14 +5870,14 @@ Worked example: a global launch sends tens of millions of plays at one title wit
   </style>
   <text class="b" x="8" y="14">bad: plain LRU, 200 TB disk</text>
   <rect class="r" x="8" y="24" width="376" height="28" rx="6"/>
-  <rect class="pin" x="8" y="24" width="242" height="28"/><text class="t" x="18" y="42" text-anchor="start">pre-positioned</text>
-  <rect class="gone" x="252" y="24" width="132" height="28"/><text class="t" x="262" y="42" text-anchor="start">evicted</text>
-  <text class="t" x="8" y="66" text-anchor="start">launch traffic pushes out bytes placed days earlier</text>
+  <rect class="pin" x="8" y="24" width="242" height="28"/><text class="t" x="18" y="42" text-anchor="start" style="text-anchor:start">pre-positioned</text>
+  <rect class="gone" x="252" y="24" width="132" height="28"/><text class="t" x="262" y="42" text-anchor="start" style="text-anchor:start">evicted</text>
+  <text class="t" x="8" y="66" text-anchor="start" style="text-anchor:start">launch traffic pushes out bytes placed days earlier</text>
   <text class="b" x="8" y="100">great: pinned set, LRU only on the remainder</text>
   <rect class="r" x="8" y="110" width="376" height="28" rx="6"/>
-  <rect class="pin" x="8" y="110" width="242" height="28"/><text class="t" x="18" y="128" text-anchor="start">pinned, never evicted</text>
-  <rect class="lru" x="252" y="110" width="132" height="28"/><text class="t" x="262" y="128" text-anchor="start">ordinary LRU</text>
-  <text class="t" x="8" y="152" text-anchor="start">the flood only ever competes for the unpinned remainder</text>
+  <rect class="pin" x="8" y="110" width="242" height="28"/><text class="t" x="18" y="128" text-anchor="start" style="text-anchor:start">pinned, never evicted</text>
+  <rect class="lru" x="252" y="110" width="132" height="28"/><text class="t" x="262" y="128" text-anchor="start" style="text-anchor:start">ordinary LRU</text>
+  <text class="t" x="8" y="152" text-anchor="start" style="text-anchor:start">the flood only ever competes for the unpinned remainder</text>
 </svg>
 ```
 
@@ -6523,7 +6523,7 @@ A single popular key cannot be sharded further, because a key lives entirely on 
 Worked example: a trending list can sit behind an in-process L1 with a 1-second TTL, because being a second stale changes nothing anyone will notice. A price or an entitlement flag cannot, because a stale L1 has no path back to it, a delete simply cannot reach 10,000 process heaps, so it gets key-level replication instead, which keeps delete working at the cost of dividing rather than eliminating its load. The choice between the two is exactly the staleness budget for that key class, not a performance question.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="One hot key saturates a single shard's NIC at 16 Gbps while 59 other shards sit near idle at 1.3 Gbps each">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 201" role="img" aria-label="One hot key saturates a single shard's NIC at 16 Gbps while 59 other shards sit near idle at 1.3 Gbps each">
   <style>
     .hot{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .idle{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
@@ -6531,7 +6531,7 @@ Worked example: a trending list can sit behind an in-process L1 with a 1-second 
     .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">one key, one shard, whatever the cluster's capacity</text>
+  <text class="b" x="8" y="14" style="text-anchor:start">one key, one shard, whatever the capacity</text>
   <rect class="hot" x="30" y="30" width="34" height="120"/>
   <text class="t" x="47" y="24">~16 Gbps</text>
   <text class="t" x="47" y="166">shard 1</text>
@@ -6541,7 +6541,7 @@ Worked example: a trending list can sit behind an in-process L1 with a 1-second 
     <rect class="idle" x="156" y="0" width="22" height="10"/><rect class="idle" x="182" y="0" width="22" height="10"/><rect class="idle" x="208" y="0" width="22" height="10"/>
     <rect class="idle" x="234" y="0" width="22" height="10"/>
   </g>
-  <text class="t" x="90" y="184" text-anchor="start">...59 other shards, each ~1.3 Gbps</text>
+  <text class="t" x="90" y="184" style="text-anchor:start">...59 other shards, each ~1.3 Gbps</text>
 </svg>
 ```
 
@@ -7175,14 +7175,14 @@ Deciding how operations get their order, one dedicated process per document or a
 Worked example: at 2 operations/s per editor, two concurrent editors collide on roughly 4% of conditional appends to a shared log, a tolerable retry rate. Twenty concurrent editors, this design's own p99 for a single document, collide on roughly half of all appends, and 50% retries at 5 to 20ms each destroys most of a 200ms latency budget precisely on the documents where real-time collaboration matters most. A pinned owner avoids that curve entirely, at the cost of needing a coordination service and accepting a brief read-only window during failover.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Conditional-append retry rate against a shared log climbs sharply with concurrent editors on one document, from about 4 percent at two editors to about 50 percent at twenty">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 215" role="img" aria-label="Conditional-append retry rate against a shared log climbs sharply with concurrent editors on one document, from about 4 percent at two editors to about 50 percent at twenty">
   <style>
     .bar{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.5}
     .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
     .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">retry rate by concurrent editors, one shared log</text>
+  <text class="b" x="8" y="14" style="text-anchor:start">retry rate vs concurrent editors, one log</text>
   <rect class="bar" x="31" y="162" width="34" height="8"/>
   <rect class="bar" x="127" y="136" width="34" height="34"/>
   <rect class="bar" x="223" y="102" width="34" height="68"/>
@@ -7320,7 +7320,7 @@ The order the four funnel stages run in looks like an implementation detail and 
 Worked example: a new user with almost no swipe history and a three-year power user with tens of thousands of swipes both hit the ranker with the same fixed cardinality, roughly 1,500 candidates, because exclusion has already done its work before ranking starts. Under rank-then-exclude, the power user's request would need to fetch and score a far larger initial pool just to yield the same 20 usable results, silently making the most engaged users the most expensive ones to serve, exactly backwards from what a healthy system wants.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="The funnel narrows from 10,000 candidates after geo to 3,000 after preferences to 1,500 after exclusion; only then does the expensive ranker run, over a fixed cardinality regardless of how depleted the user's pool is">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-126 -6 489 203" role="img" aria-label="The funnel narrows from 10,000 candidates after geo to 3,000 after preferences to 1,500 after exclusion; only then does the expensive ranker run, over a fixed cardinality regardless of how depleted the user's pool is">
   <style>
     .bar{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .rank{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
@@ -7328,7 +7328,7 @@ Worked example: a new user with almost no swipe history and a three-year power u
     .b{font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">funnel narrows before the ranker ever runs</text>
+  <text class="b" x="8" y="14" text-anchor="start" style="text-anchor:start">funnel narrows before the ranker ever runs</text>
   <rect class="bar" x="8" y="30" width="70" height="140"/>
   <rect class="bar" x="100" y="128" width="70" height="42"/>
   <rect class="bar" x="192" y="149" width="70" height="21"/>
@@ -7393,7 +7393,7 @@ It is tempting to treat a single daily impression cap as the answer to popularit
 Worked example: in a metro where the mean profile is shown roughly 32 times a day, a decaying multiplier beginning around 320 impressions a day, ten times that mean, gently reduces an increasingly popular profile's future ranking score well before it ever approaches the 50,000-impression circuit breaker. Applying the decay at the scoring stage rather than by removing budget-exhausted profiles from the candidate set entirely is what keeps a small pool from suddenly losing a chunk of its candidates the moment a popular profile crosses the threshold.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 224" role="img" aria-label="Mean profile exposure is about 32 impressions a day; the fairness multiplier begins decaying around 320, ten times the mean; the hard cap sits at 50,000, about 1,500 times the mean, and exists only to protect a database partition">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 233" role="img" aria-label="Mean profile exposure is about 32 impressions a day; the fairness multiplier begins decaying around 320, ten times the mean; the hard cap sits at 50,000, about 1,500 times the mean, and exists only to protect a database partition">
   <style>
     .mean{fill:currentColor;fill-opacity:.3;stroke:currentColor;stroke-width:1.5}
     .decay{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
@@ -7401,14 +7401,14 @@ Worked example: in a metro where the mean profile is shown roughly 32 times a da
     .t{font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
     text{text-anchor:middle}
   </style>
-  <text class="t" x="30" y="14" text-anchor="start">mean, decay start, and the hard cap</text>
+  <text class="t" x="8" y="14" style="text-anchor:start">mean, decay start, and the hard cap</text>
   <rect class="mean" x="30" y="162" width="14" height="8"/>
   <rect class="decay" x="170" y="120" width="14" height="50"/>
   <rect class="cap" x="330" y="30" width="14" height="140"/>
   <text class="t" x="37" y="184">mean</text><text class="t" x="37" y="198">~32/day</text>
   <text class="t" x="177" y="184">decay starts</text><text class="t" x="177" y="198">~320/day (10x)</text>
   <text class="t" x="337" y="184">hard cap</text><text class="t" x="337" y="198">50,000/day</text>
-  <text class="t" x="8" y="216" text-anchor="start">cap protects a partition; decay redistributes attention</text>
+  <text class="t" x="8" y="216" style="text-anchor:start">cap protects a partition; decay redistributes attention</text>
 </svg>
 ```
 
@@ -7538,7 +7538,7 @@ The single decision the rest of this design depends on is whether repositories l
 Worked example: a diff, blame or merge on a large, busy repository can touch roughly 50,000 objects scattered through a packfile. On local NVMe that is about 4 seconds of I/O; on a network filesystem at 500 microseconds to a millisecond per read, the identical operation costs 25 to 50 seconds, a gap that stays roughly constant regardless of how much caching sits in front of it, because the working set of a genuinely busy repository does not fit in any shared cache tier that also has to serve everyone else's repositories.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 206" role="img" aria-label="50,000 random reads for one git operation cost about 4 seconds on local NVMe against 25 to 50 seconds on a network filesystem, a gap caching cannot close">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-164 -7 507 214" role="img" aria-label="50,000 random reads for one git operation cost about 4 seconds on local NVMe against 25 to 50 seconds on a network filesystem, a gap caching cannot close">
   <style>
     .fast{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .slow{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
@@ -7546,12 +7546,12 @@ Worked example: a diff, blame or merge on a large, busy repository can touch rou
     .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">50,000 random reads, one busy-repo operation</text>
+  <text class="b" x="8" y="14" text-anchor="start" style="text-anchor:start">50,000 random reads, one busy-repo operation</text>
   <rect class="fast" x="40" y="140" width="60" height="20"/>
   <rect class="slow" x="180" y="40" width="60" height="120"/>
   <text class="t" x="70" y="176">local NVMe, ~4s</text>
   <text class="t" x="210" y="176">network FS, 25-50s</text>
-  <text class="t" x="8" y="196" text-anchor="start">not closable by caching: working set exceeds any cache tier</text>
+  <text class="t" x="8" y="196" text-anchor="start" style="text-anchor:start">not closable by caching: working set exceeds any cache tier</text>
 </svg>
 ```
 
@@ -7751,7 +7751,7 @@ The decision to fetch a track as one file rather than as adaptive segments looks
 Worked example: a 160kbps four-minute track is 4.8MB, and on a 5Mbps connection the whole file lands in under 8 seconds, comfortably inside the first 15 seconds of playback that follows first audio at around 120 milliseconds. A two-hour video title at 5 to 15GB has no equivalent moment where the whole object could reasonably be pre-fetched, which is precisely why the two products' delivery designs diverge despite looking superficially similar.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 206" role="img" aria-label="A 4.8MB track downloads whole in under 8 seconds on a 5 Mbps connection; a 5 to 15GB video file has no equivalent moment where downloading the whole object is reasonable">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-135 -7 439 218" role="img" aria-label="A 4.8MB track downloads whole in under 8 seconds on a 5 Mbps connection; a 5 to 15GB video file has no equivalent moment where downloading the whole object is reasonable">
   <style>
     .track{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .video{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
@@ -7759,12 +7759,12 @@ Worked example: a 160kbps four-minute track is 4.8MB, and on a 5Mbps connection 
     .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">object size, drawn to a compressed scale</text>
+  <text class="b" x="8" y="14" text-anchor="start" style="text-anchor:start">object size, drawn to a compressed scale</text>
   <rect class="track" x="40" y="150" width="20" height="10"/>
   <rect class="video" x="220" y="40" width="20" height="120"/>
   <text class="t" x="50" y="176">track, ~4.8MB, &lt;8s</text>
   <text class="t" x="230" y="176">video, 5-15GB, chunked</text>
-  <text class="t" x="8" y="200" text-anchor="start">threshold ~25MB: above a track, below any video</text>
+  <text class="t" x="8" y="200" text-anchor="start" style="text-anchor:start">threshold ~25MB: above a track, below any video</text>
 </svg>
 ```
 
@@ -7793,7 +7793,7 @@ Worked example: for the large majority of listeners, their realistic universe of
   <rect class="repeat" x="8" y="20" width="305" height="36" rx="5"/><text class="lbl" x="160" y="42" text-anchor="middle">~81% repeat: scan &lt;10k tracks, no model</text>
   <rect class="novel" x="313" y="20" width="71" height="36" rx="5"/>
   <text class="sub" x="348" y="72" text-anchor="middle">~19% first hear</text>
-  <text class="sub" x="8" y="100" text-anchor="start">the funnel most candidates use only decides this slice</text>
+  <text class="sub" x="8" y="100" text-anchor="start" style="text-anchor:start">the funnel most candidates use only decides this slice</text>
 </svg>
 ```
 
@@ -7976,7 +7976,7 @@ Once ticks and rules share a process, the next question is how that process avoi
 Worked example: 500,000 rules parked on one instrument during an earnings surprise, scanned as a flat list against a burst of 1,000 ticks/s, would need roughly 500 million comparisons a second, several fully saturated cores doing nothing but comparing thresholds. The same rules held in a threshold-sorted index mean an 8% jump touches only the rules whose thresholds actually sit inside that 8% band, typically a tiny fraction of the half million, turning an unworkable scan into single-digit-millisecond evaluation.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 175" role="img" aria-label="A flat scan of 500,000 rules against a 1,000 ticks per second burst needs roughly 500 million comparisons a second; a threshold-sorted index touches only the rules whose trigger sits inside the moved price interval">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 180" role="img" aria-label="A flat scan of 500,000 rules against a 1,000 ticks per second burst needs roughly 500 million comparisons a second; a threshold-sorted index touches only the rules whose trigger sits inside the moved price interval">
   <style>
     .bad{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .good{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
@@ -7984,15 +7984,15 @@ Worked example: 500,000 rules parked on one instrument during an earnings surpri
     .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">bad: flat scan, all 500,000 rules, every tick</text>
+  <text class="b" x="8" y="14" style="text-anchor:start">bad: flat scan, all 500,000 rules, every tick</text>
   <rect class="bad" x="8" y="24" width="376" height="28" rx="5"/><text class="t" x="196" y="42">~500M comparisons/s during an earnings burst</text>
-  <text class="b" x="8" y="90" text-anchor="start">great: threshold index, only the moved interval</text>
+  <text class="b" x="8" y="90" style="text-anchor:start">great: threshold index, only the moved interval</text>
   <line x1="8" y1="120" x2="384" y2="120" stroke="currentColor" stroke-opacity=".35"/>
   <rect class="good" x="185" y="106" width="18" height="28"/>
   <text class="t" x="194" y="148">rules with trigger inside</text>
   <text class="t" x="194" y="162">[prev, now]</text>
-  <text class="t" x="8" y="148" text-anchor="start">unmoved rules,</text>
-  <text class="t" x="8" y="162" text-anchor="start">never touched</text>
+  <text class="t" x="8" y="148" style="text-anchor:start">unmoved rules,</text>
+  <text class="t" x="8" y="162" style="text-anchor:start">never touched</text>
 </svg>
 ```
 
@@ -8182,7 +8182,7 @@ Deciding how price levels are stored looks like a routine data-structure choice,
 Worked example: a $190 equity on a penny tick, banded at plus or minus 20%, needs roughly 7,600 levels, about 486KB, cheap enough to keep dense for the top 500 symbols at roughly 243MB total. An options contract on a $0.0001 tick over a $0 to $500 range needs roughly 5 million levels, around 320MB for that single contract alone, which makes the identical dense scheme unaffordable the moment the tick range widens, and is exactly why the rule of thumb sits at roughly 100,000 ticks per book as the crossover point.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="A dense array costs about 486KB per book for a normal equity; dense-banding the top 500 symbols costs about 243MB; dense-banding all 10,000 listed instruments would cost about 4.9GB, mostly empty">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 217" role="img" aria-label="A dense array costs about 486KB per book for a normal equity; dense-banding the top 500 symbols costs about 243MB; dense-banding all 10,000 listed instruments would cost about 4.9GB, mostly empty">
   <style>
     .small{fill:var(--accent);fill-opacity:.32;stroke:var(--accent);stroke-width:1.5}
     .big{fill:currentColor;fill-opacity:.14;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
@@ -8190,13 +8190,14 @@ Worked example: a $190 equity on a penny tick, banded at plus or minus 20%, need
     .b{font:600 12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
     text{text-anchor:middle}
   </style>
-  <text class="b" x="8" y="14" text-anchor="start">density pays off for the hot list; the tree covers the tail</text>
-  <rect class="small" x="40" y="160" width="30" height="10"/>
-  <rect class="small" x="170" y="120" width="30" height="50"/>
-  <rect class="big" x="300" y="30" width="30" height="140"/>
-  <text class="t" x="55" y="186">one book, ~486KB</text>
-  <text class="t" x="185" y="186">top 500, ~243MB</text>
-  <text class="t" x="315" y="186">10,000, ~4.9GB</text>
+  <text class="b" x="8" y="14" style="text-anchor:start">density pays off for the hot list;</text>
+  <text class="b" x="8" y="30" style="text-anchor:start">the tree covers the tail</text>
+  <rect class="small" x="40" y="174" width="30" height="10"/>
+  <rect class="small" x="170" y="134" width="30" height="50"/>
+  <rect class="big" x="300" y="44" width="30" height="140"/>
+  <text class="t" x="55" y="200">one book, ~486KB</text>
+  <text class="t" x="185" y="200">top 500, ~243MB</text>
+  <text class="t" x="315" y="200">10,000, ~4.9GB</text>
 </svg>
 ```
 
@@ -8601,7 +8602,7 @@ How do you check one track against 35 million stored segments without burning 2,
 The stage 1 correctness argument is short and it is the whole reason this is safe to run sloppy-first: a real effort requires a complete traversal, a complete traversal necessarily passes through the segment's start point, and the start point therefore falls within the corridor width of some track point. So the cell index can shrink 35 million to 9,800 candidates without ever discarding a genuine match.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" role="img" aria-label="The funnel narrows 35 million segments to 22 confirmed efforts across four stages, each cheaper than the last">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -7 409 268" role="img" aria-label="The funnel narrows 35 million segments to 22 confirmed efforts across four stages, each cheaper than the last">
   <style>
     .bar{fill:none;stroke:currentColor;stroke-width:1.2}
     .fill{fill:currentColor;fill-opacity:.10}
@@ -8850,7 +8851,7 @@ How do you check one record against 300 million others without an impossible num
 **Great: group cheaply on a shared key, then score only within a group.** Records sharing a normalised key, the first three title tokens, a folded author surname, a language, fall into a block. Within a block of typically four records, score every pair on weighted evidence: a shared ISBN, title similarity after normalisation, author match after transliteration folding, page count and year within tolerance. Above 0.92, auto-merge. Between 0.75 and 0.92, a human moderator decides. Below that, a new work.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 260" role="img" aria-label="Blocking groups 300 million records into roughly 80 million small blocks, cutting comparisons from 4.5 times 10 to the 16 down to about 500 million">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -7 400 226" role="img" aria-label="Blocking groups 300 million records into roughly 80 million small blocks, cutting comparisons from 4.5 times 10 to the 16 down to about 500 million">
   <style>
     .bar{fill:none;stroke:currentColor;stroke-width:1.2}
     .fill{fill:currentColor;fill-opacity:.1}
@@ -9094,7 +9095,7 @@ The naive allocator reserves a flat buffer per sequence up front. Why does that 
 **Great: split KV into fixed 16-token blocks with a per-sequence block table, and let the attention kernel gather across them.** This is PagedAttention: virtual memory for attention. A sequence holds only the blocks it has actually generated, rounded up to 16 tokens, so external fragmentation disappears because every block is the same size, and internal fragmentation is bounded at 15 wasted tokens, under 1.5% of a typical sequence.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="A contiguous reservation wastes most of its space and cannot fill a fragmented hole; fixed blocks are allocated only as needed and never fragment externally">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -7 396 186" role="img" aria-label="A contiguous reservation wastes most of its space and cannot fill a fragmented hole; fixed blocks are allocated only as needed and never fragment externally">
   <style>
     .used{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.2}
     .waste{fill:currentColor;fill-opacity:.06;stroke:currentColor;stroke-opacity:.4;stroke-width:1;stroke-dasharray:4 3}
@@ -9267,7 +9268,7 @@ Fifty billion documents will never fit on one machine. What is the actual axis t
 The price of document partitioning is fan-out itself: every machine in the fleet participates in every query, so capacity scales with queries-per-second times shard count, not with queries-per-second alone. That is a real, bounded cost. The network cost of term partitioning is not bounded at all; it grows with the size of the lists a query happens to need combined, and the worst lists are the most common words in the language.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Term partitioning ships a huge posting list across the network per query; document partitioning ships only a small results list, but from every shard">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -7 400 182" role="img" aria-label="Term partitioning ships a huge posting list across the network per query; document partitioning ships only a small results list, but from every shard">
   <style>
     .bar{fill:none;stroke:currentColor;stroke-width:1.2}
     .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
@@ -9298,7 +9299,7 @@ The price of document partitioning is fan-out itself: every machine in the fleet
 **Great: keep the disjunctive candidate set, but prove most of it cannot win before scoring it.** At index time, store each term's maximum possible score contribution to any document. At query time, track the current 20th-best score as a threshold and walk cursors sorted by document id, summing upper bounds; the first document where that running sum could still beat the threshold becomes a pivot, and everything before it is provably unable to win and is skipped without being read. This is WAND, refined by block-max scoring at 128-posting granularity so the bound is tight locally rather than over an entire list.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240" role="img" aria-label="Cursors advance by document id; documents before the pivot cannot beat the current threshold and are skipped without being scored">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -7 400 190" role="img" aria-label="Cursors advance by document id; documents before the pivot cannot beat the current threshold and are skipped without being scored">
   <style>
     .lane{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .doc{fill:currentColor;fill-opacity:.15;stroke:currentColor;stroke-opacity:.5;stroke-width:1.2}
@@ -9503,7 +9504,7 @@ Splitting one hot row into 32 bucket rows fixes contention. What does it break a
 **Great: merge the buckets back into one row once the total falls below a threshold, and promote the SKU to the hot lane.** When `total_remaining < 2N`, a coordinator takes a brief exclusive window across all 32 rows, sums them into one row, and hands the SKU to serialised handling for its final units.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 170" role="img" aria-label="With 5 units spread across 32 buckets, 27 are empty; most buyers land on an empty bucket while stock still exists elsewhere in the row">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -7 388 140" role="img" aria-label="With 5 units spread across 32 buckets, 27 are empty; most buyers land on an empty bucket while stock still exists elsewhere in the row">
   <style>
     .full{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.2}
     .empty{fill:none;stroke:currentColor;stroke-opacity:.3;stroke-width:1}
@@ -9902,7 +9903,7 @@ Every candidate a user cannot read must never occupy a slot meant for one they c
 That fallback matters because filtered graph search degrades exactly where it is most dangerous to degrade. A user in a twelve-person private space gets an exact scan over a few thousand chunks; a user in the all-company group gets the full filtered graph search over hundreds of millions. Neither path silently returns wrong results, only a slower one when the estimate is wrong.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="Filtering after retrieval can leave a narrowly permissioned user with zero usable chunks from a hundred retrieved; filtering inside the search guarantees every candidate returned is already readable">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -7 400 184" role="img" aria-label="Filtering after retrieval can leave a narrowly permissioned user with zero usable chunks from a hundred retrieved; filtering inside the search guarantees every candidate returned is already readable">
   <style>
     .allow{fill:var(--accent);fill-opacity:.3;stroke:var(--accent);stroke-width:1.2}
     .deny{fill:none;stroke:currentColor;stroke-opacity:.3;stroke-width:1}
@@ -10073,7 +10074,7 @@ A popular object's TTL expires at roughly the same instant on 200 points of pres
 **Great: cascade several cheap coalescers, and serve stale while the real fetch runs in the background.** Single-flight inside each edge server takes the count down by roughly two orders of magnitude on its own. Consistent-hashing a key to one owning server per point of presence, then coalescing again at the mid-tier and again at the origin shield, folds the remaining fan-out down step by step: **1,000,000 → roughly 12,800 → 200 → 20 → 1**. Stale-while-revalidate means every one of those million waiting requests gets the old, still-useful copy immediately, while exactly one real fetch runs in the background.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240" role="img" aria-label="A million concurrent origin requests collapse through four coalescing stages to a single real fetch, log scale">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 0 400 215" role="img" aria-label="A million concurrent origin requests collapse through four coalescing stages to a single real fetch, log scale">
   <style>
     .bar{fill:none;stroke:currentColor;stroke-width:1.2}
     .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.4}
@@ -10128,7 +10129,7 @@ Two properties are what make this safe without acknowledgements at all: the oper
 **Great: store the tag's generation at fetch time on every cached object, and purge by bumping one counter.** The **Tag generation table** holds one counter per tag, globally replicated. Purging a tag is a single, tiny write, roughly 40 bytes, pushed everywhere. On the next read, a server compares the generation stored on the cached object against the current generation for that tag, and any mismatch is treated as a miss.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" role="img" aria-label="Each cached object records the tag generation at fetch time; bumping the global counter for a tag makes every stale object miss on its next read, with no enumeration">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 189" role="img" aria-label="Each cached object records the tag generation at fetch time; bumping the global counter for a tag makes every stale object miss on its next read, with no enumeration">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.2}
     .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
@@ -10136,15 +10137,15 @@ Two properties are what make this safe without acknowledgements at all: the oper
     .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="4" y="14" text-anchor="start">Objects, stamped with tag generation at fetch time</text>
+  <text class="lbl" x="4" y="14" style="text-anchor:start">Objects, stamped with tag generation at fetch</text>
   <rect class="box" x="4" y="24" width="120" height="28" rx="5"/><text class="sub" x="64" y="40">obj A · gen 7</text>
   <rect class="box" x="132" y="24" width="120" height="28" rx="5"/><text class="sub" x="192" y="40">obj B · gen 7</text>
   <rect class="box" x="260" y="24" width="120" height="28" rx="5"/><text class="sub" x="320" y="40">obj C · gen 7</text>
-  <text class="sub" x="4" y="76" text-anchor="start">purge tag "product-1234": one counter bump,</text>
-  <text class="sub" x="4" y="92" text-anchor="start">~40B, pushed everywhere</text>
+  <text class="sub" x="4" y="76" style="text-anchor:start">purge tag "product-1234": one counter bump,</text>
+  <text class="sub" x="4" y="92" style="text-anchor:start">~40B, pushed everywhere</text>
   <rect class="box fillacc" x="4" y="102" width="150" height="28" rx="5"/><text class="lbl" x="79" y="118">tag → gen 8</text>
-  <text class="sub" x="4" y="156" text-anchor="start">on next read: object gen 7 &lt; tag gen 8 →</text>
-  <text class="sub" x="4" y="172" text-anchor="start">treated as a miss, no scan, no enumeration</text>
+  <text class="sub" x="4" y="156" style="text-anchor:start">on next read: object gen 7 &lt; tag gen 8 →</text>
+  <text class="sub" x="4" y="172" style="text-anchor:start">treated as a miss, no scan, no enumeration</text>
 </svg>
 ```
 
@@ -10329,7 +10330,7 @@ The refresh token is the thing that actually carries long-lived authority. What 
 **Great: rotate within a tracked family, and treat any reuse of an already-superseded token as proof of compromise.** Because a valid token is used exactly once, a second presentation of one that has already been rotated past means two parties are holding the same lineage. There is no way to tell attacker from legitimate client from that fact alone, so the safe response is to kill the entire family, forcing everyone holding any token in it to re-authenticate.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 220" role="img" aria-label="A stolen refresh token used after the legitimate client already rotated past it triggers reuse detection, killing the whole token family">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 217" role="img" aria-label="A stolen refresh token used after the legitimate client already rotated past it triggers reuse detection, killing the whole token family">
   <style>
     .box{fill:none;stroke:currentColor;stroke-width:1.2}
     .fillacc{fill:var(--accent);fill-opacity:.24;stroke:var(--accent);stroke-width:1.4}
@@ -10337,16 +10338,16 @@ The refresh token is the thing that actually carries long-lived authority. What 
     .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle;text-anchor:middle}
   </style>
-  <text class="lbl" x="4" y="14" text-anchor="start">family_id F, legitimate client rotates normally</text>
+  <text class="lbl" x="4" y="14" style="text-anchor:start">family_id F, legitimate client rotates normally</text>
   <rect class="box" x="4" y="24" width="120" height="26" rx="5"/><text class="sub" x="64" y="39">rotation 1 (used)</text>
   <rect class="box" x="132" y="24" width="120" height="26" rx="5"/><text class="sub" x="192" y="39">rotation 2 (used)</text>
   <rect class="box" x="260" y="24" width="120" height="26" rx="5"/><text class="sub" x="320" y="39">rotation 3 (now)</text>
-  <text class="lbl" x="4" y="78" text-anchor="start">attacker replays the copied rotation 1 token later</text>
+  <text class="lbl" x="4" y="78" style="text-anchor:start">attacker replays the copied rotation 1 token</text>
   <rect class="box fillacc" x="4" y="88" width="180" height="28" rx="5"/><text class="sub" x="94" y="104">rotation 1 presented again</text>
-  <text class="sub" x="4" y="136" text-anchor="start">→ already superseded: family F killed,</text>
-  <text class="sub" x="4" y="152" text-anchor="start">both parties re-authenticate</text>
-  <text class="sub" x="4" y="184" text-anchor="start">a short grace window absorbs an honest client's</text>
-  <text class="sub" x="4" y="200" text-anchor="start">lost-response retry without treating it as reuse</text>
+  <text class="sub" x="4" y="136" style="text-anchor:start">→ already superseded: family F killed,</text>
+  <text class="sub" x="4" y="152" style="text-anchor:start">both parties re-authenticate</text>
+  <text class="sub" x="4" y="184" style="text-anchor:start">a short grace window absorbs an honest client's</text>
+  <text class="sub" x="4" y="200" style="text-anchor:start">lost-response retry without treating it as reuse</text>
 </svg>
 ```
 
