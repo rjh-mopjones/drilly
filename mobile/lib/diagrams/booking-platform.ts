@@ -80,8 +80,8 @@ export const BOOKING_PLATFORM: Diagram = {
     {
       id: "listing-svc",
       label: "Listing service",
-      sub: "detail page + exact calendar",
       kind: "service",
+      sub: "detail page, calendar, price rules",
       col: 1,
       row: 1,
       detail: {
@@ -105,7 +105,7 @@ export const BOOKING_PLATFORM: Diagram = {
       label: "Booking orchestrator",
       sub: "hold, authorise, confirm",
       kind: "service",
-      col: 1,
+      col: 2,
       row: 2,
       detail: {
         what: "The saga that turns an approximate search result into an exact commit: idempotency record, a 2ms transactional hold on the nights, card authorisation outside it, then confirm.",
@@ -128,7 +128,7 @@ export const BOOKING_PLATFORM: Diagram = {
       label: "Messaging + notify",
       sub: "guest to host threads, async",
       kind: "service",
-      col: 1,
+      col: 3,
       row: 3,
       detail: {
         what: "Threaded conversation between guest and host, plus the transactional fan-out: confirmations, request-to-book approvals, and the host alert raised when channel sync finds a conflict.",
@@ -151,8 +151,8 @@ export const BOOKING_PLATFORM: Diagram = {
       label: "Review service",
       sub: "dual-blind, 14 day deadline",
       kind: "service",
-      col: 1,
-      row: 4,
+      col: 3,
+      row: 2,
       detail: {
         what: "Two-way reviews tied to a completed booking, held unpublished until both sides submit or the 14 day deadline passes, then released together.",
         why: "The host is being rated too, which no hotel system models. Reviews are the only durable quality signal the platform has about supply it does not own, and they feed ranking, so their integrity is a search problem rather than a product nicety.",
@@ -197,7 +197,7 @@ export const BOOKING_PLATFORM: Diagram = {
       label: "CDC pipeline",
       sub: "Debezium to Kafka to indexer",
       kind: "queue",
-      col: 2,
+      col: 3,
       row: 1,
       detail: {
         what: "Committed calendar changes streamed off the write-ahead log into Kafka and applied to the search documents.",
@@ -221,7 +221,7 @@ export const BOOKING_PLATFORM: Diagram = {
       sub: "(listing_id, date) PK, sharded",
       kind: "database",
       col: 2,
-      row: 2,
+      row: 1,
       detail: {
         what: "One row per listing per night: status in available, held, booked or blocked, plus hold_id, hold_expires_at and price_override.",
         why: "It is the supply record, not just an inventory counter, and it has three separate writers: the booking hold, the host's own edits, and channel-sync ingestion. Making a night a row rather than a count is what removes every oversell trick, and carrying price_override on the same row is what makes per-host pricing a property of a night rather than a rate card.",
@@ -239,35 +239,12 @@ export const BOOKING_PLATFORM: Diagram = {
       },
     },
     {
-      id: "pricing-svc",
-      label: "Pricing service",
-      sub: "per-night price_override",
-      kind: "service",
-      col: 3,
-      row: 2,
-      detail: {
-        what: "Resolves each host's pricing rules, seasonality, weekend and length-of-stay adjustments into a concrete price_override per listing-night, and quotes a stay on request.",
-        why: "Price here is set by 10M independent owners rather than by us, so there is no rate card to look up. The quote also has to be frozen: the price the guest agreed is snapshotted onto the booking so a host rule change between the quote and the commit cannot silently move it.",
-        numbers: ["price_override is a column on the calendar row", "price snapshot stored on the booking"],
-        breaks:
-          "It writes to the same rows the booking path locks, so a bulk repricing job across a host's whole calendar competes with commits on those listings and has to be batched and ordered rather than fired as one sweep.",
-        choice: {
-          pick: "Materialise the resolved price onto the calendar row",
-          instead: "Compute the price at read time from the host's rules on every search hit and page view.",
-          decider:
-            "Read amplification. Price is a filter and a ranking input on ~12k searches/s, so computing it per candidate per query is rule evaluation on the hot path; materialising it makes price one indexed field, at the cost of a rewrite whenever a rule changes.",
-          flips:
-            "Heavily personalised or auction-style pricing, where the price genuinely depends on the requester and cannot be precomputed per night at all.",
-        },
-      },
-    },
-    {
       id: "host-app",
       label: "Host tools",
       sub: "block nights, rules, replies",
       kind: "service",
-      col: 2,
-      row: 3,
+      col: 1,
+      row: 2,
       parent: "supply-zone",
       detail: {
         what: "Where a host edits their own calendar: blocking date ranges, setting minimum stays and instant-book on or off, changing pricing rules and answering guests.",
@@ -290,8 +267,8 @@ export const BOOKING_PLATFORM: Diagram = {
       label: "Channel sync",
       sub: "polls rival sites, block-only",
       kind: "service",
-      col: 2,
-      row: 4,
+      col: 1,
+      row: 3,
       parent: "supply-zone",
       detail: {
         what: "Polls rival booking sites and the channel managers hosts use to sit on several of them at once, over iCal (15 to 60 min cycles) or REST (500ms to 5s p99, no availability SLA), and writes the nights they report as blocked.",
@@ -368,36 +345,6 @@ export const BOOKING_PLATFORM: Diagram = {
       },
     },
     {
-      id: "e5",
-      from: "listing-svc",
-      to: "pricing-svc",
-      fromSide: "bottom",
-      toSide: "top",
-      tier: "data",
-      label: "quote nights, price rules",
-      detail: {
-        what: "Asking for the exact total for the selected nights: per-night overrides, length-of-stay and weekend adjustments, fees.",
-        why: "Ranking used an approximate nightly price; the page has to show the number the guest will actually be charged, and that number is then snapshotted onto the booking so it cannot move underneath them.",
-        numbers: ["price snapshot frozen on the booking"],
-        breaks:
-          "If the quote and the snapshot are computed twice rather than once and carried forward, a host rule change between the two produces a charge the guest never agreed to.",
-      },
-    },
-    {
-      id: "e6",
-      from: "pricing-svc",
-      to: "calendar",
-      tier: "control",
-      label: "price_override per night",
-      detail: {
-        what: "Writing the resolved nightly price back onto the calendar row as price_override.",
-        why: "Materialising the price where the night already lives makes it one indexed field for search and one column read for a quote, instead of rule evaluation on every search hit.",
-        numbers: ["price_override is 4 B on a ~70 B row"],
-        breaks:
-          "A bulk repricing sweep across a host's whole calendar writes the same rows the booking path locks, so it has to be batched rather than fired as one statement over 500 days of rows.",
-      },
-    },
-    {
       id: "e7",
       from: "guest",
       to: "booking-orch",
@@ -469,8 +416,8 @@ export const BOOKING_PLATFORM: Diagram = {
     },
     {
       id: "e12",
+      to: "listing-svc",
       from: "host-app",
-      to: "pricing-svc",
       tier: "control",
       label: "host rules, Smart Pricing",
       detail: {
