@@ -13,6 +13,7 @@ import {
   type EdgeProps,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type {
@@ -603,6 +604,18 @@ export default function ArchDiagram({
   const width = useWidth(wrapRef);
   const narrow = width > 0 && width < 720;
 
+  // fitView frames the BOXES; routes and labels that detour through the
+  // margins fall outside that and get clipped on a phone. Frame the layout's
+  // own bounds instead, and again whenever the container resizes.
+  const rfRef = useRef<ReactFlowInstance | null>(null);
+  const fit = useCallback(() => {
+    const b = layout.bounds;
+    rfRef.current?.fitBounds({ x: b.x, y: b.y, width: b.w, height: b.h }, { padding: 0.04, duration: 0 });
+  }, [layout]);
+  useEffect(() => {
+    fit();
+  }, [fit, width]);
+
   const anchorX = selNode ? layout.rects[selNode.id].x + layout.rects[selNode.id].w / 2 : 0;
   const side: "left" | "right" =
     selNode && anchorX > layout.bounds.x + layout.bounds.w / 2 ? "left" : "right";
@@ -628,8 +641,10 @@ export default function ArchDiagram({
           if (id) selectEdge(id);
           else setSel(null);
         }}
-        fitView
-        fitViewOptions={{ padding: 0.06, maxZoom: 1.15 }}
+        onInit={(inst) => {
+          rfRef.current = inst;
+          fit();
+        }}
         minZoom={0.2}
         maxZoom={2.5}
         proOptions={{ hideAttribution: true }}
