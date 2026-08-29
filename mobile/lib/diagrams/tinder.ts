@@ -10,12 +10,30 @@ export const TINDER: Diagram = {
     shape:
       "Two paths with opposite cost profiles: a narrowing funnel that spends 300ms picking twenty candidates, and a swipe write that costs one row and one lookup but is the only thing here that has to be exact.",
     beats: [
-      "Start from the property, not the components. The candidate pool is inventory rather than a corpus: a swipe spends a candidate permanently, the pool is bounded by a radius, and nothing happens until both sides agree. Everything distinctive falls out of those three facts.",
-      "The read path is a narrowing funnel and its order is the design. A geo query returns roughly 10,000 people within 10km, the preference filter on age, gender and activity recency trims to ~3,000, the exclusion filter subtracts everyone already swiped and leaves ~1,500, and only then does the ranker run.",
-      "Exclusion has to come before ranking and never after. Filtering afterwards means over-fetching by the reciprocal of the unswiped fraction, and that fraction decays per user: someone 80% through their market needs 100 ranked results to yield 20 fresh ones, and at 95% they need 400.",
-      "The write path is one row and one lookup. Record the swipe partitioned by the swiper at 20k/s steady, then read the reverse index keyed by target to ask whether that person already swiped right on you. If not, write nothing the target can ever observe: the privacy rule and the match rule are the same rule.",
-      "Match creation is where exactness lives. Key the row on the canonical ordered pair so two simultaneous swipes converge on a single insert, notify both sides once, then hand off to a separate chat service asynchronously so a binding failure shows up as a delay rather than as a lost match.",
-      "Exposure is a product constraint rather than an optimisation. A profile everyone wants sits in millions of feeds and hands its owner an inbox they cannot meaningfully answer, so the ranker applies a decaying multiplier once a profile passes roughly ten times its local mean impressions.",
+      {
+        text: "Start from the property, not the components. The candidate pool is inventory rather than a corpus: a swipe spends a candidate permanently, the pool is bounded by a radius, and nothing happens until both sides agree. Everything distinctive falls out of those three facts.",
+        lights: ["funnel-group", "swipe-svc"],
+      },
+      {
+        text: "The read path is a narrowing funnel and its order is the design. The Geo + attribute index returns roughly 10,000 people within 10km, the preference filter on age, gender and activity recency trims to ~3,000, the Exclusion filter subtracts everyone already swiped and leaves ~1,500, and only then does the Two-tower ranker run.",
+        lights: ["geo", "bloom", "ranker", "e2", "e3", "e4"],
+      },
+      {
+        text: "Exclusion has to come before ranking and never after. Filtering afterwards means over-fetching by the reciprocal of the unswiped fraction, and that fraction decays per user: someone 80% through their market needs 100 ranked results to yield 20 fresh ones, and at 95% they need 400.",
+        lights: ["bloom", "e3"],
+      },
+      {
+        text: "The write path is one row and one lookup. Record the swipe partitioned by the swiper at 20k/s steady, then read the reverse index keyed by target to ask whether that person already swiped right on you. If not, write nothing the target can ever observe: the privacy rule and the match rule are the same rule.",
+        lights: ["swipe-svc", "swipes", "reverse", "e9", "e10"],
+      },
+      {
+        text: "Match creation is where exactness lives. Key the row on the canonical ordered pair so two simultaneous swipes converge on a single insert, notify both sides once, then hand off to a separate chat service asynchronously so a binding failure shows up as a delay rather than as a lost match.",
+        lights: ["match-svc", "matches", "client", "e13", "e14", "e15"],
+      },
+      {
+        text: "Exposure is a product constraint rather than an optimisation. A profile everyone wants sits in millions of feeds and hands its owner an inbox they cannot meaningfully answer, so the Exposure + diversify stage applies a decaying multiplier once a profile passes roughly ten times its local mean impressions.",
+        lights: ["exposure", "e6", "e7"],
+      },
     ],
     crux:
       "A profile everyone wants is a write hotspot on the reverse index and a feed monopoly at the same time, and both come from one fact: the scarce resource is attention on the other side of the market, not compute. Capping it costs relevance in exactly the thin markets that need help most.",
@@ -32,7 +50,7 @@ export const TINDER: Diagram = {
       kind: "zone",
       detail: {
         what: "The whole read path: geo and preference narrowing, exclusion, ranking, then exposure control and the cut to twenty.",
-        why: "Drawn as one zone because the stages are not independent services, they are a cardinality ladder inside a single request budget. Each stage buys a reduction with the cheapest predicate available at that point, so the one expensive stage runs over hundreds rather than millions.",
+        why: "This is one zone because the stages are not independent services, they are a cardinality ladder inside a single request budget. Each stage buys a reduction with the cheapest predicate available at that point, so the one expensive stage runs over hundreds rather than millions.",
         numbers: ["10k to 3k to 1.5k to 20", "300ms p99 for the whole ladder"],
         breaks:
           "Reorder the ladder and it still returns plausible results, which is why funnel-ordering bugs survive every correctness test anyone writes for the swipe path.",
@@ -181,7 +199,7 @@ export const TINDER: Diagram = {
         numbers: [
           "128 floats plus metadata ~1KB per profile",
           "50M profiles ~50GB, refreshed nightly",
-          "profile-edit re-embed lands within minutes",
+          "profile-edit re-embed lands within 5 minutes",
         ],
         breaks:
           "A nightly refresh misses intra-day changes: a new bio, new photos, a jump in activity. Without an incremental re-embed on profile-edit events the ranker is confidently scoring people who no longer look like their vector.",
@@ -288,7 +306,7 @@ export const TINDER: Diagram = {
         why: "Reciprocity must never be a scan, and it must never be answered by asking the target's client anything, because unreciprocated interest has to stay invisible. One index gives you both the match rule and the privacy rule, which are the same rule.",
         numbers: [
           "one row read per right-swipe",
-          "sub-shard on (target_id, hash(swiper_id) % N)",
+          "sub-shards a hot target up to 16 ways by hash(swiper_id)",
           "alert above 1,000 right-swipes/min on one target",
         ],
         breaks:
@@ -316,7 +334,7 @@ export const TINDER: Diagram = {
         numbers: [
           "4% of right-swipes are mutual",
           "~30M matches/day, against a public figure near 26M",
-          "second writer is a no-op",
+          "the 2nd simultaneous writer becomes a no-op",
         ],
         breaks:
           "Undo is one-way past this point. If the swipe created a match the other party may already have been notified, so revoking it is a distributed rollback across match state, push delivery and a chat channel. Most products simply refuse to rewind a swipe that matched, which is a product rule doing the work of a distributed transaction.",
@@ -343,7 +361,7 @@ export const TINDER: Diagram = {
         numbers: [
           "100B per row, 30M/day ~3GB/day",
           "~1.1TB/year",
-          "both swipe timestamps carried inline",
+          "2 swipe timestamps carried inline",
         ],
         breaks:
           "The uniqueness violation on this table is the detection signal for the simultaneous-swipe race, so suppressing the error hides the exact bug the constraint exists to catch.",
@@ -363,8 +381,8 @@ export const TINDER: Diagram = {
       id: "e1",
       from: "client",
       to: "feed",
+      tier: "hot",
       label: "GET /feed + coords",
-      animated: true,
       detail: {
         what: "A feed request carrying the user's last known coordinates, asking for the next twenty cards.",
         why: "Coordinates travel on the request rather than being read from a stored profile, because location is the predicate that changes while the user is holding the phone. That single fact is what rules out a precomputed deck.",
@@ -377,6 +395,7 @@ export const TINDER: Diagram = {
       id: "e2",
       from: "feed",
       to: "geo",
+      tier: "data",
       label: "10km radius, ~10k ids",
       detail: {
         what: "The radius query plus the attribute reads that back the preference filter, returning candidate ids rather than profiles.",
@@ -390,6 +409,7 @@ export const TINDER: Diagram = {
       id: "e3",
       from: "feed",
       to: "bloom",
+      tier: "data",
       label: "already swiped? ~1.5k left",
       detail: {
         what: "The exclusion probe: seven hash lookups per candidate against the session's warmed bit array.",
@@ -403,8 +423,8 @@ export const TINDER: Diagram = {
       id: "e4",
       from: "feed",
       to: "ranker",
+      tier: "hot",
       label: "~1.5k survivors",
-      animated: true,
       detail: {
         what: "The unswiped, preference-matching candidate set handed to the model.",
         why: "1,500 is the number the three cheap stages exist to produce, because it is what makes a model pass affordable inside the request. Against the unfiltered pool the same ranking would be four orders of magnitude worse.",
@@ -417,8 +437,8 @@ export const TINDER: Diagram = {
       id: "e5",
       from: "ranker",
       to: "embeddings",
+      tier: "control",
       label: "128-d vectors",
-      dashed: true,
       detail: {
         what: "Reading the precomputed candidate vectors for the 1,500 survivors so the request path only has to do dot products.",
         why: "The asymmetry is the point: the candidate tower runs once per profile offline, the user tower runs once per request, and everything in between is arithmetic. That is what turns 4.2M model invocations a second into microseconds of linear algebra.",
@@ -431,6 +451,7 @@ export const TINDER: Diagram = {
       id: "e6",
       from: "ranker",
       to: "exposure",
+      tier: "data",
       label: "~1.5k scored",
       detail: {
         what: "The scored candidate list passed to exposure control and diversification before the cut to twenty.",
@@ -444,8 +465,8 @@ export const TINDER: Diagram = {
       id: "e7",
       from: "exposure",
       to: "client",
+      tier: "hot",
       label: "top 20, p99 < 300ms",
-      animated: true,
       detail: {
         what: "Twenty candidate cards as roughly 5KB of JSON carrying photo URLs, a bucketed distance and profile text.",
         why: "URLs rather than media, so the CDN serves the expensive bytes off this path entirely. Distance is a bucketed band rather than a coordinate, because precise coordinates must never leave the server.",
@@ -458,8 +479,8 @@ export const TINDER: Diagram = {
       id: "e8",
       from: "client",
       to: "swipe-svc",
+      tier: "hot",
       label: "POST /swipe",
-      animated: true,
       detail: {
         what: "One swipe event per card: target id, direction, and an idempotency key of (swiper_id, target_id).",
         why: "This arrow carries twenty times the traffic of the feed arrow, because one page of candidates produces twenty decisions. Sizing the write path off feed request rates is the classic mistake here.",
@@ -472,8 +493,8 @@ export const TINDER: Diagram = {
       id: "e9",
       from: "swipe-svc",
       to: "swipes",
+      tier: "hot",
       label: "append, by swiper_id",
-      animated: true,
       detail: {
         what: "The durable swipe record, and the exact check that catches a Bloom false positive before it masks a duplicate write.",
         why: "The probabilistic filter is fine in the feed where a false positive costs one candidate out of 1,500, but it cannot be load-bearing here, where the same false positive would silently swallow a real swipe.",
@@ -486,12 +507,12 @@ export const TINDER: Diagram = {
       id: "e10",
       from: "swipe-svc",
       to: "reverse",
+      tier: "hot",
       label: "did they swipe me?",
-      animated: true,
       detail: {
         what: "A single-row read against the target-keyed index asking whether the reciprocal right-swipe already exists.",
         why: "One read, never a scan, and no matter how popular the target is. This is the entire mutual-like detection mechanism: the reciprocity check and the privacy guarantee are satisfied by the same lookup, because nothing is written that the target can observe unless it returns a hit.",
-        numbers: ["one row read per right-swipe", "N reads for sub-sharded hot targets"],
+        numbers: ["one row read per right-swipe", "up to 16 reads for sub-sharded hot targets"],
         breaks:
           "For a hot target this read fans to N sub-shards and the write behind it saturates a partition, so those checks queue with backpressure. Discarding one is a mutual right-swipe that never becomes a match.",
       },
@@ -500,8 +521,8 @@ export const TINDER: Diagram = {
       id: "e11",
       from: "swipe-svc",
       to: "bloom",
+      tier: "control",
       label: "set bit + overlay",
-      dashed: true,
       offset: 40,
       detail: {
         what: "Marking the target as swiped in this user's filter, and pushing it onto the small exact overlay that fronts it.",
@@ -515,13 +536,13 @@ export const TINDER: Diagram = {
       id: "e12",
       from: "swipes",
       to: "embeddings",
+      tier: "control",
       label: "swipe labels",
-      dashed: true,
       offset: 56,
       detail: {
         what: "The training loop: swipe outcomes and conversation labels flowing back into the towers that produce candidate vectors.",
         why: "The model is split by signal speed. The retrieval tower retrains slowly on conversation labels, matches reaching five or more messages, which is the honest objective but scarce and delayed by days. The fast ranker retrains on swipe labels, which are immediate but measure attraction rather than compatibility.",
-        numbers: ["30M matches/day, ~10% converse = 3M positives", "labels delayed hours to days"],
+        numbers: ["30M matches/day, ~10% converse = 3M positives", "labels delayed 1 to 3 days"],
         breaks:
           "Optimising the tower on swipe labels alone drifts the whole system toward attraction, and the metric that would show it, conversations per match, is the one nobody watches because matches per user is going up.",
       },
@@ -530,8 +551,8 @@ export const TINDER: Diagram = {
       id: "e13",
       from: "swipe-svc",
       to: "match-svc",
+      tier: "hot",
       label: "reciprocal hit",
-      animated: true,
       detail: {
         what: "The 4% of right-swipes where the reverse lookup returned a hit, handed on for match creation.",
         why: "It is a separate service because everything upstream is approximate and best-effort while this step must be exact and idempotent. Splitting them means the funnel can degrade under load without ever putting the match guarantee at risk.",
@@ -544,6 +565,7 @@ export const TINDER: Diagram = {
       id: "e14",
       from: "match-svc",
       to: "matches",
+      tier: "data",
       label: "insert (min, max)",
       detail: {
         what: "The idempotent insert on the canonical ordered pair, where the second of two simultaneous writers becomes a no-op.",
@@ -551,6 +573,21 @@ export const TINDER: Diagram = {
         numbers: ["100B row", "~3GB/day"],
         breaks:
           "The no-op has to be genuinely silent to the caller but visible to monitoring, because a rising rate of conflicts is the signal that the reciprocity path is being retried more than it should be.",
+      },
+    },
+    {
+      id: "e15",
+      from: "match-svc",
+      to: "client",
+      tier: "data",
+      label: "match notification",
+      offset: 60,
+      detail: {
+        what: "The push notification and in-app banner sent to both matched users once the canonical row is committed.",
+        why: "Notification happens after the insert, never before, so a race between two simultaneous writers can never produce two notifications for one match. It travels outside the funnel because it is not a feed card, it is an interrupt.",
+        numbers: ["~30M matches/day, 2 notifications each", "sent within 1 to 2 seconds of the insert"],
+        breaks:
+          "A notification that fires before the insert commits can tell a user about a match that a rollback then erases, which is why this arrow starts after e14, never in parallel with it.",
       },
     },
   ],

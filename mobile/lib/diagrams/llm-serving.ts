@@ -10,12 +10,30 @@ export const LLM_SERVING: Diagram = {
     shape:
       "A serving platform is a memory allocator with a scheduler bolted on top: requests queue outside the GPU and are admitted only when the paged KV pool can afford the bytes they will hold.",
     beats: [
-      "Inference is two workloads sharing one set of weights. Prefill pushes the whole prompt through the model in one dense pass and runs near the arithmetic roofline. Decode emits one token per sequence per step and re-reads every weight out of HBM each time, so a lone stream achieves a fraction of a percent of the machine. Throughput comes from batching decode, which makes the batch the thing you are actually scheduling.",
-      "What caps the batch is memory, not arithmetic. Every sequence in flight holds key and value tensors for every token of context, about 320KB per token on a 70B model with grouped-query attention, and it grows by one token every step. A 1,100-token conversation is ~350MB, a 32k one is ~10.5GB, and concurrency is just a division: pool over bytes per sequence.",
-      "So requests wait in a durable queue and never on a GPU. A per-replica scheduler owns the KV pool and admits from that queue only when free blocks allow, re-deciding batch membership every 14ms rather than every request. Admission has to sit next to the memory it is spending, because a generic load balancer can see request counts but not free blocks.",
-      "KV lives in fixed 16-token blocks with a per-sequence block table, which is virtual memory for attention. External fragmentation disappears because every block is the same size, internal waste is bounded at 15 tokens, and a shared system prompt becomes a refcounted block run rather than recomputed prefill. That allocator change alone is worth roughly 7x concurrency.",
-      "Output length is unknown at admission, so admission is optimistic: charge for the prompt's blocks, hold back a RESERVE so running sequences can grow, and let the pool run hot. Preemption is therefore a routine control path, not an error path. Evict the newest lowest-priority sequence and recompute its prefill on readmission, which is cheaper than swapping KV over PCIe.",
-      "Weights are 140GB against an 80GB GPU, so a replica is 8 GPUs tensor-parallel inside one NVLink domain and parallelism is forced rather than chosen. Scale is replicas, cold start is minutes because 140GB has to be pulled and warmed, and the number the business watches is dollars per million tokens.",
+      {
+        text: "Inference is two workloads sharing one set of weights. Prefill pushes the whole prompt through the model in one dense pass and runs near the arithmetic roofline. Decode emits one token per sequence per step and re-reads every weight out of HBM each time, so a lone stream achieves a fraction of a percent of the machine. Throughput comes from batching decode, which makes the batch the thing you are actually scheduling.",
+        lights: ["prefill", "decode", "e9"],
+      },
+      {
+        text: "What caps the batch is memory, not arithmetic. Every sequence in flight holds key and value tensors for every token of context, about 320KB per token on a 70B model with grouped-query attention, and it grows by one token every step. A 1,100-token conversation is ~350MB, a 32k one is ~10.5GB, and concurrency is just a division: pool over bytes per sequence.",
+        lights: ["kv-pool"],
+      },
+      {
+        text: "So requests wait in a durable queue and never on a GPU. A per-replica scheduler owns the KV pool and admits from that queue only when free blocks allow, re-deciding batch membership every 14ms rather than every request. Admission has to sit next to the memory it is spending, because a generic load balancer can see request counts but not free blocks.",
+        lights: ["queue", "router", "scheduler", "kv-pool", "e4", "e5", "e12"],
+      },
+      {
+        text: "KV lives in fixed 16-token blocks with a per-sequence block table, which is virtual memory for attention. External fragmentation disappears because every block is the same size, internal waste is bounded at 15 tokens, and a shared system prompt becomes a refcounted block run rather than recomputed prefill. That allocator change alone is worth roughly 7x concurrency.",
+        lights: ["kv-pool", "prefix-cache", "e14"],
+      },
+      {
+        text: "Output length is unknown at admission, so admission is optimistic: charge for the prompt's blocks, hold back a reserve so running sequences can grow, and let the pool run hot. Preemption is therefore a routine control path, not an error path. Evict the newest lowest-priority sequence and recompute its prefill on readmission, which is cheaper than swapping KV over PCIe.",
+        lights: ["scheduler", "preempt", "e15", "e16"],
+      },
+      {
+        text: "Weights are 140GB against an 80GB GPU, so a replica is 8 GPUs tensor-parallel inside one NVLink domain and parallelism is forced rather than chosen. Scale is replicas, cold start is minutes because 140GB has to be pulled and warmed, and the number the business watches is dollars per million tokens.",
+        lights: ["replica-group", "registry", "usage-ledger", "e6", "e7", "e18"],
+      },
     ],
     crux:
       "The KV cache is the binding constraint and it is invisible in every FLOP-based capacity model. You must commit memory for a job whose size you only learn when it ends, so admission is optimistic and preemption is the safety valve, and that allocator has no stable equilibrium under sustained overload.",
@@ -30,6 +48,13 @@ export const LLM_SERVING: Diagram = {
       id: "replica-group",
       label: "Replica = 8 GPUs, tensor-parallel",
       kind: "zone",
+      detail: {
+        what: "One serving unit: 8 GPUs inside a single NVLink domain, holding one copy of the sharded weights and running prefill and decode for whatever sequences are currently admitted to it.",
+        why: "The model does not fit on one GPU, so the replica boundary is set by interconnect, not by choice: everything inside it shares an all-reduce fast enough to keep a 14ms step, and everything outside it is a separate pool of memory the scheduler cannot see into.",
+        numbers: ["8 GPUs per replica, TP=8", "140GB of weights sharded to 17.5GB per GPU"],
+        breaks:
+          "A single GPU fault inside the domain takes down every in-flight sequence on all 8, because tensor parallelism has no partial-failure mode: KV for every running sequence lives split across the group and none of it survives one member disappearing.",
+      },
     },
     {
       id: "client",
@@ -81,7 +106,7 @@ export const LLM_SERVING: Diagram = {
       col: 1,
       row: 1,
       detail: {
-        what: "A durable log of pending requests carrying token ids, sampling params and a deadline, partitioned by tenant and priority tier (see #16).",
+        what: "A durable log of pending requests carrying token ids, sampling params and a deadline, partitioned by tenant and priority tier.",
         why: "This is the arrow that carries the whole argument: requests wait here, not on a GPU. Queue depth becomes the load-shedding signal and admission stays a scheduler decision rather than a load-balancer one.",
         numbers: ["~1.2k requests queued platform-wide at peak", "age-at-dequeue p99 < 250ms interactive"],
         breaks:
@@ -288,7 +313,7 @@ export const LLM_SERVING: Diagram = {
       col: 0,
       row: 4,
       detail: {
-        what: "Per-request prompt and output token counts, cached-prefix tokens, TTFT, ITL histogram and finish reason, partitioned by (tenant, day), feeding billing and metrics (see #17).",
+        what: "Per-request prompt and output token counts, cached-prefix tokens, TTFT, ITL histogram and finish reason, partitioned by (tenant, day), feeding billing and metrics.",
         why: "Cost per million tokens is the number the business funds, and it is derived here rather than measured on a GPU. It is also where the prefill-to-decode ratio and the cache hit rate are re-derived weekly, because both are customer behaviour rather than design.",
         numbers: ["~2KB metadata per request", "2k req/s ≈ 4MB/s ≈ 350GB/day", "RF=3 ≈ 1TB/day"],
         breaks:
@@ -355,8 +380,7 @@ export const LLM_SERVING: Diagram = {
       label: "offer to replica",
       detail: {
         what: "Handing a dequeued request to one replica's scheduler, chosen by free blocks and conversation affinity.",
-        why: "The router chooses where, the scheduler chooses whether. Splitting it that way is deliberate: a load balancer cannot see free KV blocks, so it would happily route a 32k prompt to a replica with 12MB left.",
-        numbers: ["replica_state carries free_blocks, running_seqs, queue_depth"],
+        why: "The router chooses where, the scheduler chooses whether. Splitting it that way is deliberate: a load balancer cannot see free KV blocks, so it would happily route a 32k prompt to a replica with 12MB left. The offer carries replica_state: free blocks, running sequences and queue depth.",
         breaks:
           "replica_state is sampled, so it is stale by up to a step interval and the router can offer to a replica that has just filled. The scheduler refusing is the correction, which means offers must be re-queueable.",
       },
@@ -438,7 +462,7 @@ export const LLM_SERVING: Diagram = {
       from: "decode",
       to: "kv-pool",
       tier: "hot",
-      label: "read 10.2GB KV/GPU",
+      label: "read 10.2GB KV cache/GPU",
       offset: 40,
       detail: {
         what: "Every step reads the full KV cache for all running sequences and appends one token's worth back, taking a new block every 16 tokens.",

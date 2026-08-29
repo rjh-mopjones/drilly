@@ -10,12 +10,30 @@ export const STRAVA: Diagram = {
     shape:
       "An activity is a bulk upload of a finished GPS track, acked in ~150ms once the bytes are durable, and everything expensive behind that ack is one geospatial join run per write against a corpus of ~35M segments that dwarfs the request.",
     beats: [
-      "The upload path is deliberately dumb, and that is the design. The phone records at 1Hz into an on-device SQLite buffer, PUTs a ~75KB FIT file straight to object storage through a presigned URL, and the API only records the intent, publishes activity.uploaded and returns 202 in ~150ms. Bytes never pass through the application tier, and durability is established before the client is told yes.",
-      "A worker then parses and cleans, because device numbers cannot be trusted. Drop bad-accuracy points and teleports, collapse the 540-point drift cluster from a nine-minute cafe stop into its centroid, median-smooth the rest, then derive distance and moving time. Elevation comes from a 30m terrain raster sampled at each cleaned point, never from GPS altitude, whose ~15m noise summed over 5,400 samples invents thousands of metres of climb.",
-      "Storage splits in two and this is the most consequential decision after the funnel. A ~2KB summary row with a Douglas-Peucker simplified polyline serves the feed from a wide-column store, and a ~30KB zstd columnar stream blob sits in object storage and is fetched only when someone taps through. The ratio is 15x, a feed page is 20 activities, so 40KB against 600KB decides whether the feed works on a train.",
-      "Then the actual problem: which of ~35M segments did this track traverse. Four stages, cheapest first, each allowed false positives and none allowed a false negative. Cover the track with ~210 level-13 S2 cells and union the segments whose start point falls in them (35M to ~10k, 3ms), bbox-reject at a 25m margin (~1.2k, 1ms), corridor-test every segment vertex against a 20m spatial hash of the track's own points (~50, 20ms), then walk a monotone cursor with direction and gap checks (~22 efforts, 30ms).",
-      "Say the distinction out loud, because it is what the question is testing: this is map-matching, not intersection. Two polylines crossing at a junction intersect, and so does a ride on the opposite carriageway of a dual carriageway 11m away. Only contiguous, in-order, correctly directed coverage counts, and no spatial index expresses that predicate, which is why stages 3 and 4 exist at all.",
-      "The tail of the system is mostly reference to other patterns. Efforts land in a wide-column table partitioned by segment_id at ~20 per activity, leaderboards are Redis sorted sets per segment (see #22) written with ZADD LT so best-per-athlete dedup is free, and the feed is the hybrid push/pull fan-out from #8 carrying the summary and never the stream. Everything after parsing is a pure function of the cleaned stream plus the index and raster versions, which makes every backfill and bug fix a replay rather than a migration.",
+      {
+        text: "The upload path is deliberately dumb, and that is the design. The phone records at 1Hz into an on-device SQLite buffer, PUTs a ~75KB FIT file straight to object storage through a presigned URL, and the API only records the intent, publishes activity.uploaded and returns 202 in ~150ms. Bytes never pass through the application tier, and durability is established before the client is told yes.",
+        lights: ["mobile", "raw-store", "upload-api", "kafka", "e1", "e2", "e3"],
+      },
+      {
+        text: "A worker then parses and cleans, because device numbers cannot be trusted. Drop bad-accuracy points and teleports, collapse the 540-point drift cluster from a nine-minute cafe stop into its centroid, median-smooth the rest, then derive distance and moving time. Elevation comes from a 30m terrain raster sampled at each cleaned point, never from GPS altitude, whose ~15m noise summed over 5,400 samples invents thousands of metres of climb.",
+        lights: ["workers", "e4", "e5"],
+      },
+      {
+        text: "Storage splits in two and this is the most consequential decision after the funnel. A ~2KB summary row with a Douglas-Peucker simplified polyline serves the feed from a wide-column store, and a ~30KB zstd columnar stream blob sits in object storage and is fetched only when someone taps through. The ratio is 15x, a feed page is 20 activities, so 40KB against 600KB decides whether the feed works on a train.",
+        lights: ["summary-store", "stream-store", "e7", "e8"],
+      },
+      {
+        text: "Then the actual problem: which of ~35M segments did this track traverse. Four stages, cheapest first, each allowed false positives and none allowed a false negative. Cover the track with ~210 level-13 S2 cells and union the segments whose start point falls in them (35M to ~10k, 3ms), bbox-reject at a 25m margin (~1.2k, 1ms), corridor-test every segment vertex against a 20m spatial hash of the track's own points (~50, 20ms), then walk a monotone cursor with direction and gap checks (~22 efforts, 30ms).",
+        lights: ["matcher", "seg-index", "e9", "e10", "e11"],
+      },
+      {
+        text: "This is map-matching, not intersection, and the distinction is the whole design. Two polylines crossing at a junction intersect, and so does a ride on the opposite carriageway of a dual carriageway 11m away. Only contiguous, in-order, correctly directed coverage counts, and no spatial index expresses that predicate, which is why the corridor and monotone-cursor stages exist at all.",
+        lights: ["matcher"],
+      },
+      {
+        text: "Efforts land in a wide-column table partitioned by segment_id at ~20 per activity, leaderboards are Redis sorted sets per segment written with ZADD LT so best-per-athlete dedup is free, and the feed pushes the summary into followers' timelines and never the stream. Everything after parsing is a pure function of the cleaned stream plus the index and raster versions, which makes every backfill and bug fix a replay rather than a migration.",
+        lights: ["efforts", "leaderboards", "feed", "e12", "e13"],
+      },
     ],
     crux:
       "Deciding which segments a new track traversed. Naively that is 35M polyline comparisons per upload, ~35s of CPU, ~2,800 cores steady and ~28,000 at the Saturday peak. Worse, the predicate is not proximity but ordered directional traversal, so the spatial index only ever produces candidates and three more stages have to run.",
@@ -70,7 +88,7 @@ export const STRAVA: Diagram = {
       col: 0,
       row: 1,
       detail: {
-        what: "The original FIT/GPX/TCX bytes, written directly by the client through a presigned URL and kept on a cold tier for 12 months.",
+        what: "The original FIT, GPX or TCX bytes, written directly by the client through a presigned URL and kept on a cold tier for 12 months.",
         why: "This object is what makes the ack safe: the client is told 202 only once the bytes are durable here, so a region loss during processing costs a replay rather than an activity. Retaining the original is also the only recovery path when a firmware change exposes a parser bug months later.",
         numbers: ["~50KB per uploaded hour", "2.5B activities/yr", "~125TB rolling at 12 months"],
         breaks:
@@ -164,7 +182,7 @@ export const STRAVA: Diagram = {
       detail: {
         what: "The durable log that separates the ~150ms user-facing upload from the ~1s of asynchronous processing behind it.",
         why: "The Saturday-morning spike is 10x and perfectly predictable, and the only cheap way to absorb it is as queue depth rather than as latency, dropped uploads or standing capacity. Consumer lag is also the leading indicator the matcher fleet autoscales on, because lag moves minutes before CPU does.",
-        numbers: ["~80 events/s steady, ~800/s peak", "consumer lag SLO p99 < 60s", "separate backfill consumer group"],
+        numbers: ["~80 events/s steady, ~800/s peak", "consumer lag SLO p99 < 60s", "2 consumer groups: live and backfill"],
         breaks:
           "At-least-once delivery means the same activity can be processed twice after a consumer restart, so every downstream write and every KOM notification has to be idempotent on (segment_id, effort_id).",
         choice: {
@@ -209,9 +227,9 @@ export const STRAVA: Diagram = {
       row: 2,
       parent: "matcher-zone",
       detail: {
-        what: "Four narrowing stages: S2 cell prefilter, bounding-box reject, 15m corridor test against a spatial hash of the track's own points, then an ordered monotone map-match with direction and gap checks.",
+        what: "Four narrowing stages: S2 cell prefilter, bounding-box reject, 20m corridor test against a spatial hash of the track's own points, then an ordered monotone map-match with direction and gap checks.",
         why: "The invariant is the design: any stage may pass a candidate that turns out not to match, no stage may drop one that does. That contract is what lets each stage be sloppy and fast, and it is why the ordering is by cost per candidate divided by rejection rate.",
-        numbers: ["35M to 10k to 1.2k to 50 to 22", "~55ms p50, ~120ms p95, ~100ms fleet mean", "15m corridor, 25m bbox margin"],
+        numbers: ["35M to 10k to 1.2k to 50 to 22", "~55ms p50, ~120ms p95, ~100ms fleet mean", "20m corridor, 25m bbox margin"],
         breaks:
           "Dense metros break stage 1: a level-13 cell in central London holds thousands of segment starts, so the prefilter returns ~80k candidates and the corridor stage dominates, which is why those cells adaptively descend to level 15.",
         choice: {
@@ -274,12 +292,12 @@ export const STRAVA: Diagram = {
     {
       id: "leaderboards",
       label: "Leaderboards",
-      sub: "Redis ZSET per segment (see #22)",
+      sub: "Redis ZSET per segment",
       kind: "database",
       col: 2,
       row: 4,
       detail: {
-        what: "A sorted set per segment keyed seg:{id}:{board}, member athlete_id, score elapsed. The sorted-set mechanics are the leaderboard pattern in #22; only the write is Strava-specific.",
+        what: "A sorted set per segment keyed seg:{id}:{board}, member athlete_id, score elapsed. The sorted-set mechanics rank and range in logarithmic time; the write is what makes it Strava-specific.",
         why: "The Strava twist is ZADD key LT elapsed athlete_id, which overwrites only when the new time is lower, so best-per-athlete deduplication falls out of the write instead of needing a read-modify-write that two concurrent workers would race on.",
         numbers: ["top 1,000 for ~2M active segments", "~160GB against ~560GB materialised fully", "read p99 < 100ms"],
         breaks:
@@ -297,16 +315,16 @@ export const STRAVA: Diagram = {
     {
       id: "feed",
       label: "Feed fan-out",
-      sub: "hybrid push/pull (see #8)",
+      sub: "hybrid push/pull fan-out",
       kind: "service",
       col: 2,
       row: 1,
       detail: {
-        what: "Pushes the new activity into followers' Redis timeline ZSETs and serves feed reads by hydrating summary rows, unchanged from the news-feed pattern in #8.",
+        what: "Pushes the new activity into followers' Redis timeline ZSETs and serves feed reads by hydrating summary rows, the same push/pull hybrid used for any social timeline.",
         why: "The feed is deliberately decoupled from segment matching, because upload-to-feed and upload-to-efforts are separate SLOs: the athlete should see their ride long before the last of 22 efforts is written, and a matcher backlog must not delay the thing they actually look at.",
         numbers: ["~180 followers typical", "20 ids per page, ~40KB hydrated", "read p99 < 180ms"],
         breaks:
-          "Pro athletes with ~1M followers make fan-out-on-write expensive, so the push threshold is set lower here than in #8 because activity volume per athlete is ~1/day rather than ~20 posts/day.",
+          "Pro athletes with ~1M followers make fan-out-on-write expensive, so the push threshold is set lower than a typical social timeline because activity volume per athlete is ~1/day rather than ~20 posts/day.",
         choice: {
           pick: "Hybrid push/pull with a lower push threshold than a social timeline",
           instead: "Pure fan-out-on-write to every follower, or pure pull at read time.",
@@ -440,7 +458,7 @@ export const STRAVA: Diagram = {
       label: "cell lookup, 35M to 10k",
       detail: {
         what: "A hash probe per covered cell into the local start-cell index, unioning the candidate segment ids.",
-        why: "It is drawn as a local read rather than a network call on purpose: this arrow is the whole reason the corpus is RAM-resident, because as a database round trip it would be 80 to 800 proximity queries per second against one shared store.",
+        why: "This is a local memory read rather than a network call on purpose: it is the whole reason the corpus is RAM-resident, because as a database round trip it would be 80 to 800 proximity queries per second against one shared store.",
         numbers: ["~210 cells probed", "~9,800 candidates from ~35M", "~3ms"],
         breaks:
           "In a dense metro this returns ~80k rather than ~10k, so the per-cell adaptive descent to level 15 must be identical on every matcher or two nodes derive different efforts from the same activity.",
@@ -511,7 +529,7 @@ export const STRAVA: Diagram = {
       label: "on tap, one 30KB GET",
       detail: {
         what: "A single object GET when the athlete opens the detail view, after which heart rate, power and elevation charts render locally.",
-        why: "Drawn as a separate, colder arrow because it is the half of the storage split that almost never runs. Serving it from object storage through the CDN keeps the analysis view off the feed's critical path entirely.",
+        why: "This is a separate, colder path because it is the half of the storage split that almost never runs. Serving it from object storage through the CDN keeps the analysis view off the feed's critical path entirely.",
         numbers: ["~30KB zstd", "roughly 1% of impressions"],
         breaks:
           "The stream is region-local, so a tap on a distant follower's ride is a cross-region read with a visibly worse tail than the feed that led to it.",
@@ -525,7 +543,7 @@ export const STRAVA: Diagram = {
       label: "backfill re-reads streams",
       offset: 100,
       detail: {
-        what: "The retroactive path: when a segment is created, candidate historical activities are found through a coarse level-11 activity cell index and their streams re-read to run stages 3 and 4 only.",
+        what: "The retroactive path: when a segment is created, candidate historical activities are found through a coarse level-11 activity cell index and their streams re-read to run the corridor and monotone-cursor stages only.",
         why: "The corpus mutates under the derived data, so a new segment on a busy road has to acquire efforts from rides recorded years earlier. The backfill index is deliberately coarser than the matching index because backfill can afford false positives.",
         numbers: ["level 11, ~400B/activity, ~1TB/yr", "capped at 24 months"],
         breaks:

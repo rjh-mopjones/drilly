@@ -10,12 +10,30 @@ export const OBJECT_STORAGE: Diagram = {
     shape:
       "An object store is a small strongly consistent index in front of write-once bytes: metadata owns (bucket, key) -> manifest, the data plane owns piece_id -> bytes, and no request reaches a disk without resolving through the index first.",
     beats: [
-      "Everything follows from one property: an object is never modified in place, which turns a storage problem into an index problem. Split the system in two. The metadata service holds 12PB of small mutable records on NVMe and needs consensus; the data plane holds 21EB of large immutable pieces on HDD and needs no coordination at all, because nothing it stores is ever rewritten.",
-      "A write lands fresh pieces in the data plane first, which is safe without any locking because nobody has ever read those pieces, and then commits exactly one manifest pointer in metadata. The client sees a 200 only after that commit. An overwrite is the identical operation with a different pointer, so consistency, versioning and resumable upload collapse into one move: build something immutable, then swap one cell.",
-      "Multipart is the same mechanism with the manifest assembled incrementally. CreateMultipartUpload allocates an upload_id reachable from no key, each UploadPart writes its pieces and records a (part_num, etag) row, and CompleteMultipartUpload validates the list, builds the final manifest and swaps the pointer. That commit is the only atomic step in a transfer that may have run for a day.",
-      "Placement is where durability is actually bought. Each piece becomes 6 data and 3 parity fragments under RS(6,3), placed 3-3-3 so no zone holds more than m, at 1.5x overhead instead of the 3x a whole replica costs. Layout is a per-object property recorded in the manifest, so small and hot objects keep whole replicas and archive drops to RS(10,4) at 1.4x.",
-      "Two background jobs then run forever and never finish. Repair rebuilds fragments after a drive dies, prioritised by how little redundancy is left; scrub re-reads all 21EB on a 90-day cadence to catch silent bit rot that never raises a read error. Garbage collection sweeps pieces orphaned by aborted uploads and overwritten manifests, and all three are throttled to roughly 10% of cluster bandwidth.",
-      "Several other designs in this app draw an object store as one box on the edge of the picture. This is the inside of that box, and the reason it can be drawn as a single box elsewhere is precisely that every consistency guarantee has been concentrated into one small index while the bytes underneath are immutable and boring.",
+      {
+        text: "Everything follows from one property: an object is never modified in place, which turns a storage problem into an index problem. Split the system in two. The metadata service holds 12PB of small mutable records on NVMe and needs consensus; the data plane holds 21EB of large immutable pieces on HDD and needs no coordination at all, because nothing it stores is ever rewritten.",
+        lights: ["metadata", "storage"],
+      },
+      {
+        text: "A write lands fresh pieces in the data plane first, which is safe without any locking because nobody has ever read those pieces, and then commits exactly one manifest pointer in metadata. The client sees a 200 only after that commit. An overwrite is the identical operation with a different pointer, so consistency, versioning and resumable upload collapse into one move: build something immutable, then swap one cell.",
+        lights: ["ec", "metadata", "e9", "e10"],
+      },
+      {
+        text: "Multipart is the same mechanism with the manifest assembled incrementally. CreateMultipartUpload allocates an upload_id reachable from no key, each UploadPart writes its pieces and records a (part_num, etag) row, and CompleteMultipartUpload validates the list, builds the final manifest and swaps the pointer. That commit is the only atomic step in a transfer that may have run for a day.",
+        lights: ["multipart", "manifest", "e11", "e12"],
+      },
+      {
+        text: "Placement is where durability is actually bought. Each piece becomes 6 data and 3 parity fragments under RS(6,3), placed 3-3-3 so no zone holds more than m, at 1.5x overhead instead of the 3x a whole replica costs. Layout is a per-object property recorded in the manifest, so small and hot objects keep whole replicas and archive drops to RS(10,4) at 1.4x.",
+        lights: ["ec", "manifest", "lifecycle", "e9"],
+      },
+      {
+        text: "Two background jobs then run forever and never finish. Repair rebuilds fragments after a drive dies, prioritised by how little redundancy is left; scrub re-reads all 21EB on a 90-day cadence to catch silent bit rot that never raises a read error. Garbage collection sweeps pieces orphaned by aborted uploads and overwritten manifests, and all three are throttled to roughly 10% of cluster bandwidth.",
+        lights: ["background-plane", "repair", "scrub", "gc"],
+      },
+      {
+        text: "An object store is often treated as one opaque dependency by the systems that call it. What makes that possible is exactly what this design shows: every consistency guarantee is concentrated into one small index while the bytes underneath are immutable and boring, so none of that complexity ever leaks out to the caller.",
+        lights: ["frontend", "metadata"],
+      },
     ],
     crux:
       "The durability number does not come from the erasure code. RS(6,3) tolerates 3 simultaneous fragment losses and nothing more; eleven nines comes from the ratio between the repair window and the failure interarrival time. Independent failures alone give roughly seventeen nines, so the six-order gap to the published eleven is correlated failure, software defects and operator error. Reaching for a wider code optimises the term that is already a million times too small to matter.",
@@ -44,6 +62,14 @@ export const OBJECT_STORAGE: Diagram = {
         ],
         breaks:
           "All three are throttled to roughly 10% of cluster bandwidth combined; a cadence that silently stretches under load is a durability regression no other metric surfaces.",
+        choice: {
+          pick: "One deployable running all three jobs, sharing a single throttled bandwidth budget",
+          instead: "Three independent services, each with its own bandwidth allocation and deploy cadence.",
+          decider:
+            "All three read the same 12PB index and the same 21EB of storage and none of them serve a foreground request, so splitting them would fragment one ~10% bandwidth throttle into three that have to be rebalanced by hand whenever one job's backlog grows relative to the others.",
+          flips:
+            "Once one job's resource profile diverges sharply from the others, for example scrub moving onto a dedicated read-optimised tier while repair stays on the main fleet, at which point sharing a throttle stops simplifying and starts bottlenecking.",
+        },
       },
     },
     {
@@ -206,7 +232,7 @@ export const OBJECT_STORAGE: Diagram = {
         why: "Bucket state is rare, small and rarely changed, so it has nothing in common with an index of 40 trillion objects. Keeping it separate means the hot path can cache it aggressively rather than paying an index shard for a value that changes once a year.",
         numbers: [
           "one row per bucket against 40T object rows",
-          "read on every request, written almost never",
+          "read on every one of 15M req/s, written almost never",
         ],
         breaks:
           "If a policy change is cached too long the frontend authorises against stale rules, which is an access-control failure rather than a performance one.",
@@ -364,7 +390,7 @@ export const OBJECT_STORAGE: Diagram = {
         numbers: [
           "7-day grace before a piece is swept",
           "reachability runs over ~12PB of index",
-          "unreferenced_bytes and sweep cycle time are the alarms",
+          "2 alarms: unreferenced_bytes and sweep cycle time",
         ],
         breaks:
           "A stalled sweep shows up as a storage cost anomaly weeks before anything else notices, and the grace period means reclaimed space always lags the delete by a week that the customer is billed for.",
@@ -401,7 +427,7 @@ export const OBJECT_STORAGE: Diagram = {
       label: "origin miss",
       detail: {
         what: "The residual read traffic that the edge could not serve, forwarded to the region.",
-        why: "It is drawn as the thin path deliberately: over 99% of hot-object reads are absorbed upstream, and everything below this arrow is sized for what is left plus the cold long tail.",
+        why: "It is deliberately the thin path: over 99% of hot-object reads are absorbed upstream, and everything below this arrow is sized for what is left plus the cold long tail.",
         numbers: ["over 99% absorbed at the edge"],
         breaks:
           "If the edge is bypassed, the same 9 storage nodes take roughly 111k req/s each and become a bottleneck in a fleet of a million.",
@@ -430,7 +456,7 @@ export const OBJECT_STORAGE: Diagram = {
       detail: {
         what: "Reading bucket ownership, access policy, versioning state and object lock before the request is allowed to proceed.",
         why: "Authorisation and versioning semantics are bucket properties, not object properties, so they are resolved once per request against a table that essentially never changes and therefore caches perfectly.",
-        numbers: ["read on every request, written almost never"],
+        numbers: ["read on every one of 15M req/s, written almost never"],
         breaks:
           "Cache this too long and a revoked policy keeps authorising requests, which is a security failure rather than a stale read.",
       },
@@ -444,7 +470,7 @@ export const OBJECT_STORAGE: Diagram = {
       detail: {
         what: "The index resolution every single request performs before anything touches a disk.",
         why: "This is the arrow that defines the system, and the missing arrow beside it matters more: there is no path from the frontend to a storage node that skips this hop. That is what makes read-after-write consistency a property rather than a hope.",
-        numbers: ["all 15M req/s land here", "served by the shard leader or a lease-holding replica"],
+        numbers: ["all 15M req/s land here", "1 shard leader or a lease-holding replica serves each read"],
         breaks:
           "Every operation pays this lookup, including a 1KB GET where the index round trip costs more than the read it authorises.",
       },
@@ -486,7 +512,7 @@ export const OBJECT_STORAGE: Diagram = {
       detail: {
         what: "The payload itself, streamed to the encoder to be split into 6 data and 3 parity fragments.",
         why: "Bytes never travel through the index. Keeping the payload path and the pointer path physically separate is the reason a 12PB NVMe tier and a 21EB HDD tier can be sized, scaled and failed independently.",
-        numbers: ["mean object ~310KB", "streamed a part at a time, so memory is O(part size)"],
+        numbers: ["mean object ~310KB", "memory bounded by 1 part in flight (5MB-5GB), not the whole object"],
         breaks:
           "A 5TB object cannot be buffered anywhere in this path, which is precisely why multipart exists rather than being a convenience.",
       },
@@ -556,7 +582,7 @@ export const OBJECT_STORAGE: Diagram = {
       detail: {
         what: "The per-bucket rules that drive transitions and expiry: move to infrequent access after N days, to archive after M, expire incomplete uploads.",
         why: "Rules live on the bucket because they are a customer policy statement, while the layout they produce lives on the object. Separating the two is what lets one rule change re-tier billions of objects without rewriting the rule per key.",
-        numbers: ["evaluated on a daily cadence, not per request"],
+        numbers: ["evaluated once a day, not per request"],
         breaks:
           "A rule that transitions objects below the 128KB eligibility floor pays the tier's minimum billable size on every one of them, so the rule costs more than it saves.",
       },
@@ -654,7 +680,7 @@ export const OBJECT_STORAGE: Diagram = {
       detail: {
         what: "The mark phase: walk pointer to manifest to piece across the index to build the live set.",
         why: "Reference counting would be exact and immediate, but at 1.4M PUT/s a single lost decrement is a certainty and leaks the space permanently with no way to detect it. A slow, safe, repeatable walk is the trade taken.",
-        numbers: ["walk spans ~12PB of index", "sweep cycle time is the metric that matters"],
+        numbers: ["walk spans ~12PB of index", "sweep cycle time, 1 of the 2 GC alarms"],
         breaks:
           "The walk competes with foreground index traffic, so it is rate-limited, and a rate limit set too low lets unreferenced bytes accumulate for weeks before the cost anomaly surfaces.",
       },

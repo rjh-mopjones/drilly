@@ -10,11 +10,34 @@ export const RATE_LIMITER: Diagram = {
     shape:
       "A rate limiter is three decisions wrapped around one function call: what you count against, where the count lives, and what happens when that count is unreachable. The algorithm inside the call is the least interesting of them.",
     beats: [
-      "The first decision is the key. Identity plus scope, where identity is a user id, an API key or a caller IP, and scope is a class of endpoints rather than one route. IP keying is cheap and runs before authentication, but a NAT gateway drops thousands of users into one bucket, so key on the account wherever an authenticated identity exists.",
-      "The second decision is where the count lives, and it is the real engineering. Two hundred gateway nodes each enforcing a 100 per minute limit permits 20,000 per minute, which is not a limit; dividing instead gives each node 0.5 requests per window, which is not a promise you can keep. So one shared store, sharded 16 ways because 1M req/s over a ~100k checks/s per-shard ceiling needs 10 primaries and you round up.",
-      "The check itself has to be one indivisible operation executed inside the store. Read 99 against a limit of 100, decide allow, write 100, and meanwhile another node did the same and the key ends at 100 having allowed 101. At 1M req/s with a 0.5ms round trip that is the normal case, not a rare interleaving, and the clock has to be read inside the script too or 200 NTP-drifted nodes give different verdicts for the same request.",
-      "The third decision is the failure posture, and it is per limit rather than global. Bound the store call at 5ms inside a 10ms budget, trip a breaker after 5 consecutive timeouts, then fail open to coarse local counters for a commercial quota and fail closed for anything guarding a scarce resource. Thirty seconds of unmetered traffic is 0.001% of a month; thirty seconds of failing closed is a total outage.",
-      "Only then the algorithm, which is a thirty second discussion. GCRA, or token bucket which is the same semantics over two fields, for general APIs; sliding window counter where a boundary spike is what the downstream cannot absorb. Rejection returns 429 with Retry-After plus jitter, because a million clients handed the same backoff retry in the same instant.",
+      {
+        text: "Every request enters the API gateway node, where the limiter runs as middleware. The first decision is the key: the Key builder turns the caller into (identity, scope) — identity is a user id, an API key or a caller IP; scope is a class of endpoints rather than one route. IP keying is cheap and runs before authentication, but a NAT gateway drops thousands of users into one bucket, so the key is the account wherever an authenticated identity exists.",
+        lights: ["client", "gateway", "key-builder", "e1", "e2"],
+      },
+      {
+        text: "The Rule matcher looks the key up against ~10k compiled rules held in the node's own memory: which algorithm, what limit, what window, and what to do when the counter store cannot be reached. The rule is data, not code, so it can change in the middle of an attack.",
+        lights: ["rule-matcher", "e3"],
+      },
+      {
+        text: "The second decision is where the count lives, and it is the real engineering. Two hundred nodes each enforcing 100 per minute permit 20,000 per minute, which is not a limit; dividing the limit by 200 gives each node half a request per window, which is not a promise you can keep. So one Sharded counter store, 16 Redis primaries — sized by the ~100k checks/s each primary can run, not by the 20GB of keys.",
+        lights: ["counter-store", "e9"],
+      },
+      {
+        text: "The check itself is one indivisible operation executed inside the store: the Atomic check-and-update sends a single script that reads the counter, decides, and writes, on a shard that runs one command at a time. Read 99 against a limit of 100 and write 100 from two nodes at once and you have allowed 101; at 1M req/s that interleaving is the normal case. The clock is read inside the script too, or 200 drifting node clocks give different verdicts for the same request.",
+        lights: ["limiter-check", "counter-store", "e9"],
+      },
+      {
+        text: "The third decision is what happens when the store cannot answer, and it is decided per limit. The Timeout + circuit breaker bounds the store call at 5ms inside a 10ms budget and trips after 5 consecutive timeouts. Then a commercial quota fails open onto coarse per-node counters and the request reaches the Protected backend, while the Risk gate in front of a venue-capped order session fails closed: thirty seconds of unmetered traffic is 0.001% of a month, thirty seconds of refusing everything is an outage.",
+        lights: ["breaker", "backend", "risk-gate", "e4", "e13", "e16"],
+      },
+      {
+        text: "Rules change without a deploy. The Rule config service writes the Rule store, then publishes one small message on the Invalidation channel; each node drops the named rule from its cache and refetches it lazily on the next request that needs it. A new rule runs in shadow mode for 24 hours before it enforces, because a bad rule reaches 200 nodes exactly as fast as a good one.",
+        lights: ["config-service", "rule-store", "invalidation-bus", "e5", "e6", "e7", "e8"],
+      },
+      {
+        text: "Rejection is a 429 with a jittered Retry-After, because a million clients handed the same retry instant all come back together. One decision in a hundred is written to the Sampled decision archive, which is where the over-allow rate and abuse forensics come from: the counters hold current state, never the rate that was actually served.",
+        lights: ["decision-log", "e14", "e15"],
+      },
     ],
     crux:
       "The shared counter that makes enforcement correct is also a dependency sitting in front of every request, so the limiter can become a bigger outage than the thing it protects. The resolution is not a better algorithm, it is a per-limit failure posture and a timeout small enough that a degraded store stays a degradation.",
@@ -39,7 +62,7 @@ export const RATE_LIMITER: Diagram = {
         why: "Rejecting at the edge is the point: a request stopped here never burns an app server or a database connection. Keeping all five stages in-process means the only remote call on the request path is the counter round trip, which is what makes a sub-10ms p99 overhead achievable at all across a 200 node fleet.",
         numbers: [
           "200 nodes x 5k req/s = 1M req/s",
-          "one remote call per request",
+          "1 remote call per request",
           "<10ms p99 added overhead",
         ],
         breaks:
@@ -63,7 +86,7 @@ export const RATE_LIMITER: Diagram = {
       row: 0,
       detail: {
         what: "Everything making requests: browsers, server-side integrations and SDKs holding an API key.",
-        why: "It is drawn explicitly because the whole rejection contract depends on it. Headers and Retry-After only change behaviour if the caller reads them, and a hostile caller is under no obligation to read anything.",
+        why: "The whole rejection contract depends on it. Headers and Retry-After only change behaviour if the caller reads them, and a hostile caller is under no obligation to read anything.",
         numbers: ["1M req/s at peak", "~10B requests/day", "100M distinct identities"],
         breaks:
           "A million clients handed the same Retry-After retry in the same instant, re-trigger the limit at the next boundary and oscillate; jitter fixes the well-behaved SDK, which was never the problem.",
@@ -215,7 +238,7 @@ export const RATE_LIMITER: Diagram = {
       detail: {
         what: "The control plane for limits: validates and writes rules to the rule store, publishes an invalidation event per change, and runs a new rule in shadow mode for 24h before it enforces.",
         why: "Pushing a rule change through a deploy is too slow when an attacker is mid-attack. Separating the service from the store it writes to is what lets rule creation be refused while the last-known-good rules keep serving from 200 local caches.",
-        numbers: ["propagates in under a second", "24h shadow mode before any rule enforces", "~10k compiled rules"],
+        numbers: ["<1s to reach all 200 nodes", "24h shadow mode before a rule enforces", "~10k compiled rules"],
         breaks:
           "If it is down there are no rule refreshes; nodes serve last-known-good from cache on a rule-cache-age alert, and rule creation is refused until it recovers.",
         choice: {
@@ -261,7 +284,7 @@ export const RATE_LIMITER: Diagram = {
       detail: {
         what: "The pub/sub channel carrying one small message per rule change to every gateway node, which drops the cached rule and refetches it lazily on the next request that needs it.",
         why: "Invalidate-then-refetch is what turns a rule change into a sub-second fleet-wide event without a redeploy and without 200 nodes polling the config service. It is a fan-out channel, not a work queue: messages are not durable and are not meant to be.",
-        numbers: ["fan-out to ~200 subscribers", "a handful of messages per day", "under a second end to end"],
+        numbers: ["fan-out to ~200 subscribers", "~10 messages/day", "<1s end to end"],
         breaks:
           "If the channel is silent nobody notices, because stale rules still serve perfectly well; rule-cache-age is the only metric that shows this path has stopped working, and it is the metric people forget to alert on.",
         choice: {
@@ -285,7 +308,7 @@ export const RATE_LIMITER: Diagram = {
       row: 3,
       detail: {
         what: "The service the limit exists to protect, along with the finite resources behind it such as a fixed pool of database connections.",
-        why: "It is on the diagram because it is the thing the third decision is really about. Whether it degrades or falls over at 10x nominal load is what settles fail open against fail closed, and that is a property of this box, not of the limiter.",
+        why: "It is the thing the third decision is really about. Whether it degrades or falls over at 10x nominal load is what settles fail open against fail closed, and that is a property of the backend, not of the limiter.",
         numbers: [
           "e.g. a fixed pool of 200 database connections",
           "100M identities x 100 req/min is six orders of magnitude above capacity",
@@ -312,16 +335,12 @@ export const RATE_LIMITER: Diagram = {
       detail: {
         what: "The same mechanism with the default inverted, sitting in front of something genuinely scarce: an order throttle ahead of a broker's exchange session capped by the venue.",
         why: "Exceeding this number does not degrade a backend, it gets the session disconnected by the venue, so the limiter must reject when it cannot verify the count. It also needs a real count rather than a statistical one, which rules out sub-counters and cross-node block reservation.",
-        numbers: [
-          "50 orders/s venue cap",
-          "trivial throughput, so a dedicated store costs almost nothing",
-          "fail_closed_rejects tracked separately from fail_open_rate",
-        ],
+        numbers: ["50 orders/s venue cap", "~0.005% of the quota cluster's load", "1 exact counter, no sub-counters"],
         breaks:
-          "Today it shares a cluster with the quota counters, so a single store outage produces fail-open and fail-closed behaviour at the same time. That is a known gap, not a design worth defending.",
+          "In this design it shares a cluster with the quota counters, so a single store outage produces fail-open and fail-closed behaviour at the same time. That is a known gap, not a property worth defending.",
         choice: {
           pick: "Fail closed, exact single-owner counter, its own store",
-          instead: "Reuse the quota limiter's cluster and its fail-open posture, which is what is deployed today.",
+          instead: "Reuse the quota limiter's cluster and its fail-open posture, which is what this design does.",
           decider:
             "Failure domain. At 50 orders per second the throughput is trivial, so a separate store is almost free, while sharing the cluster serving 1M req/s of ordinary API traffic means the outage that trips the quota breaker also blinds the gate that must reject.",
           flips:
@@ -421,8 +440,8 @@ export const RATE_LIMITER: Diagram = {
       label: "refetch on invalidate",
       detail: {
         what: "The lazy half of the control path: after an invalidation drops a cached entry, the next request needing that rule fetches the compiled version from the config service.",
-        why: "Drawn as a control path because no request data flows on it and it runs at most once per rule change per node, not once per request. Refetching lazily rather than eagerly means a rule nobody is currently hitting costs nothing to invalidate.",
-        numbers: ["~10MB of compiled rules per node", "at most one fetch per rule per node per change"],
+        why: "No request data flows on this path and it runs at most once per rule change per node, not once per request, which is what makes it control rather than data. Refetching lazily rather than eagerly means a rule nobody is currently hitting costs nothing to invalidate.",
+        numbers: ["~10MB of compiled rules per node", "≤1 fetch per rule per node per change"],
         breaks:
           "If the config service is unreachable at refetch time the node serves last-known-good, which is right, but it means a genuinely urgent rule change can silently fail to reach part of the fleet.",
       },
@@ -436,7 +455,7 @@ export const RATE_LIMITER: Diagram = {
       detail: {
         what: "One small message per rule change, published the moment the write to the rule store commits.",
         why: "Publishing after the commit rather than before is what makes the refetch safe: a node that reacts instantly is guaranteed to read the new rule rather than race the write.",
-        numbers: ["a handful of messages per day", "published post-commit"],
+        numbers: ["~10 messages/day", "0 messages before the store commit"],
         breaks:
           "If the publish fails after the commit succeeds, the rule store and the fleet diverge with no error anywhere; the reconciliation is the rule-cache-age metric, not this path.",
       },
@@ -450,7 +469,7 @@ export const RATE_LIMITER: Diagram = {
       detail: {
         what: "Fan-out of the invalidation to all ~200 gateway nodes, each dropping the named rule from its local compiled cache.",
         why: "This is the arrow that makes a rule change a sub-second event during an attack instead of a deploy that takes minutes. It carries the rule id rather than the rule body, so a dropped message costs staleness rather than divergence.",
-        numbers: ["~200 subscribers", "under a second to propagate"],
+        numbers: ["~200 subscribers", "<1s to propagate"],
         breaks:
           "If the channel is silent nobody notices, because stale rules still serve; the rule-cache-age metric is the only signal that this path has stopped working.",
       },
@@ -535,7 +554,7 @@ export const RATE_LIMITER: Diagram = {
       detail: {
         what: "The subset of allowed traffic that goes on to touch something genuinely scarce, passing a second limiter with the opposite failure default.",
         why: "It is a separate arrow and a separate service because the two limits are the same mechanism with inverted defaults, and pretending one component can hold both postures is how the contradiction ends up invisible in the design.",
-        numbers: ["50 orders/s venue cap", "no sub-counters and no block reservation on this path"],
+        numbers: ["50 orders/s venue cap", "1 counter, exact"],
         breaks:
           "Exceeding the cap does not degrade anything gradually; the venue disconnects the session, so this is the one place where rejecting is cheaper than allowing.",
       },
@@ -548,9 +567,9 @@ export const RATE_LIMITER: Diagram = {
       label: "shares the quota cluster",
       offset: 40,
       detail: {
-        what: "The gate's exact counter, which today lives on the same 16-primary cluster as the quota counters rather than on a store of its own.",
-        why: "It is drawn because it is the known gap rather than the intended design. The intent is a dedicated store: at 50 orders per second the throughput is trivial, so a separate cluster costs almost nothing and buys an independent failure domain.",
-        numbers: ["50 orders/s, trivial next to 1M req/s", "one shared failure domain today"],
+        what: "The gate's exact counter, which in this design lives on the same 16-primary cluster as the quota counters rather than on a store of its own.",
+        why: "This is the known gap in the design rather than the intent. The intent is a dedicated store: at 50 orders per second the throughput is trivial, so a separate cluster costs almost nothing and buys an independent failure domain.",
+        numbers: ["50 orders/s against 1M req/s on the same cluster", "1 shared failure domain"],
         breaks:
           "A single store outage produces fail-open and fail-closed behaviour at the same instant, so one client sees both verdicts and the platform reads as failing selectively rather than failing.",
       },

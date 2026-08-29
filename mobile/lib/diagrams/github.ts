@@ -10,15 +10,33 @@ export const GITHUB: Diagram = {
     shape:
       "Four subsystems that share nothing but a repository id and a set of SHAs: a stateful git storage layer, a small relational metadata store, a large derived search index, and an event fan-out into CI.",
     beats: [
-      "Start from the unit of storage. A git repository is already a database: a content-addressed Merkle DAG of objects plus a small mutable set of refs pointing into it. That means you are not sharding blobs, you are placing stateful databases, and the repository is the shard.",
-      "So each repository is assigned three file servers holding a real bare git repo on local NVMe, deliberately placed so no majority sits in one data centre. A stateless proxy resolves owner and name to a repo id, then to the current primary, and forwards the raw git byte stream to it.",
-      "A push is a transaction in two phases. Objects first, because they are content-addressed and an unreferenced object is garbage rather than corruption, so an abandoned upload leaves the repository exactly as valid as it was. Then the ref compare-and-swap, which is the commit point, acked only after 2 of 3 replicas have fsynced.",
-      "The web application path never touches that transaction. Pull requests, issues and reviews are ordinary relational rows holding two SHAs, and the diff is not stored at all: it is computed on demand from base and head and cached by repo plus those two SHAs, because a force-push moves head out from under an open review.",
-      "Forks share one object pool per fork network mounted as a git alternate, so 10,000 forks are 10,000 ref namespaces over one copy of the history rather than 50TB of duplicates. Pools are partitioned by visibility class, because a shared pool makes any object fetchable by raw SHA from every member.",
-      "Everything downstream of the ack is deliberately asynchronous. The push publishes an event, and CI, webhook delivery and search indexing consume it, because CI clones alone are 75M/day against 15M pushes and a slow webhook receiver must never be able to fail somebody's push.",
+      {
+        text: "Start from the unit of storage. A git repository is already a database: a content-addressed Merkle DAG of objects plus a small mutable set of refs pointing into it. That means you are not sharding blobs, you are placing stateful databases, and the repository is the shard.",
+        lights: ["replica-set", "primary"],
+      },
+      {
+        text: "So each repository is assigned three file servers holding a real bare git repo on local NVMe, deliberately placed so no majority sits in one data centre. A stateless proxy resolves owner and name to a repo id, then to the current primary, and forwards the raw git byte stream to it.",
+        lights: ["git-proxy", "primary", "replicas", "e1", "e4"],
+      },
+      {
+        text: "A push is a transaction in two phases. Objects first, because they are content-addressed and an unreferenced object is garbage rather than corruption, so an abandoned upload leaves the repository exactly as valid as it was. Then the ref compare-and-swap, which is the commit point, acked only after 2 of 3 replicas have fsynced.",
+        lights: ["primary", "replicas", "e5"],
+      },
+      {
+        text: "The web application path never touches that transaction. Pull requests, issues and reviews are ordinary relational rows holding two SHAs, and the diff is not stored at all: it is computed on demand from base and head and cached by repo plus those two SHAs, because a force-push moves head out from under an open review.",
+        lights: ["web-app", "metadata", "diff-service", "e9", "e10"],
+      },
+      {
+        text: "Forks share one object pool per fork network mounted as a git alternate, so 10,000 forks are 10,000 ref namespaces over one copy of the history rather than 50TB of duplicates. Pools are partitioned by visibility class, because a shared pool makes any object fetchable by raw SHA from every member.",
+        lights: ["object-pool", "primary", "e6"],
+      },
+      {
+        text: "Everything downstream of the ack is deliberately asynchronous. The push publishes an event, and CI, webhook delivery and search indexing consume it, because CI clones alone are 75M/day against 15M pushes and a slow webhook receiver must never be able to fail somebody's push.",
+        lights: ["event-queue", "ci", "webhooks", "search", "e7", "e11", "e12", "e13"],
+      },
     ],
     crux:
-      "The repository is not divisible. Every other storage system in this book spreads load by splitting the unit, but a single git operation walks an arbitrary reachable subgraph and needs every object it reaches present locally, so a popular repository is one stateful thing that must fit on one machine. Read replicas dilute the read side; nothing dilutes the write side.",
+      "The repository is not divisible. Most storage systems spread load by splitting the unit, but a single git operation walks an arbitrary reachable subgraph and needs every object it reaches present locally, so a popular repository is one stateful thing that must fit on one machine. Read replicas dilute the read side; nothing dilutes the write side.",
     numbers: [
       "~100M repos, ~5PB unique, ~15PB at RF=3",
       "~2,000 git ops/s average, ~175 pushes/s",
@@ -133,8 +151,8 @@ export const GITHUB: Diagram = {
       row: 1,
       detail: {
         what: "Computes a pull request's diff and merge preview from two SHAs by reading trees out of a replica, and caches the result keyed by repository, base and head.",
-        why: "A diff is a pure function of two immutable SHAs, which makes the cache key exact and the entry permanently valid. Storing diffs instead would mean rewriting them every time a force-push moved head.",
-        numbers: ["cache key = (repo_id, base_sha, head_sha)", "read from a replica, never the primary"],
+        why: "A diff is a pure function of two immutable SHAs, which makes the cache key exact and the entry permanently valid. Storing diffs instead would mean rewriting them every time a force-push moved head. It always reads from a replica, never the primary, which keeps diff traffic off the one machine the write path needs.",
+        numbers: ["3-part cache key: repo id, base SHA, head SHA"],
         breaks:
           "A force-push moves head_sha out from under an open review, so review comments can be attached to a commit no ref reaches any more.",
         choice: {
@@ -314,8 +332,8 @@ export const GITHUB: Diagram = {
       id: "e1",
       from: "client",
       to: "git-proxy",
+      tier: "hot",
       label: "git push / fetch",
-      animated: true,
       detail: {
         what: "The git smart-HTTP or SSH stream, carrying a packfile on a push and a negotiated set of objects on a fetch.",
         why: "This is the hot path by volume: 85% of git operations are fetches or clones, and the proxy is the only stateless thing standing between the internet and a stateful file server.",
@@ -328,6 +346,7 @@ export const GITHUB: Diagram = {
       id: "e2",
       from: "client",
       to: "web-app",
+      tier: "data",
       label: "web + API request",
       detail: {
         what: "Ordinary HTTPS traffic for the web UI, REST and GraphQL, entirely separate from the git protocol path.",
@@ -341,12 +360,12 @@ export const GITHUB: Diagram = {
       id: "e4",
       from: "git-proxy",
       to: "primary",
+      tier: "hot",
       label: "receive-pack stream",
-      animated: true,
       detail: {
         what: "The forwarded bidirectional git byte stream, stamped with the routing generation the proxy resolved.",
         why: "The proxy forwards rather than terminates because git's protocol is a negotiation: the client and server work out what is missing between them, and nothing in the middle can usefully summarise that.",
-        numbers: ["generation stamped per request"],
+        numbers: ["1 generation stamp per forwarded request"],
         breaks:
           "A stream stamped with an old generation is rejected by a primary that has since been demoted, which turns a routing race into a retry rather than a lost update.",
       },
@@ -355,8 +374,8 @@ export const GITHUB: Diagram = {
       id: "e5",
       from: "primary",
       to: "replicas",
+      tier: "hot",
       label: "packfile, 2-of-3 fsync",
-      animated: true,
       detail: {
         what: "Objects streamed to both replicas, with the primary waiting for 2 of 3 fsync acknowledgements before it performs the ref compare-and-swap.",
         why: "The ordering is the entire durability argument. Objects before refs means the worst case after any crash is unreachable objects on some subset of replicas, which the next GC collects rather than a ref history the fleet disagrees on.",
@@ -369,6 +388,7 @@ export const GITHUB: Diagram = {
       id: "e6",
       from: "primary",
       to: "object-pool",
+      tier: "data",
       label: "shared history alternate",
       detail: {
         what: "Object lookups falling through to the fork network's shared pool when the object is not in this repository's own storage.",
@@ -382,6 +402,7 @@ export const GITHUB: Diagram = {
       id: "e7",
       from: "primary",
       to: "event-queue",
+      tier: "data",
       label: "push_event after ack",
       offset: 70,
       detail: {
@@ -396,6 +417,7 @@ export const GITHUB: Diagram = {
       id: "e8",
       from: "replicas",
       to: "diff-service",
+      tier: "data",
       label: "objects at base + head",
       detail: {
         what: "Trees and blobs read out of a replica so the diff service can compute a pull request's changes from two SHAs.",
@@ -409,6 +431,7 @@ export const GITHUB: Diagram = {
       id: "e9",
       from: "web-app",
       to: "metadata",
+      tier: "data",
       label: "PR rows, two SHAs",
       detail: {
         what: "Reading and writing pull request, issue, review and permission rows, each carrying base_sha and head_sha rather than any content.",
@@ -422,12 +445,13 @@ export const GITHUB: Diagram = {
       id: "e10",
       from: "web-app",
       to: "diff-service",
+      tier: "data",
       label: "diff for base..head",
       offset: 40,
       detail: {
         what: "A request for the diff or merge preview between the two SHAs the pull request row names.",
         why: "Diffs are computed rather than stored, so this hop exists on every PR page view and is what the (repo_id, base_sha, head_sha) cache is protecting.",
-        numbers: ["cache key is exact, entries never invalidate"],
+        numbers: ["0 invalidations: a SHA pair names exactly one diff forever"],
         breaks:
           "A force-push moves head_sha, so the next request is a different cache key and the previous diff, along with the review comments anchored in it, refers to a commit no ref reaches.",
       },
@@ -436,8 +460,8 @@ export const GITHUB: Diagram = {
       id: "e11",
       from: "event-queue",
       to: "ci",
+      tier: "hot",
       label: "workflow jobs at SHA",
-      animated: true,
       detail: {
         what: "The push event triggering workflow evaluation: the scheduler reads .github/workflows at the pushed SHA and enqueues jobs.",
         why: "Reading the workflow definition at the pushed SHA rather than at the branch tip is what makes a run reproducible, because the tip may have moved by the time the job starts.",
@@ -450,6 +474,7 @@ export const GITHUB: Diagram = {
       id: "e12",
       from: "event-queue",
       to: "webhooks",
+      tier: "data",
       label: "fan-out, HMAC signed",
       detail: {
         what: "Push, pull_request and check_run events handed to the delivery workers for at-least-once HTTP delivery to subscriber endpoints.",
@@ -463,12 +488,12 @@ export const GITHUB: Diagram = {
       id: "e13",
       from: "event-queue",
       to: "search",
+      tier: "control",
       label: "index update",
-      dashed: true,
       detail: {
         what: "An incremental index update for pushes that touch an indexed default branch.",
         why: "The index is a derived view, so it is fed from the event stream rather than by scanning the git store. Nothing about a push waits for it.",
-        numbers: ["~175 pushes/s to absorb", "full rebuild takes days"],
+        numbers: ["~175 pushes/s to absorb", "1 full rebuild spans several days"],
         breaks:
           "If this pipeline falls behind, search silently serves results from a corpus that no longer exists, which is why build lag is a paged metric rather than a dashboard one.",
       },
@@ -477,9 +502,9 @@ export const GITHUB: Diagram = {
       id: "e14",
       from: "ci",
       to: "replicas",
+      tier: "hot",
       label: "clone at pushed SHA",
       offset: 90,
-      animated: true,
       detail: {
         what: "Every runner cloning the repository at the SHA it was triggered for, served by a read replica in the same region as the runner.",
         why: "This arrow is the largest single consumer of the git layer, and it points back up into the storage the humans are also using. Placing runners next to the replica they clone from is a storage decision dressed as a scheduling one.",

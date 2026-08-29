@@ -10,12 +10,30 @@ export const CHAT_SYSTEM: Diagram = {
     shape:
       "Chat is a store-and-forward system wearing a real-time coat: the durable write is the product, and the socket is a latency optimisation bolted on top of it.",
     beats: [
-      "Every device holds one long-lived TLS connection to an edge server, because a push system needs the server able to speak first. That single decision makes the edge tier stateful, and connection count rather than requests per second becomes the number that sizes the fleet.",
-      "On send, the edge does not write. It hands the frame to a persist path that checks the idempotency index, assigns a conversation-scoped Snowflake id and does a quorum write, and only then does an ack come back. The tick means stored, never that one process accepted it.",
-      "Delivery starts after the commit. The record goes onto a partitioned bus and a routing consumer expands group membership, then asks the session registry which of 60 edges currently holds each recipient's socket, and republishes onto that edge's partition. That lookup is the whole reason edges never have to know about each other.",
-      "If there is no live socket, nothing special happens, because the message is already durable. APNs or FCM wakes the device, the app reconnects and asks for everything after its cursor, and that one mechanism covers crashes, deploys, flaky mobile networks and users offline for months.",
-      "Receipts travel back up the same pipe and are the half that actually saturates. A per-device high-water mark, debounced on five seconds, is both the delivery receipt and the sync cursor, so a burst of forty messages collapses into one write instead of forty rows.",
-      "The cost of all of it is that connection ownership is now architecture. An edge is not interchangeable while it holds a million sockets, so deploys drain rather than restart, failover needs a reconnect storm plan, and capacity is planned in connections.",
+      {
+        text: "Every device holds one long-lived TLS connection to an edge server, because a push system needs the server able to speak first. That single decision makes the edge tier stateful, and connection count rather than requests per second becomes the number that sizes the fleet.",
+        lights: ["sender-device", "edge-a", "e1", "e3"],
+      },
+      {
+        text: "On send, the edge does not write. It hands the frame to a persist path that checks the idempotency index, assigns a conversation-scoped Snowflake id and does a quorum write, and only then does an ack come back. The tick means stored, never that one process accepted it.",
+        lights: ["persist", "p-idempotency", "p-sequencer", "p-commit", "conversation-log", "e4", "e6", "e7", "e8", "e9", "e10"],
+      },
+      {
+        text: "Delivery starts after the commit. The record goes onto a partitioned bus and a routing consumer expands group membership, then asks the session registry which of 60 edges currently holds each recipient's socket, and republishes onto that edge's partition. That lookup is the whole reason edges never have to know about each other.",
+        lights: ["commit-topic", "router", "session-registry", "edge-partitions", "e12", "e13", "e15", "e16"],
+      },
+      {
+        text: "If there is no live socket, nothing special happens, because the message is already durable. APNs or FCM wakes the device, the app reconnects and asks for everything after its cursor, and that one mechanism covers crashes, deploys, flaky mobile networks and users offline for months.",
+        lights: ["push-service", "recipient-device", "edge-b", "e19", "e21", "e22"],
+      },
+      {
+        text: "Receipts travel back up the same pipe and are the half that actually saturates. A per-device high-water mark, debounced on five seconds, is both the delivery receipt and the sync cursor, so a burst of forty messages collapses into one write instead of forty rows.",
+        lights: ["cursors", "edge-b", "e22", "e24"],
+      },
+      {
+        text: "The cost of all of it is that connection ownership is now architecture. An edge is not interchangeable while it holds a million sockets, so deploys drain rather than restart, failover needs a reconnect storm plan, and capacity is planned in connections.",
+        lights: ["edge-a", "edge-b", "sender-device"],
+      },
     ],
     crux:
       "The connection tier is stateful, so losing one box is a fleet event rather than a node event. An edge holding 1M sockets dies, every client detects it within seconds, and 17,000 reconnects per second per surviving box, each carrying a ~1ms TLS handshake, is 17 cores of pure handshake on boxes that were already busy. Jittered client backoff is not a polish item; it is what stops one failure taking the fleet.",
@@ -33,7 +51,7 @@ export const CHAT_SYSTEM: Diagram = {
       kind: "zone",
       detail: {
         what: "Everything that must happen before the sender's tick: the idempotency check, id assignment, the quorum write, and the two stores they touch.",
-        why: "Every hard question in this interview lives inside this boundary rather than in the socket. What the sender's tick promises, what a device asks for after three weeks away, and what happens to a message written but never pushed are all decided here.",
+        why: "Every hard problem in this system lives inside this boundary rather than in the socket. What the sender's tick promises, what a device asks for after three weeks away, and what happens to a message written but never pushed are all decided here.",
         numbers: ["~10ms quorum write", "1TB/day raw, 3TB/day at RF=3", "175k sends/s at peak"],
         breaks:
           "Move the ack outside this boundary and the whole delivery contract collapses: a tick that can be retracted is worse than a slow tick.",
@@ -53,10 +71,18 @@ export const CHAT_SYSTEM: Diagram = {
         numbers: [
           "58k sends/s average, 175k at peak",
           "one extra read plus one quorum write per send",
-          "scales horizontally: no state between requests",
+          "0 state carried between requests, so it scales horizontally",
         ],
         breaks:
           "It is stateless, so its failure is a retryable error on the client rather than a lost message. The dangerous failure is a code change that reorders the stages.",
+        choice: {
+          pick: "One deployable running all three stages (idempotency, sequencer, commit) in one process",
+          instead: "Three independently scaled services with a queue or RPC between each stage",
+          decider:
+            "Whether the ordering invariant can be broken by a deploy. Splitting into three services puts an async hop between 'id assigned' and 'write committed', so a bug or a partial rollout can let a message get an id with no durable write behind it; one process makes the order structurally impossible to reverse rather than a convention three teams have to honour.",
+          flips:
+            "When one stage's load profile genuinely diverges from the others by an order of magnitude or more, at which point the shared fate of a single deployable starts costing more than the ordering guarantee is worth.",
+        },
       },
     },
 
@@ -72,7 +98,7 @@ export const CHAT_SYSTEM: Diagram = {
         what: "Alice's phone: one long-lived socket, a locally generated client_msg_id per send, and a cursor per conversation.",
         why: "The client is the only place that can make retries safe, because it is the only actor present for every attempt. Exactly-once over a mobile network is not on offer, so idempotency keys and the apply-by-id cursor both have to live on the device.",
         numbers: [
-          "client_msg_id generated before the first attempt",
+          "one client_msg_id generated before the first attempt",
           "one cursor per conversation per device",
           "keepalive ~every 60s to survive carrier NAT rebinding",
         ],
@@ -133,7 +159,7 @@ export const CHAT_SYSTEM: Diagram = {
         numbers: [
           "one extra read on every send, including the majority that are not retries",
           "24h window, covering the client's retry horizon",
-          "a hit short-circuits: no id, no write, no bus record",
+          "on a hit: 0 ids, 0 writes, 0 bus records",
         ],
         breaks:
           "Skip it and a lost ack produces two genuinely distinct messages. No downstream dedupe can repair that, because by the time anyone notices both have valid ids and both have been delivered.",
@@ -159,9 +185,9 @@ export const CHAT_SYSTEM: Diagram = {
         what: "Assigns a monotonic msg_id scoped to the conversation, before the record reaches the store or the bus.",
         why: "Ordering and durability come from the same component so that every recipient renders the same sequence regardless of which edge delivered their copy or how the bus interleaved things. Assigning the id here, and not at the edge, is what makes that true across 60 edges.",
         numbers: [
-          "monotonic per chat_id, not globally",
-          "id exists before the quorum write and before the bus",
-          "doubles as the clustering key in the conversation log",
+          "one monotonic sequence per chat_id, not global",
+          "64-bit id: timestamp, chat shard, sequence",
+          "1 id doubles as the clustering key in the conversation log",
         ],
         breaks:
           "Two devices of the same user sending concurrently get their ids in the order the persist path happened to see them, which may not be the order the human experienced. Accepted, not solved.",
@@ -169,7 +195,7 @@ export const CHAT_SYSTEM: Diagram = {
           pick: "Conversation-scoped Snowflake ids assigned on the write path",
           instead: "Client timestamps for ordering, or a global per-user sequencer",
           decider:
-            "Phone clocks are wrong by seconds, so client timestamps cannot order a conversation at all. A global order needs a per-user sequencer, which is a write bottleneck on exactly the most active users, and nothing a client renders needs more than per-conversation order.",
+            "Phone clocks can drift by 10+ seconds, so client timestamps cannot order a conversation at all. A global order needs a per-user sequencer, which is a write bottleneck on exactly the most active users, and nothing a client renders needs more than per-conversation order.",
           flips:
             "Products where a user's whole timeline must be totally ordered — a unified inbox across conversations — which is where you pay for the per-user sequencer deliberately.",
         },
@@ -217,7 +243,7 @@ export const CHAT_SYSTEM: Diagram = {
         numbers: [
           "~10ms for the quorum write out of a 300ms p99 budget",
           "RF=3 across availability zones",
-          "ack strictly after commit; bus publish strictly after ack",
+          "3-step order: commit, then ack, then bus publish",
         ],
         breaks:
           "A stalled quorum surfaces to the client as a retryable failure, which is the right answer: no tick beats a wrong tick.",
@@ -246,7 +272,7 @@ export const CHAT_SYSTEM: Diagram = {
         numbers: [
           "175k records/s at peak, one per send",
           "~5ms hop inside the 300ms budget",
-          "retention long enough for a consumer tier restart, not for history",
+          "~24h retention, sized for a restart, not for history",
         ],
         breaks:
           "If the bus is unavailable the message is still stored and still arrives on reconnect, so the incident is delivery latency rather than data loss.",
@@ -254,7 +280,7 @@ export const CHAT_SYSTEM: Diagram = {
           pick: "A replayable log between the write path and routing",
           instead: "Calling the routing tier synchronously from the persist path",
           decider:
-            "What happens on a routing failure. A synchronous call makes routing's availability part of the send SLO and loses the delivery on a dropped call with no way to rewind; a log lets a restarted consumer resume from its offset and keeps the sender's latency budget independent of fan-out.",
+            "What happens on a routing failure. A synchronous call makes routing's availability part of the 300ms send SLO and loses the delivery on a dropped call with no way to rewind; a log lets a restarted consumer resume from its offset and keeps the sender's latency budget independent of fan-out.",
           flips:
             "Deployments small enough that routing is a library call inside the persist process, where a broker is pure operational cost.",
         },
@@ -327,7 +353,7 @@ export const CHAT_SYSTEM: Diagram = {
         numbers: [
           "60 partitions for 60 edges",
           "435k delivered copies/s at peak",
-          "a restarted edge replays its own partition from its offset",
+          "one partition replayed per restarted edge, from its own offset",
         ],
         breaks:
           "A lagging partition delays every recipient on one edge while the rest of the fleet looks healthy. Consumer lag per partition is the metric that catches it before any user does.",
@@ -458,13 +484,13 @@ export const CHAT_SYSTEM: Diagram = {
     {
       id: "e1",
       to: "edge-a",
-      label: "connect, discover edge",
+      tier: "control",
+      label: "socket attach + resume",
       from: "sender-device",
-      dashed: true,
       detail: {
-        what: "The connect-time request: authenticate, then ask where this device's socket should live.",
-        why: "Placement happens once per socket rather than once per message, because a stateful tier cannot be balanced per request. Everything after this point talks to one specific box.",
-        numbers: ["one round trip per socket, not per message", "JWT presented at the handshake"],
+        what: "The connect-time handshake: TLS termination, JWT authentication, and — on a reconnect — presenting cursors so the socket resumes the existing session rather than starting cold.",
+        why: "An anycast layer in front of the fleet picks which edge answers the connection; placement happens once per socket rather than once per message, because a stateful tier cannot be balanced per request. Everything after this point talks to one specific box.",
+        numbers: ["one round trip per socket, not per message", "one JWT presented at the handshake, not on every frame"],
         breaks:
           "This is the request a million clients make simultaneously after an edge dies, which is why the answer can be a Retry-After rather than an address.",
       },
@@ -473,8 +499,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e3",
       from: "sender-device",
       to: "edge-a",
+      tier: "hot",
       label: "WebSocket",
-      animated: true,
       detail: {
         what: "One long-lived TLS connection carrying sends, cursors, presence and typing in both directions.",
         why: "The server has to be able to speak first, which request-response cannot do. Opening a connection per message would also pay a handshake per message on a network where the handshake is the expensive part.",
@@ -487,8 +513,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e4",
       from: "edge-a",
       to: "p-idempotency",
+      tier: "hot",
       label: "send + client_msg_id",
-      animated: true,
       detail: {
         what: "The send frame handed off the socket to the persist path, carrying the client-generated idempotency key.",
         why: "The edge deliberately does not write. Keeping persistence in one component is what makes commit-before-ack an enforced invariant rather than a convention every edge is trusted to honour.",
@@ -501,6 +527,7 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e6",
       from: "p-idempotency",
       to: "p-sequencer",
+      tier: "data",
       label: "not seen before",
       detail: {
         what: "The in-process hand-off to id assignment, taken only when the idempotency check missed.",
@@ -513,11 +540,12 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e7",
       from: "p-sequencer",
       to: "p-commit",
+      tier: "data",
       label: "msg_id assigned",
       detail: {
         what: "The record, now carrying its conversation-scoped monotonic id, handed to the commit stage.",
         why: "The id exists before the write so that the store can cluster on it and the bus can carry it. Assigning it after the write would mean a second write to attach it.",
-        numbers: ["monotonic within chat_id"],
+        numbers: ["one monotonic sequence within chat_id"],
         breaks:
           "This hand-off is in-process on purpose. An async hop here would allow a gap where an id exists for a message that was never committed.",
       },
@@ -526,6 +554,7 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e8",
       from: "p-commit",
       to: "conversation-log",
+      tier: "data",
       label: "quorum write",
       detail: {
         what: "The write that must commit before anything acknowledges the sender.",
@@ -539,13 +568,13 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e9",
       from: "p-commit",
       to: "edge-a",
+      tier: "control",
       label: "ack, after commit",
-      dashed: true,
       offset: 90,
       detail: {
         what: "The acknowledgement carrying the assigned server msg_id, emitted only once the quorum write has committed.",
         why: "This is the invariant the whole design exists to defend. The ordering of these two operations, not their speed, is the delivery contract: the tick means stored, never that one process accepted it.",
-        numbers: ["ack strictly after the commit"],
+        numbers: ["one strict order: commit before ack"],
         breaks:
           "Reversing the order shaves 10ms off a 300ms budget and makes every tick retractable, which is a worse product than a slightly slower tick.",
       },
@@ -554,8 +583,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e10",
       from: "edge-a",
       to: "sender-device",
+      tier: "control",
       label: "one tick",
-      dashed: true,
       offset: 40,
       detail: {
         what: "The ack forwarded down the socket, rendering as the sender's first tick.",
@@ -568,8 +597,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e12",
       from: "p-commit",
       to: "commit-topic",
+      tier: "hot",
       label: "committed record",
-      animated: true,
       detail: {
         what: "The committed record published for routing, once the id exists and the write has landed.",
         why: "Delivery only starts after durability is settled, which is what makes the offline branch free: when the recipient turns out to be unreachable there is nothing left to make durable.",
@@ -582,8 +611,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e13",
       from: "commit-topic",
       to: "router",
+      tier: "hot",
       label: "consumer group, by chat_id",
-      animated: true,
       detail: {
         what: "Routing consumers reading committed records off their partitions.",
         why: "A consumer group lets routing scale independently of both the edge tier and the write path, and a restarted consumer rewinds to its offset rather than losing whatever was in flight.",
@@ -596,8 +625,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e15",
       from: "router",
       to: "session-registry",
+      tier: "control",
       label: "which edge holds Bob?",
-      dashed: true,
       detail: {
         what: "The routing lookup: user_id to the edge currently holding that user's socket.",
         why: "This is the hop that makes cross-edge delivery possible without any edge knowing about any other. It is a cache read on the delivery path and deliberately not on the write path, so its staleness can never cost a message.",
@@ -610,8 +639,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e16",
       from: "router",
       to: "edge-partitions",
+      tier: "hot",
       label: "publish to owning partition",
-      animated: true,
       detail: {
         what: "The routed copy written onto the partition belonging to the edge that holds the recipient's socket.",
         why: "Addressing an edge by partition rather than by RPC is what lets the edge subscribe instead of being called, so a rolling deploy moves sockets around without anyone maintaining a topology.",
@@ -624,12 +653,12 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e17",
       from: "edge-partitions",
       to: "edge-b",
+      tier: "hot",
       label: "edge consumes its own",
-      animated: true,
       detail: {
         what: "The recipient's edge consuming the partition it owns.",
         why: "One consumer per partition means an edge only ever sees traffic for sockets it actually holds, and a restarted edge replays from its own offset rather than asking anyone to resend.",
-        numbers: ["one partition per edge", "lag per partition is the alerting signal"],
+        numbers: ["one partition per edge", "one alert per lagging partition"],
         breaks:
           "A lagging partition delays every recipient on one edge while the rest of the fleet looks healthy. Durability is untouched, because the message committed before it ever got here.",
       },
@@ -638,8 +667,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e18",
       from: "edge-b",
       to: "recipient-device",
+      tier: "hot",
       label: "WS push",
-      animated: true,
       detail: {
         what: "The receive frame pushed down the recipient's open socket.",
         why: "This is the only genuinely real-time part of the system, and it is a latency optimisation over a store-and-forward path that would have delivered the message anyway, just later.",
@@ -652,8 +681,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e19",
       from: "router",
       to: "push-service",
+      tier: "control",
       label: "no live socket",
-      dashed: true,
       detail: {
         what: "The branch taken when the registry has no edge for this user: hand the copy to the push service instead of a partition.",
         why: "With no socket the message is already durable, so the only work left is waking the device. That is why the offline branch adds no durability work at all and the sender's experience is identical either way.",
@@ -665,13 +694,13 @@ export const CHAT_SYSTEM: Diagram = {
     {
       id: "e21",
       to: "recipient-device",
+      tier: "control",
       label: "APNs/FCM wakeup, best effort",
       from: "push-service",
-      dashed: true,
       detail: {
         what: "The platform notification that wakes the app so it can reconnect.",
         why: "The notification's only job is to get the user to open the app; the app then reconnects and asks for everything after its cursor. Demoting push to a wakeup is what stops its unreliability costing a message.",
-        numbers: ["unacknowledged by contract", "~2.2B/day"],
+        numbers: ["zero acknowledgement, by contract", "~2.2B/day"],
         breaks:
           "Rate-limited and lossy, and outside our control. Treating it as delivery is how you build a system where a provider outage loses messages.",
       },
@@ -680,8 +709,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e22",
       from: "recipient-device",
       to: "edge-b",
+      tier: "control",
       label: "reconnect + cursor + receipt",
-      dashed: true,
       offset: 60,
       detail: {
         what: "The reverse channel up the socket: on reconnect the device presents its per-conversation cursors, and in steady state it raises the same high-water mark as a receipt.",
@@ -699,8 +728,8 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e23",
       from: "edge-b",
       to: "session-registry",
+      tier: "control",
       label: "SET user:bob edge_B EX 60",
-      dashed: true,
       detail: {
         what: "The edge claiming ownership of a user's socket on connect, refreshed by heartbeat every 30 seconds.",
         why: "The registry is written by whoever holds the socket, which makes recovery self-healing: a client that lands on a new box after a crash rewrites its own routing entry as a side effect of connecting.",
@@ -713,6 +742,7 @@ export const CHAT_SYSTEM: Diagram = {
       id: "e24",
       from: "edge-b",
       to: "cursors",
+      tier: "data",
       label: "high-water mark",
       detail: {
         what: "The server-side mirror of the device's cursor: (chat_id, device_id) to applied_msg_id, written when a receipt arrives.",
@@ -725,6 +755,7 @@ export const CHAT_SYSTEM: Diagram = {
     {
       id: "e26",
       to: "conversation-log",
+      tier: "data",
       label: "backlog after cursor",
       from: "edge-b",
       detail: {

@@ -10,12 +10,30 @@ export const PAYMENT_SYSTEM: Diagram = {
     shape:
       "A durable workflow in front of an external processor you cannot roll back, an append-only double-entry ledger as the internal source of truth, and a nightly reconciliation against the processor's own settlement report.",
     beats: [
-      "Nothing external happens until something durable is written. The charge arrives with a client-generated idempotency key scoped to one purchase attempt, and the API commits a row holding that key, a hash of the request body and a recovery point before the first outbound call. Same key with the same body returns the stored response; same key with a different body is a 422, because a recycled key is a client bug and charging silently under it is worse than failing loudly.",
-      "The orchestrator runs the saga in order: risk score, authorize, paired ledger entries, capture. Each recovery point commits in the same database transaction as the work it describes, so recorded progress can lag reality but can never lead it. A resumed workflow reading psp_authorized knows the hold exists; one reading risk_scored knows nothing about authorize, which is exactly the right amount of doubt.",
-      "Two-phase commit is not available, so failures unwind with compensations instead. The number of external participants exposing a prepare-and-commit call is zero: Visa, Mastercard and every PSP layered on them offer authorize, capture and void and nothing else. Compensations run backwards, are extra ledger entries rather than edits, and are keyed on charge_id and step so running one twice is a no-op.",
-      "The hard branch is a capture that times out after 4s, where you genuinely cannot tell whether money moved. The charge moves into requires_verification, a real state rather than an error bucket, and a worker queries the PSP by the same key on a backoff until the outcome is known. Only then does the workflow confirm or compensate, because voiding a charge the PSP already captured wedges the saga with live money on one side.",
-      "The ledger is paired debits and credits, append only, with balances derived and checkpointed rather than a column you overwrite. That is what lets you reconstruct any account as at any instant across a 7-year retention window, and it costs roughly 3 entries at 500B per payment. Webhooks arrive at-least-once and unordered, so handlers only enqueue transition requests that the orchestrator validates against the state machine.",
-      "Reconciliation is a designed component, not an operational afterthought. A daily job joins the processor's settlement rows against your charges on psp_charge_id and alerts on anything unmatched, which bounds how long a silent discrepancy can hide to 24 hours. A row in their report with no row in yours means a card was charged and you have no record of it.",
+      {
+        text: "Nothing external happens until something durable is written. The charge arrives with a client-generated idempotency key scoped to one purchase attempt, and the API commits a row holding that key, a hash of the request body and a recovery point before the first outbound call. Same key with the same body returns the stored response; same key with a different body is a 422, because a recycled key is a client bug and charging silently under it is worse than failing loudly.",
+        lights: ["client", "api", "idem", "e1", "e2"],
+      },
+      {
+        text: "The orchestrator runs the saga in order: risk score, authorize, paired ledger entries, capture. Risk score is an in-process check against fraud signals, velocity, device fingerprint, AVS/CVV match, with no outbound PSP call and no component of its own; a decline there skips straight to compensation before authorize ever runs. Each recovery point commits in the same database transaction as the work it describes, so recorded progress can lag reality but can never lead it. A resumed workflow reading psp_authorized knows the hold exists; one reading risk_scored knows nothing about authorize, which is exactly the right amount of doubt.",
+        lights: ["orchestrator", "e3"],
+      },
+      {
+        text: "Two-phase commit is not available, so failures unwind with compensations instead. The number of external participants exposing a prepare-and-commit call is zero: Visa, Mastercard and every PSP layered on them offer authorize, capture and void and nothing else. Compensations run backwards, are extra ledger entries rather than edits, and are keyed on charge_id and step so running one twice is a no-op.",
+        lights: ["orchestrator", "psp", "e4"],
+      },
+      {
+        text: "The hard branch is a capture that times out after 4s, where you genuinely cannot tell whether money moved. The charge moves into requires_verification, a real state rather than an error bucket, and a worker queries the PSP by the same key on a backoff until the outcome is known. Only then does the workflow confirm or compensate, because voiding a charge the PSP already captured wedges the saga with live money on one side.",
+        lights: ["verifier", "psp", "e8", "e9", "e10"],
+      },
+      {
+        text: "The ledger is paired debits and credits, append only, with balances derived and checkpointed rather than a column you overwrite. That is what lets you reconstruct any account as at any instant across a 7-year retention window, and it costs roughly 3 entries at 500B per payment. Webhooks arrive at-least-once and unordered, so handlers only enqueue transition requests that the orchestrator validates against the state machine.",
+        lights: ["ledger", "webhook-queue", "e5", "e11", "e12"],
+      },
+      {
+        text: "Reconciliation is a designed component, not an operational afterthought. A daily job joins the processor's settlement rows against your charges on psp_charge_id and alerts on anything unmatched, which bounds how long a silent discrepancy can hide to 24 hours. A row in their report with no row in yours means a card was charged and you have no record of it.",
+        lights: ["recon", "settlement", "e13", "e14", "e15", "e16"],
+      },
     ],
     crux:
       "The external world can succeed while your write fails, and you cannot tell that case apart from the call never arriving. Every serious decision here follows from that: idempotency keys so a repeat is absorbed, recovery points so progress never overstates reality, verification before compensation so you never unwind a state you did not observe, and reconciliation because some fraction will still slip through.",
@@ -33,7 +51,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "The workflow engine and its verification worker: the only components allowed to transition a charge.",
         why: "Every other box either hands work in or is called by the saga. Concentrating state transitions in one owner is what stops a webhook handler and a retry from both deciding the outcome of the same charge.",
-        numbers: ["recovery points: started, risk_scored, psp_authorized, ledger_recorded, captured, finished"],
+        numbers: ["6 recovery points: started, risk_scored, psp_authorized, ledger_recorded, captured, finished"],
         breaks:
           "If anything outside this zone writes charge status directly, the state machine stops being a guarantee and late events start unwinding terminal states.",
       },
@@ -94,8 +112,8 @@ export const PAYMENT_SYSTEM: Diagram = {
       parent: "saga-zone",
       detail: {
         what: "A durable state machine running risk score, authorize, ledger write and capture, each with a compensating action.",
-        why: "The steps cannot share a transaction, so the workflow has to be able to say which ones already happened after a crash. It also owns the charge state machine, which is why webhook handlers request transitions rather than applying them.",
-        numbers: ["4 forward steps, 4 compensations", "terminal states are sticky"],
+        why: "The steps cannot share a transaction, so the workflow has to be able to say which ones already happened after a crash. Risk score, the first step, is entirely in-process: fraud signals such as velocity, device fingerprint and AVS/CVV match are evaluated against a threshold with no outbound call and no component of its own, so a decline there costs nothing but the check itself and skips straight to compensation before authorize runs. It also owns the charge state machine, which is why webhook handlers request transitions rather than applying them.",
+        numbers: ["4 forward steps, 4 compensations", "4 terminal states, all sticky"],
         breaks:
           "Compensation without verification. Voiding straight after a timeout can try to void a charge the PSP already captured, which it rejects, wedging the workflow with live money on one side and a permanently failing compensation on the other.",
         choice: {
@@ -119,7 +137,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "The worker that resolves ambiguous outcomes by querying the PSP with the same idempotency key until it answers.",
         why: "A capture timeout has three indistinguishable explanations and both naive answers cost real money: void a landed capture and you have refunded funds you collected, skip it and you have shipped for free. So the doubt gets its own state and its own worker instead of a guess on the hot path.",
-        numbers: ["capture timeout at 4s", "poll on backoff until the state is known"],
+        numbers: ["capture timeout at 4s", "polls on backoff for up to 24h, the key window"],
         breaks:
           "If verification cannot resolve within N minutes the charge has to be frozen and escalated, so a long PSP outage means a partial stop for the in-flight set rather than a graceful degrade.",
         choice: {
@@ -233,7 +251,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       row: 2,
       detail: {
         what: "An append-only log of paired debit and credit entries. Balances are derived and periodically checkpointed, never a column you overwrite.",
-        why: "This is the internal source of truth, and it is the one thing in the picture that does not move when the processor does. Pairing every movement keeps sum(debits) equal to sum(credits) at all times, which is how an error announces itself rather than hiding.",
+        why: "This is the internal source of truth, and it is the one thing here that does not move when the processor does. Pairing every movement keeps sum(debits) equal to sum(credits) at all times, which is how an error announces itself rather than hiding.",
         numbers: ["~3 entries per payment at ~500B", "1.5KB of ledger per payment, 1.5TB/yr", "7-year retention"],
         breaks:
           "A hot merchant account. Thousands of charges/s all contending on one balance row serialises on the row lock and caps out at a few hundred TPS, which is why the account is sharded into sub-accounts and summed.",
@@ -280,7 +298,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "The processor's own daily record of what it actually moved, delivered as a file you did not write.",
         why: "It is the independent witness. Your ledger can only tell you what you believe happened, so the only way to catch a charge that landed at the network while your write failed is to compare against a book somebody else keeps.",
-        numbers: ["one row per settled transaction", "joined on psp_charge_id", "kept 7 years for audit"],
+        numbers: ["one row per settled transaction", "1 join column: psp_charge_id", "kept 7 years for audit"],
         breaks:
           "A row in their report with no match in yours means a card was charged and you have no record of it. That is the serious direction of the mismatch and it needs a human the same day.",
       },
@@ -324,7 +342,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "Handing the charge to the workflow engine, either as a fresh saga or as a resume from the stored recovery point.",
         why: "Splitting the API from the workflow is what lets the charge outlive the request. The user waits for authorize, but capture and everything after it has nobody waiting on it and therefore no latency budget.",
-        numbers: ["authorize synchronous, capture off the request path"],
+        numbers: ["1 synchronous call (authorize), capture off the request path"],
         breaks:
           "If the API returns before the workflow is durably started, an accepted payment can be lost, and lost payments are the one failure this system is not allowed to have.",
       },
@@ -380,7 +398,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "The only writer of charge status, validating each transition against the state machine before applying it.",
         why: "Concentrating transitions in one owner is what stops a webhook and a retry from disagreeing about a charge. It is also where psp_charge_id lands the instant authorize returns, because that value outlives the idempotency key.",
-        numbers: ["terminal states: succeeded, failed, refunded, disputed_lost"],
+        numbers: ["4 terminal states: succeeded, failed, refunded, disputed_lost"],
         breaks:
           "An illegal transition is dropped with an alert rather than applied, which means a genuine bug shows up as a metric rather than as corrupted money state, and somebody has to be watching that metric.",
       },
@@ -408,7 +426,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "Asking the processor what actually happened, keyed by the same value the original call carried.",
         why: "This is the second defence, you skipping the repeat rather than the far side absorbing it. It is also the step people leave out, and leaving it out is what turns an ambiguous timeout into a wedged workflow.",
-        numbers: ["polled on backoff", "valid only inside the 24h key window"],
+        numbers: ["polled on backoff, up to 24h", "valid only inside the 24h key window"],
         breaks:
           "Past 24h the key is gone from both sides and the only remaining handle is psp_charge_id through reconciliation and human judgement.",
       },
@@ -422,7 +440,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "Returning an observed state so the saga either fast-forwards its recovery point or unwinds from the last committed step.",
         why: "Every compensation is then issued against a state you saw rather than one you assumed. Void the authorization, write a reversing ledger entry, release the risk hold, each keyed on charge_id and step so a repeat is a no-op.",
-        numbers: ["compensations run in reverse order"],
+        numbers: ["up to 4 compensations, run in reverse order"],
         breaks:
           "Compensations are additional entries, never edits or deletes, so a bug here adds a wrong entry rather than destroying a right one. That is deliberate, and it means the ledger grows even on the failure path.",
       },
@@ -450,7 +468,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "A deduplicated, signature-checked event proposed to the orchestrator as a state transition rather than applied directly.",
         why: "The handler has no idea what else is in flight for that charge, so it is not allowed to decide. Routing every external event through the same validator is what keeps webhook state and workflow state from drifting apart.",
-        numbers: ["dedupe on charge_id, event_type, event_id", "24h TTL set"],
+        numbers: ["dedupe on 3 fields: charge_id, event_type, event_id", "24h TTL set"],
         breaks:
           "A webhook claiming succeeded while the orchestrator still reads authorized is a legal race; one claiming failed on a finalised charge is dropped and alerted, and confusing the two categories loses real outcomes.",
       },
@@ -464,7 +482,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "The processor publishing its own record of what actually settled, one row per transaction.",
         why: "It is produced entirely outside your system, which is the only reason it is worth comparing against. A witness that shares your code shares your bugs.",
-        numbers: ["daily cadence", "~200B per row"],
+        numbers: ["1 file/day", "~200B per row"],
         breaks:
           "A late or partial file silently skips a day of reconciliation, so the job has to alert on a missing file as loudly as it alerts on a mismatch.",
       },
@@ -492,7 +510,7 @@ export const PAYMENT_SYSTEM: Diagram = {
       detail: {
         what: "Reading your own entries for the period as the other side of the join, matched on psp_charge_id.",
         why: "Comparing against the ledger rather than the charge table is deliberate: the ledger is the thing that must balance, and an entry that exists with no settlement behind it is as much a problem as the reverse.",
-        numbers: ["~3 entries per payment", "join column psp_charge_id"],
+        numbers: ["~3 entries per payment", "1 join column: psp_charge_id"],
         breaks:
           "Sub-cent FX rounding and dispute fees produce a small permanent diff, and treating that noise as normal is how a real gap hides inside it.",
       },
@@ -508,7 +526,7 @@ export const PAYMENT_SYSTEM: Diagram = {
         why: "Once the 24h idempotency window has closed, psp_charge_id is the only handle left. Reconciliation is where that matters, because chargebacks and partial-refund disputes surface weeks to months after the payment.",
         numbers: ["chargeback window up to 120 days", "7-year settlement archive"],
         breaks:
-          "There is no automatic path from a four-month-old dispute back to the workflow that created it. What exists is an audit trail and an operator, and pretending otherwise in an interview is worse than conceding it.",
+          "There is no automatic path from a four-month-old dispute back to the workflow that created it. What exists is an audit trail and an operator, and any design that claims otherwise is describing a system that does not exist.",
       },
     },
   ],

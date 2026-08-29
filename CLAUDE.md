@@ -89,6 +89,41 @@ fails on any of the first four.
 8. Rebuild layouts (`bunx tsx scripts/build-diagram-layouts.ts`, which
    `build-web.sh` runs) so `layouts.json` is fresh; the gate warns if stale.
 
+### The text (the gate lints it too)
+
+The text is what a reader gets when they tap a box, an arrow, or Overview. Its
+job is to make the reader **understand this solution** — never to coach the
+interview; the user rejected "things to say" outright. `rate-limiter.ts` is the
+finished pattern. `bunx tsx scripts/check-diagrams.ts <id>` fails on the errors
+below and warns on the rest; a diagram ships with 0 of either.
+
+- **Beats light the picture.** `overview.beats` are `{ text, lights: [ids] }`:
+  each names boxes by their *labels* and lists the node and edge ids it is
+  about; tapping it lights them and dims the rest. Stages hidden in a collapsed
+  group light the group. A beat that lights nothing warns. Where the file has
+  stage latencies, one beat sums the budget against the SLO.
+- **No cross-references.** Never `#12`, `Q7`, "question 3", "the prose", "the
+  write-up", "pseudocode", "other diagrams" — the panel reader has none of
+  them. Say the idea in a clause instead. Error.
+- **No interview coaching, no narration of the drawing.** "interview",
+  "candidate", "out loud", "drawn as", "in the diagram", "the picture", "time
+  budget" are errors. A "deliberately not built" beat is fine when it explains a
+  boundary of the system.
+- **Fields do their job.** `numbers` = figures only (digit or number word);
+  `breaks` = a failure the box owns ("X happens, and it looks like Y");
+  `choice` on every real box (not client / external / process / zone) with a
+  `decider` that carries the number that settles it and a `flips` that is a
+  real condition; every frame has a `detail` saying what the frame claims.
+- **Jargon stays, explained in place.** `mobile/lib/diagrams/glossary.ts` maps
+  term → one line; `Glossed` underlines every match in panel text and a tap
+  shows the definition inline. Any ALL-CAPS token not in the glossary warns:
+  add it or rewrite. Labels and subs must not *depend* on jargon.
+- Numbers reconcile within a file; derive, don't assert. `shape` is the
+  design's one idea, `crux` ≤ 3 sentences with the actionable one first.
+- Copy-all (`diagramToMarkdown`) prints the question, nests frames, prints edge
+  `choice` and the beats with the labels they light — extend it when adding a
+  field or the field silently does not copy.
+
 ### How a spec is written
 
 - Nodes declare a **grid cell**: `col`, `row` (0-based), and `parent` for
@@ -107,13 +142,17 @@ fails on any of the first four.
 - Node labels ≤ 24 chars, subs ≤ 32 chars (the box ellipsises beyond that; the
   gate warns). Edge labels ≤ 28 chars (error).
 - Every node and edge keeps its `detail` (`what` / `why` / `numbers` / `breaks`,
-  plus `choice` for a real technology decision). The copy-all in the reader
-  emits it via `diagramToMarkdown` in `mobile/lib/diagrams/index.ts`.
+  plus `choice` for a real technology decision); see "The text" above for what
+  each field must contain.
 
 ### Tools
 
 - `bunx tsx scripts/check-diagrams.ts [--summary] [id ...]` — the gate: zoom,
-  boxes, hot count, crossings (with the pairs named), box hits, label lengths.
+  boxes, hot count, crossings (with the pairs named), box hits, label lengths,
+  and the text lint (`textLint()` in the same file).
+- `bunx tsx scripts/diagram-skeleton.ts <id>` — the picture as a table: what
+  is actually on the canvas, which stages are hidden in a collapsed group, and
+  every edge with its endpoints. Reconcile text against this, not the source.
 - `bunx tsx scripts/render-diagram.ts <outDir> <id ...>` then
   `NODE_PATH=<dir with playwright> node scripts/render-diagram-png.js <outDir> <id ...>`
   — the computed layout as an SVG/PNG, without building the app. Look at it;

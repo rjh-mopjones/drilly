@@ -10,12 +10,30 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
     shape:
       "There is no request path to draw. The system is a library inside your own process that packs three numbers into one 64-bit integer, and everything else on the diagram is either a claim made once at boot or a guard against the clock lying.",
     beats: [
-      "Boot is where the only coordination happens. A process either claims an exclusive lease on one of 1024 worker slots from a strongly consistent store, or it takes a stable ordinal the orchestrator already assigns. Either way it is one claim per process lifetime, and a process that cannot get a slot refuses to start rather than guessing.",
-      "After that the issue path is entirely local. next_id() reads the wall clock, compares it against the last timestamp used, bumps a per-millisecond counter, and ORs three fields together. Two shifts and an OR against process-local state, tens of nanoseconds, no socket, no lock, nothing that can be throttled or down.",
-      "The clock guard is the whole design in one comparison. If the clock reads earlier than the last timestamp issued, the generator stops and pages someone. Clamping to last_ts and letting the sequence absorb the difference looks like the graceful option and is exactly how duplicates get minted.",
-      "The sequence handles bursts and nothing else. It counts 0 to 4095 within a single millisecond on a single worker and resets when the millisecond advances. On overflow the generator spins until the clock ticks over, which converts the ceiling into a microsecond stall rather than a correctness bug.",
-      "The layout is the contract. 41 bits of milliseconds since a custom epoch, 10 bits of worker, 12 bits of sequence, sign bit unused. The timestamp sits in the high bits so sorting the integers sorts by creation time, which keeps B-tree inserts at the right edge of the index.",
-      "Downstream is where a failure actually becomes visible. You cannot detect a duplicate by inspecting IDs, so the unique constraint on the ID column wherever it is a primary key is the real detector, and the operational alarms on worker-id duplication and rewind counts are what fire before it.",
+      {
+        text: "Boot is where the only coordination happens. A process either claims an exclusive lease on one of 1024 worker slots from a strongly consistent store, or it takes a stable ordinal the orchestrator already assigns. Either way it is one claim per process lifetime, and a process that cannot get a slot refuses to start rather than guessing.",
+        lights: ["lease-store", "orchestrator", "worker-id-holder", "e-lease", "e-ordinal"],
+      },
+      {
+        text: "After that the issue path is entirely local. next_id() reads the wall clock, compares it against the last timestamp used, bumps a per-millisecond counter, and ORs three fields together. Two shifts and an OR against process-local state, 20 to 50 nanoseconds, no socket, no lock, nothing that can be throttled or down.",
+        lights: ["caller", "generator", "guard", "sequence", "pack", "e-call", "e-clock", "e-guard-seq", "e-seq-pack"],
+      },
+      {
+        text: "The clock guard is the whole design in one comparison. If the clock reads earlier than the last timestamp issued, the generator stops and pages someone. Clamping to last_ts and letting the sequence absorb the difference looks like the graceful option and is exactly how duplicates get minted.",
+        lights: ["guard", "clock", "e-clock"],
+      },
+      {
+        text: "The sequence handles bursts and nothing else. It counts 0 to 4095 within a single millisecond on a single worker and resets when the millisecond advances. On overflow the generator spins until the clock ticks over, which converts the ceiling into a microsecond stall rather than a correctness bug.",
+        lights: ["sequence"],
+      },
+      {
+        text: "The layout is the contract. 41 bits of milliseconds since a custom epoch, 10 bits of worker, 12 bits of sequence, sign bit unused. The timestamp sits in the high bits so sorting the integers sorts by creation time, which keeps B-tree inserts at the right edge of the index.",
+        lights: ["pack", "sinks", "e-sinks"],
+      },
+      {
+        text: "Downstream is where a failure actually becomes visible. You cannot detect a duplicate by inspecting IDs, so the unique constraint on the ID column wherever it is a primary key is the real detector, and the operational alarms on worker-id duplication and rewind counts are what fire before it.",
+        lights: ["sinks", "metrics", "e-dupes", "e-telemetry"],
+      },
     ],
     crux: "Uniqueness here is a guarantee by construction rather than something checked at runtime, so it is only as strong as its two premises: that no other live process holds your worker id, and that the wall clock moves forward. Neither can be verified at the moment you issue an ID.",
     numbers: [
@@ -66,7 +84,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
         why: "The timestamp field is not decoration: it is where uniqueness within a worker comes from and where sortability comes from. That puts a hardware oscillator inside the correctness argument, which is the trade this whole design made.",
         numbers: [
           "read once per next_id()",
-          "a live-migration or snapshot restore resumes with a stale clock",
+          "a live-migration pause of 1 to several seconds resumes with a stale clock",
           "a host with a dead RTC battery starts in 1970",
         ],
         breaks:
@@ -93,7 +111,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
         what: "The scheduler that already assigns stable unique ordinals to instances, used directly as the worker id instead of claiming a lease.",
         why: "Where it exists it is stronger than anything you would build: the scheduler enforces exclusivity and keeps enforcing it during a network partition, which an expiring lease does not. It also deletes a boot-time dependency on a service that tends to be unhealthy exactly when you are trying to scale up.",
         numbers: [
-          "ordinals 0..N-1, stable across restarts",
+          "ordinals 0 through fleet size minus 1, stable across restarts",
           "the 1024 slot ceiling still applies",
         ],
         breaks:
@@ -155,6 +173,14 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
         ],
         breaks:
           "There is no ID service to page. When the generator halts on a rewind, this process is the outage, and behind a load balancer it is a partial one until the clock recovers.",
+        choice: {
+          pick: "Call the generator library synchronously, in-process, on the write path",
+          instead: "Pre-fetch a batch of IDs from a pool and hand them out from memory as writes happen.",
+          decider:
+            "Whether there is anything worth batching. Issuance is 20 to 50 nanoseconds against a steady ~4k IDs/s/node, three to four orders of magnitude below the 4.096M/s ceiling, so a pool buys nothing at this rate and only adds a refill path that can itself run dry.",
+          flips:
+            "A caller issuing IDs in a tight loop at rates approaching the per-node ceiling, where batching a pool amortises the sequence-overflow spin across many calls instead of paying it per burst.",
+        },
       },
     },
     {
@@ -168,7 +194,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
         why: "Coordination was moved to boot so nothing on the issue path can be slow, throttled or down. A per-request call to a central allocator would put that service's p99 on every insert and make it the availability floor for every write in the system. These stages are drawn inside one frame because they are one deployable: they start, halt and die together with the process that links them.",
         numbers: [
           "two shifts and an OR against process-local state",
-          "tens of nanoseconds per call",
+          "20 to 50 nanoseconds per call",
           "zero network calls after boot",
         ],
         breaks:
@@ -290,7 +316,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
           pick: "A background watcher that kills issuance on observed lease loss",
           instead: "Trust the boot-time claim for the whole process lifetime.",
           decider:
-            "The watcher is asynchronous, so it bounds the overlap window by its poll interval rather than closing it. Fencing properly means consulting something outside the process before every ID, which destroys the property the whole design exists for, so a partial fix is the only fix available here.",
+            "The watcher is asynchronous and polls on a 5s to 10s interval, so it bounds the overlap window to roughly that long rather than closing it. Fencing properly means consulting something outside the process before every ID, which destroys the property the whole design exists for, so a partial fix is the only fix available here.",
           flips:
             "Orchestrator ordinals, where the scheduler enforces uniqueness rather than expiring a claim. There is no lease to lose, so there is nothing for the watcher to watch.",
         },
@@ -319,7 +345,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
           pick: "A separate opaque external identifier carried alongside the internal ID",
           instead: "Hash the Snowflake at the boundary, or just expose it.",
           decider:
-            "Whether ordering has to survive the boundary. Hashing destroys it, so cursor pagination over the external identifier stops working and you need a separate sort field or a signed cursor.",
+            "Whether ordering has to survive the boundary. Hashing destroys it, so cursor pagination over the external identifier stops working and you need a separate sort field or a signed cursor; the opaque-pair approach keeps ordering at the cost of the 1 extra indexed column measured above.",
           flips:
             "IDs that never leave your own systems, where the second column is pure cost. Also note that if the ID crosses a trust boundary at all, UUIDv7's 74 random bits win outright over any de-leaking scheme bolted onto a Snowflake.",
         },
@@ -412,12 +438,12 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-call",
       from: "caller",
       to: "guard",
+      tier: "hot",
       label: "next_id()",
-      animated: true,
       detail: {
         what: "An in-process function call at the moment the caller needs a key for a row it is about to write.",
-        why: "It is drawn short and solid because that is the entire request path. There is no serialisation, no socket and no other service's tail latency sitting between a write and the ID it needs.",
-        numbers: ["tens of nanoseconds", "p99 issuance target 1µs"],
+        why: "This is the entire request path. There is no serialisation, no socket and no other service's tail latency sitting between a write and the ID it needs.",
+        numbers: ["20 to 50 nanoseconds", "p99 issuance target 1µs"],
         breaks:
           "If this ever becomes an RPC, every insert in the system inherits that service's availability and its p99, which is the failure the whole design was built to avoid.",
       },
@@ -426,11 +452,11 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-ntp",
       from: "ntp",
       to: "clock",
+      tier: "control",
       label: "steps the clock",
-      dashed: true,
       detail: {
         what: "The background discipline of the host clock: a slew when the offset is small, a step when it is large.",
-        why: "Drawn as its own arrow because the step is the event, not the daemon. Everything the generator does about clocks is a response to what happens along this arrow.",
+        why: "The step is the event that matters here, not the daemon running it. Everything the generator does about clocks is a response to what happens along this arrow.",
         numbers: [
           "chrony makestep 1.0 3: steps if the offset exceeds 1s in the first 3 updates",
           "a smeared leap second is spread over 24 hours instead",
@@ -443,14 +469,14 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-clock",
       from: "clock",
       to: "guard",
+      tier: "hot",
       label: "now_ms(), per call",
-      animated: true,
       fromSide: "right",
       toSide: "left",
       detail: {
         what: "Reading the wall clock on every call. It is the only external fact the issue path depends on.",
-        why: "The timestamp is read rather than counted because the field has to mean something to consumers who decode it back to a creation time. That is what drags a hardware oscillator into the correctness argument.",
-        numbers: ["read once per next_id()", "CLOCK_REALTIME is the clock that can step"],
+        why: "The timestamp is read rather than counted because the field has to mean something to consumers who decode it back to a creation time. That is what drags a hardware oscillator into the correctness argument. It reads CLOCK_REALTIME specifically, which is the one that can step backwards.",
+        numbers: ["1 syscall per next_id()", "read once per call"],
         breaks:
           "CLOCK_MONOTONIC cannot go backwards but has no epoch and resets on reboot, so it cannot be the field directly. It can only be the source of advance from a realtime base captured at startup.",
       },
@@ -459,8 +485,8 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-watermark",
       from: "guard",
       to: "watermark",
+      tier: "control",
       label: "fsync now + 10s",
-      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
@@ -475,8 +501,8 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-guard-seq",
       from: "guard",
       to: "sequence",
+      tier: "hot",
       label: "ts >= last_ts",
-      animated: true,
       detail: {
         what: "The clock passed the check, so the call proceeds to the per-millisecond counter.",
         why: "Splitting the two stages keeps the failure taxonomy honest. Everything above this line is a correctness problem that halts the node; everything below it is a resource problem that costs microseconds.",
@@ -488,8 +514,8 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-seq-pack",
       from: "sequence",
       to: "pack",
+      tier: "hot",
       label: "seq & 0xFFF",
-      animated: true,
       detail: {
         what: "The counter's current value masked to 12 bits and handed to the pack step for the low end of the integer.",
         why: "It goes last so it cannot perturb the ordering the timestamp provides. A burst of 4000 IDs in one millisecond moves only the least significant field, which is exactly what you want from the field with no cross-worker meaning.",
@@ -502,13 +528,13 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-worker",
       from: "worker-id-holder",
       to: "pack",
+      tier: "control",
       label: "worker id, fixed at boot",
-      dashed: true,
       fromSide: "top",
       toSide: "bottom",
       detail: {
         what: "The worker id claimed at boot being stamped into the middle 10 bits of every ID this process will ever issue.",
-        why: "This field is where uniqueness actually comes from. Two workers can read the same millisecond and hold the same sequence value and still not collide, because the number space was cut into disjoint slices before the first request arrived. It is dashed because nothing about it is per request.",
+        why: "This field is where uniqueness actually comes from. Two workers can read the same millisecond and hold the same sequence value and still not collide, because the number space was cut into disjoint slices before the first request arrived. It carries no per-request cost, which is why it is a control input rather than part of the hot path.",
         numbers: [
           "one value per process lifetime, 0 to 1023",
           "2^10 = 1024 slots; a 1k-node fleet is already at saturation",
@@ -521,8 +547,8 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-lease",
       from: "lease-store",
       to: "worker-id-holder",
+      tier: "control",
       label: "claim slot 0..1023 at boot",
-      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
@@ -537,14 +563,14 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-ordinal",
       from: "orchestrator",
       to: "worker-id-holder",
+      tier: "control",
       label: "or: stable ordinal",
-      dashed: true,
       fromSide: "right",
       toSide: "left",
       detail: {
         what: "The alternative source of the same field: the scheduler's ordinal handed to the process as configuration.",
         why: "Exactly one of these two arrows supplies the worker id, and where the ordinal exists it is the stronger of the two, because the scheduler keeps enforcing exclusivity through a partition while a TTL simply expires and hands your slot away.",
-        numbers: ["ordinal is stable across restarts, unlike a re-claimed lease"],
+        numbers: ["stable across restarts, 0 reclaim steps needed, unlike a lease"],
         breaks:
           "An ordinal from a platform that does not really guarantee stability, or that lets the fleet exceed 1024, is worse than a lease because nothing observes the drift.",
       },
@@ -553,8 +579,8 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-sinks",
       from: "pack",
       to: "sinks",
+      tier: "hot",
       label: "8-byte sortable key",
-      animated: true,
       fromSide: "right",
       toSide: "left",
       detail: {
@@ -581,6 +607,7 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-opaque",
       from: "caller",
       to: "boundary",
+      tier: "data",
       label: "opaque id at the edge",
       fromSide: "right",
       toSide: "left",
@@ -596,8 +623,8 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-telemetry",
       from: "worker-id-holder",
       to: "metrics",
+      tier: "control",
       label: "worker id, rewinds",
-      dashed: true,
       detail: {
         what: "Each generator reporting its worker id as a label, plus its rewind count and issuance latency, alongside normal application metrics.",
         why: "There is no server to instrument, so the process itself is the only observability point. Reporting the worker id as a dimension is what turns an otherwise undetectable collision into an alarm that fires before the writes land.",
@@ -613,8 +640,8 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-slots",
       from: "lease-store",
       to: "metrics",
+      tier: "control",
       label: "free slot gauge",
-      dashed: true,
       fromSide: "bottom",
       toSide: "left",
       detail: {
@@ -632,13 +659,13 @@ export const UNIQUE_ID_GENERATOR: Diagram = {
       id: "e-dupes",
       from: "sinks",
       to: "metrics",
+      tier: "control",
       label: "duplicate key errors",
-      dashed: true,
       toSide: "right",
       detail: {
         what: "Unique-constraint violations on the ID column, which is the only place in the system where the uniqueness claim is ever actually checked.",
         why: "Nothing at issue time verifies exclusivity, so this is the ground truth. Duplicate-key errors clustered around a restart are the signature of the restart hole; spread across two hosts they are the signature of a shared worker id.",
-        numbers: ["free where the ID is already a primary key"],
+        numbers: ["0 extra cost where the ID is already a primary key"],
         breaks:
           "It only fires where a constraint exists. A duplicate landing in a log, an event stream or an unconstrained table is silent, and it stays silent until something joins on it.",
       },

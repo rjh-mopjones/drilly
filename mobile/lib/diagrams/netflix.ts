@@ -10,12 +10,30 @@ export const NETFLIX: Diagram = {
     shape:
       "A placement problem wearing a streaming problem's clothes: a cloud control plane that costs kilobytes per session and never touches a video byte, and a fleet of appliances inside ISPs that already hold the bytes before anyone presses Play.",
     beats: [
-      "The catalogue is finite and known weeks ahead, roughly 20,000 titles with about 6,000 licensed in any one country, so the set of bytes anyone might ask for can be enumerated. That single fact is what turns delivery from a routing problem into a planning problem, and everything distinctive here follows from it.",
-      "Content is prepared entirely offline. Each title gets a content-aware ladder of 8 to 12 rungs across three codecs, chosen from that title's own complexity rather than a fixed table, sliced into segments of a few seconds and encrypted under CENC. The ladder is decided once and the bytes are delivered forever, which is what justifies thousands of CPU hours per title.",
-      "Placement is the interesting decision. A controller computes a per-appliance target list of (title, codec, rung, audio track) groups from a regional forecast, diffs it against what the box reports holding, and pushes the delta in the local 02:00 to 06:00 window. Around 500 GB per appliance per night, roughly 9 PB across the fleet, against 900 PB delivered: every byte pushed is served about a hundred times.",
-      "The arithmetic is unusually kind. A country's relevant renditions come to about 300 TB and a storage appliance holds 200 TB, so the forecast is not picking 2% of a haystack, it is choosing which third to leave off. The resident set is pinned and only the remainder of the disk runs LRU, because a plain LRU would evict the pre-positioned set during exactly the launch it was built for.",
-      "Session start is three small cloud calls: authenticate and check the country's rights, issue a manifest listing three or four ranked appliance URLs, issue a short-lived DRM key bound to the device. Steering lives in the manifest rather than in DNS because anycast cannot see inventory and will happily route a client to a box that does not hold the title.",
-      "Then the player takes over. It picks the next segment's rung from its own buffer occupancy, stepping up above 40 seconds and down immediately below 10, never more than one rung per segment, and heartbeats its position every 30 seconds. Those heartbeats are the only return path and they feed the forecast that decides tomorrow's placement.",
+      {
+        text: "The catalogue is finite and known weeks ahead, roughly 20,000 titles with about 6,000 licensed in any one country, so the set of bytes anyone might ask for can be enumerated. That single fact is what turns delivery from a routing problem into a planning problem, and everything distinctive here follows from it.",
+        lights: ["catalogue"],
+      },
+      {
+        text: "Content is prepared entirely offline. Each title gets a content-aware ladder of 8 to 12 rungs across three codecs, chosen from that title's own complexity rather than a fixed table, sliced into segments of a few seconds and encrypted under CENC. The ladder is decided once and the bytes are delivered forever, which is what justifies thousands of CPU hours per title.",
+        lights: ["encoder", "origin", "e20"],
+      },
+      {
+        text: "Placement is the interesting decision. A controller computes a per-appliance target list of (title, codec, rung, audio track) groups from a regional forecast, diffs it against what the box reports holding, and pushes the delta in the local 02:00 to 06:00 window. Around 500 GB per appliance per night, roughly 9 PB across the fleet, against 900 PB delivered: every byte pushed is served about a hundred times.",
+        lights: ["placement", "forecast", "oca", "e11", "e12", "e13", "e15"],
+      },
+      {
+        text: "The arithmetic is unusually kind. A country's relevant renditions come to about 300 TB and a storage appliance holds 200 TB, so the forecast is not picking 2% of a haystack, it is choosing which third to leave off. The resident set is pinned and only the remainder of the disk runs LRU, because a plain LRU would evict the pre-positioned set during exactly the launch it was built for.",
+        lights: ["oca", "placement"],
+      },
+      {
+        text: "Session start is three small cloud calls: authenticate and check the country's rights, issue a manifest listing three or four ranked appliance URLs, issue a short-lived DRM key bound to the device. Steering lives in the manifest rather than in DNS because anycast cannot see inventory and will happily route a client to a box that does not hold the title.",
+        lights: ["playback-api", "catalogue", "manifest", "drm", "e1", "e2", "e3", "e4", "e5", "e6"],
+      },
+      {
+        text: "Then the player takes over. It picks the next segment's rung from its own buffer occupancy, stepping up above 40 seconds and down immediately below 10, never more than one rung per segment, and heartbeats its position every 30 seconds. Those heartbeats are the only return path and they feed the forecast that decides tomorrow's placement.",
+        lights: ["client", "oca", "telemetry", "forecast", "e7", "e8", "e16", "e17"],
+      },
     ],
     crux:
       "A title nobody forecast trends on a Saturday morning. The appliances near those viewers do not hold it, so every play fills from a peer or from origin during the peak hour rather than at 3 a.m., through paid paths, at terabits per second. A cache miss here is a planning failure with a bill attached, not a latency event, which is why origin fill rate per appliance is a paged metric rather than a dashboard one.",
@@ -33,7 +51,7 @@ export const NETFLIX: Diagram = {
       detail: {
         what: "The half of the system that moves petabytes: an appliance in the viewer's own access network, plus the peer and exchange tiers it fills from.",
         why: "The control plane and the data plane never touch. One costs a few kilobytes per session and lives in the cloud, the other costs 900 PB a day and lives inside other people's buildings, and merging them would destroy both the economics and the routing.",
-        numbers: ["~18,000 appliances", "~130 Tbps peak egress", "settlement-free ports"],
+        numbers: ["~18,000 appliances", "~130 Tbps peak egress", "$0 settlement cost on these ports"],
         breaks:
           "Everything in this zone sits in a partner's rack on their power and behind their routing policy, so we have no independent measurement point between the appliance and the home.",
       },
@@ -75,7 +93,7 @@ export const NETFLIX: Diagram = {
       detail: {
         what: "The cloud call behind POST /play: authenticates the session, checks the viewer's country rights for the title, then fans out to the manifest service and the licence server.",
         why: "Keeping auth and rights in the cloud costs a few kilobytes per session and keeps rights changes as metadata changes. A title leaving a country stops being listed and stops getting keys, with nothing deleted across 18,000 boxes.",
-        numbers: ["a few kB per session", "play start p99 under 1,000 ms", "99.95% playback start success SLO"],
+        numbers: ["~5 kB per session", "play start p99 under 1,000 ms", "99.95% playback start success SLO"],
         breaks:
           "A regional cloud outage stops new sessions. Streams already running are untouched because they touch no cloud service until their licence expires, which is a deliberate property rather than luck.",
         choice: {
@@ -124,7 +142,7 @@ export const NETFLIX: Diagram = {
         why: "This is the economic story. Bytes for a viewer in Chicago come from a box in Chicago inside their own ISP, so the peak-hour byte never crosses a paid link, and every appliance serves its own network independently with no shared hot path to scale.",
         numbers: [
           "200 TB per storage appliance, ~18,000 in the fleet",
-          "controller-placed segments are pinned, only the remainder runs LRU",
+          "~2/3 of the disk is pinned by the controller, the rest runs LRU",
           "~$500/month fully loaded per box",
         ],
         breaks:
@@ -177,7 +195,7 @@ export const NETFLIX: Diagram = {
           "It closes a loop with the forecast. A title with no edge residency starts slower and opens at a lower rung, which depresses engagement, which depresses its next forecast, and there is no clean experiment because randomising residency means degrading real viewers.",
         choice: {
           pick: "Batch model offline, ranked rows precomputed and cached in memory",
-          instead: "Rank candidates at request time on the browse call.",
+          instead: "Rank titles at request time on the browse call.",
           decider:
             "Read rate against model cadence. Every app open across ~300M memberships is a rows read, while the model output changes on a daily cadence, so online ranking spends CPU per request recomputing an answer that was stable since last night.",
           flips:
@@ -218,7 +236,7 @@ export const NETFLIX: Diagram = {
       detail: {
         what: "Issues a short-lived CENC content key bound to the requesting device and gated on the viewer's country.",
         why: "Segments sit encrypted on hardware in thousands of partner racks and the appliance never receives a key, so an ISP is hosting an opaque blob store. That property is what makes the commercial deal signable at all.",
-        numbers: ["licence issue p99 under 200 ms", "keys cached per device for the session"],
+        numbers: ["licence issue p99 under 200 ms", "1 key per (device, session)"],
         breaks:
           "Every play needs a key, so issuance sees the same instantaneous spike as a launch. Servers are stateless and scaled to the launch calendar rather than to steady state, and a seek or resume must not re-issue.",
         choice: {
@@ -254,7 +272,7 @@ export const NETFLIX: Diagram = {
           decider:
             "Catalogue size against edge storage. A country's relevant renditions are ~300 TB and a storage appliance holds 200 TB, so the forecast is choosing which third to leave off rather than picking 2% out of a haystack. A launch is ~1.7 PB of fill under either policy; pre-positioning just moves it from the peak hour to 3 a.m.",
           flips:
-            "A user-generated corpus in the exabytes, where 200 TB is under 0.1% of the library and the popularity curve at that depth is unforecastable per access network. Pull-through with LRU is then simply correct, and that is Q11.",
+            "A user-generated corpus in the exabytes, where 200 TB is under 0.1% of the library and the popularity curve at that depth is unforecastable per access network. Pull-through with LRU is then simply correct — the design an unforecastable, exabyte-scale catalogue calls for.",
         },
       },
     },
@@ -553,7 +571,7 @@ export const NETFLIX: Diagram = {
       detail: {
         what: "The ranked list of segment groups each specific appliance should hold, split by that ISP's device and language mix.",
         why: "The forecast decides what is worth holding and the controller decides how to get it there; keeping them apart means the model can be retrained without touching the machinery that moves petabytes.",
-        numbers: ["ranked (title, codec, rung, audio track) groups"],
+        numbers: ["4 dimensions ranked: title, codec, rung, audio track"],
         breaks:
           "The strongest input is the merchandising plan, which is decided in-house, so the model's accuracy metrics flatter it and anything never promoted is quietly penalised.",
       },

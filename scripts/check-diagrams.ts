@@ -25,7 +25,8 @@ declare const process: { argv: string[]; exit(code: number): never };
 
 import { readFileSync } from "node:fs";
 import { DIAGRAMS } from "../mobile/lib/diagrams";
-import { isFrame, type Diagram } from "../mobile/lib/diagrams/types";
+import { beatLights, beatText, isFrame, type Diagram } from "../mobile/lib/diagrams/types";
+import { GLOSSARY } from "../mobile/lib/diagrams/glossary";
 import {
   layoutDiagram,
   parentOf,
@@ -48,6 +49,90 @@ try {
 }
 
 type Report = { errors: string[]; warnings: string[]; line: string };
+
+/**
+ * Text lint. The panel text exists to make the solution understood; these are
+ * the ways it stopped doing that:
+ *  - a reference to something the reader cannot see ("see #8", "Q13", "the prose")
+ *  - interview coaching or narration of the drawing instead of the system
+ *  - a `numbers` entry that is not a number, a `decider` that settles nothing
+ *  - a box with no `detail` (an empty panel) or a real box with no `choice`
+ *  - a beat that lights nothing, or names an id that does not exist
+ *  - a term not in the glossary
+ */
+const CROSS_REF = [/(^|[^\w])#\d+\b/, /\bQ\d+\b/, /\bquestion \d+/i, /\bthe prose\b/i, /\bthe write-up\b/i, /\bthis book\b/i, /\bpseudocode\b/i, /\bother diagrams\b/i, /\bin this (set|app|collection)\b/i];
+const COACHING = [/\binterview/i, /\bcandidates?\s+(should|waste|spend|often|tend|who|forget|rush)\b/i, /\b(strong|weak|good|typical|most) candidates?\b/i, /\bsay (it|this|that|so) out loud/i, /\bout loud\b/i, /\bdrawn (as|here|dashed|bold)\b/i, /\bin the diagram\b/i, /\bthis diagram\b/i, /\bthe picture\b/i, /\bworth (saying|stating)\b/i, /\btime budget\b/i];
+const KNOWN = new Set(["HTTP", "HTTPS", "URL", "URLS", "API", "APIS", "SQL", "JSON", "CPU", "CPUS", "RAM", "GPU", "GPUS", "SSD", "HDD", "ID", "IDS", "OS", "UI", "TCP", "UDP", "IP", "IPS", "IO", "I/O", "GET", "POST", "PUT", "DELETE", "PATCH", "OK", "AND", "OR", "NOT", "NX", "EX", "LT", "RF", "TB", "GB", "MB", "KB", "PB", "EB", "GBPS", "MBPS", "TBPS", "US", "UK", "EU", "AWS", "GCP", "OSS", "AZS", "CDNS", "PSPS", "PII", "MVP", "SDK", "SDKS", "CLI", "IDE", "RPC", "RPCS", "REST", "CRUD", "UUID", "UUIDS", "ASCII", "UTF", "CSV", "PDF", "HTML", "CSS", "XML", "YAML", "DOM", "SVG", "PNG", "JPEG", "JPG", "WEBP", "AVIF", "HEIC", "MP4", "MPEG", "TS", "TTLS", "SLOS", "SLAS", "QPS", "RPS", "TPS", "FPS", "MACS", "GPS", "IOS", "WS", "TPU", "TPUS", "LB", "LBS", "VM", "VMS", "MS", "NS", "ISBNS", "ASN", "ASNS", "OSM", "MVT", "RFC", "KIP", "ETL", "OLAP", "OLTP", "ACID", "BASE", "CAP", "TL", "DR", "GC", "JVM", "GO", "LMAX", "NASDAQ", "SFTP", "SMTP", "IMAP", "POP3", "DKIM", "DMARC", "SPF", "ACH", "PAN", "CVV", "GDPR", "CCPA", "NTP", "PTP", "CIDR", "TLS", "SSL", "SNI", "OIDC", "SSO", "MFA", "JWT", "JWKS", "RSA", "EC", "HKDF", "KDF", "SHA", "HMAC", "AES", "KMS", "HSM", "IAM", "RBAC", "ACL", "ACLS", "CI", "CD", "DAG", "DAGS", "SHAS", "XA", "TCC", "PSP", "PCI", "DSS", "LRU", "LFU", "FIFO", "LIFO", "CRDT", "CRDTS", "OT", "TP1", "TP2", "MTU", "IOPS", "NVME", "RDMA", "NUMA", "SIMD", "FPGA", "FPGAS", "NIC", "NICS", "PDU", "DEM", "ETA", "ETAS", "KOM", "PR", "PRS", "ADR", "ISRC", "ISBN", "GPL", "MIT"]);
+const UNIT = /^(\d|[KMGTPE]?B|MS|US|NS|GB|TB|PB|KB|MB|GBPS|MBPS|KBPS|GHZ|MHZ|X\d*|\d+[KMGT]?B?)$/;
+const GLOSS_UPPER = new Set(Object.keys(GLOSSARY).map((k) => k.toUpperCase()));
+
+/** A figure: a digit, or a number word standing where a digit would ("one fetch per host"). */
+function hasDigit(s: string): boolean {
+  return /\d/.test(s) || /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|dozen|half|single|once|twice|hundreds?|thousands?|millions?|billions?)\b/i.test(s);
+}
+
+function textLint(d: Diagram): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const nodeIds = new Set(d.nodes.map((n) => n.id));
+  const edgeIds = new Set(d.edges.map((e) => e.id));
+  const texts: [string, string][] = [];
+  const o = d.overview;
+  texts.push(["overview.shape", o.shape], ["overview.crux", o.crux]);
+  o.beats.forEach((b, i) => texts.push([`beat ${i + 1}`, beatText(b)]));
+  (o.numbers ?? []).forEach((n, i) => texts.push([`overview.numbers[${i}]`, n]));
+  for (const n of d.nodes) {
+    texts.push([`node "${n.label}" label`, n.label]);
+    if (n.sub) texts.push([`node "${n.label}" sub`, n.sub]);
+    const det = n.detail;
+    if (!det) {
+      errors.push(`node "${n.label}" has no detail: clicking it opens nothing`);
+      continue;
+    }
+    texts.push([`node "${n.label}" what`, det.what], [`node "${n.label}" why`, det.why]);
+    if (det.breaks) texts.push([`node "${n.label}" breaks`, det.breaks]);
+    (det.numbers ?? []).forEach((x, i) => {
+      texts.push([`node "${n.label}" numbers[${i}]`, x]);
+      if (!hasDigit(x)) errors.push(`node "${n.label}" numbers[${i}] is not a number: "${x}"`);
+    });
+    if (det.choice) {
+      for (const k of ["pick", "instead", "decider", "flips"] as const) texts.push([`node "${n.label}" choice.${k}`, det.choice[k]]);
+      if (!hasDigit(det.choice.decider)) warnings.push(`node "${n.label}" choice.decider has no number or measurable property: "${det.choice.decider.slice(0, 60)}"`);
+    } else if (!["client", "external", "process", "zone"].includes(n.kind)) {
+      warnings.push(`node "${n.label}" (${n.kind}) has no choice: nothing says why it is built this way`);
+    }
+  }
+  for (const e of d.edges) {
+    if (!e.tier) errors.push(`edge ${e.id} has no tier (animated/dashed are legacy)`);
+    if (e.label) texts.push([`edge ${e.id} label`, e.label]);
+    const det = e.detail;
+    if (!det) continue;
+    texts.push([`edge ${e.id} what`, det.what], [`edge ${e.id} why`, det.why]);
+    if (det.breaks) texts.push([`edge ${e.id} breaks`, det.breaks]);
+    (det.numbers ?? []).forEach((x, i) => {
+      texts.push([`edge ${e.id} numbers[${i}]`, x]);
+      if (!hasDigit(x)) errors.push(`edge ${e.id} numbers[${i}] is not a number: "${x}"`);
+    });
+    if (det.choice) for (const k of ["pick", "instead", "decider", "flips"] as const) texts.push([`edge ${e.id} choice.${k}`, det.choice[k]]);
+  }
+  o.beats.forEach((b, i) => {
+    const lights = beatLights(b);
+    if (!lights.length) warnings.push(`beat ${i + 1} lights nothing`);
+    for (const id of lights) if (!nodeIds.has(id) && !edgeIds.has(id)) errors.push(`beat ${i + 1} lights unknown id "${id}"`);
+  });
+  const unknown = new Set<string>();
+  for (const [where, text] of texts) {
+    for (const re of CROSS_REF) if (re.test(text)) errors.push(`${where}: reference to something the reader cannot see: "${text.match(re)?.[0]?.trim()}"`);
+    for (const re of COACHING) if (re.test(text)) errors.push(`${where}: explains the interview or the drawing, not the system: "${text.match(re)?.[0]}"`);
+    for (const m of text.matchAll(/(?<![\w/-])([A-Z][A-Z0-9+.\-/]{1,}[A-Z0-9])(?![\w-])/g)) {
+      const tok = m[1].replace(/[.,;:]$/, "");
+      if (tok.length < 2 || UNIT.test(tok) || KNOWN.has(tok) || GLOSS_UPPER.has(tok)) continue;
+      unknown.add(tok);
+    }
+  }
+  if (unknown.size) warnings.push(`terms not in the glossary: ${[...unknown].sort().join(", ")}`);
+  return { errors, warnings };
+}
 
 function check(authored: Diagram): Report {
   const errors: string[] = [];
@@ -83,6 +168,9 @@ function check(authored: Diagram): Report {
     return { errors, warnings, line: "" };
   }
 
+  const lint = textLint(authored);
+  errors.push(...lint.errors);
+  warnings.push(...lint.warnings);
   const L = layoutDiagram(authored);
   const boxes = L.diagram.nodes.filter((n) => !isFrame(n.kind) || L.collapsed.has(n.id));
   const hot = L.diagram.edges.filter((e) => tierOf(e) === "hot");

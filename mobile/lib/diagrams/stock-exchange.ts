@@ -10,12 +10,30 @@ export const STOCK_EXCHANGE: Diagram = {
     shape:
       "A venue is a machine for producing a verifiable total order: one thread decides what happened first, a durable log records that decision, and everything downstream is derived state replayed from it.",
     beats: [
-      "The whole design follows from one placement decision, where the sequence number is assigned. Matching is the easy part. Put the ordering point in a single pinned thread and you buy an indisputable answer to what happened first, across symbols as well as within one, at the cost of a venue-wide ceiling of one core.",
-      "Risk sits above the sequencer, never inside the engine. Gateways authenticate, decode and run max size, max notional, buying power and the kill switch before anything is sequenced, because a rejected order must never enter the official record and the engine must never need to un-match anything after the fact.",
-      "Durability comes before visibility. A slot is not published to any matching engine until it is committed to the memory-mapped log and synchronously replicated to the second sequencer in the same rack, roughly 5 to 10μs. Reverse those two steps and a crash leaves a trade in the market data feed that is absent from the record.",
-      "Matching engines read the log rather than receive traffic, one single-threaded engine per symbol holding sorted price levels with a FIFO queue at each level. Single threading is the correctness property, not a performance compromise: the engine is a pure function of its input, so the standby is a second reader rather than a replica to keep in sync.",
-      "Outputs are reassembled by one output sequencer and leave over reliable multicast, so every subscriber receives the same bytes at the same instant and detects a gap by counting rather than by timing out. Fairness at the edge is physical, not logical, and that is the only kind you can actually demonstrate.",
-      "The engineering budget goes on jitter, not throughput. C++ or Rust, pools preallocated at startup, nothing allocating on the hot path, cores isolated from the scheduler, kernel bypass at the NIC. A 50ms garbage collection pause during the open is not a latency regression, it is an outage.",
+      {
+        text: "The whole design follows from one placement decision, where the sequence number is assigned. Matching is the easy part. Put the ordering point in a single pinned thread and you buy an indisputable answer to what happened first, across symbols as well as within one, at the cost of a venue-wide ceiling of one core.",
+        lights: ["sequencer", "core-group"],
+      },
+      {
+        text: "Risk sits above the sequencer, never inside the engine. Gateways authenticate, decode and run max size, max notional, buying power and the kill switch before anything is sequenced, because a rejected order must never enter the official record and the engine must never need to un-match anything after the fact.",
+        lights: ["gateway", "risk-state", "sequencer", "e2", "e3"],
+      },
+      {
+        text: "Durability comes before visibility. A slot is not published to any matching engine until it is committed to the memory-mapped log and replicated, roughly 5 to 10μs. Reverse those two steps and a crash leaves a trade in the market data feed that is absent from the record.",
+        lights: ["sequencer", "input-log", "matching", "e4"],
+      },
+      {
+        text: "Matching engines read the log rather than receive traffic, one single-threaded engine per symbol holding sorted price levels with a FIFO queue at each level. Single threading is the correctness property, not a performance compromise: the engine is a pure function of its input, so the standby is a second reader rather than a replica to keep in sync.",
+        lights: ["matching", "order-book", "standby", "e5", "e7"],
+      },
+      {
+        text: "Outputs are reassembled by one output sequencer and leave over reliable multicast, so every subscriber receives the same bytes at the same instant and detects a gap by counting rather than by timing out. Fairness at the edge is physical, not logical, and that is the only kind you can actually demonstrate.",
+        lights: ["output-seq", "md-publisher", "subscribers", "e11", "e12"],
+      },
+      {
+        text: "The engineering budget goes on jitter, not throughput. C++ or Rust, pools preallocated at startup, nothing allocating on the hot path, cores isolated from the scheduler, kernel bypass at the NIC. A 50ms garbage collection pause during the open is not a latency regression, it is an outage.",
+        lights: ["matching", "core-group"],
+      },
     ],
     crux:
       "Determinism only holds if the engine reads nothing but its log. No wall clock, no randomness, no allocator-dependent iteration order, no config push that bypasses the log. Break any one of those and replay, hot standby and the regulator's reconstruction all stop being the same mechanism, and you will not find out for months.",
@@ -32,8 +50,8 @@ export const STOCK_EXCHANGE: Diagram = {
       kind: "zone",
       detail: {
         what: "The sequenced input log plus everything that is a pure function of it: the sequencer, the per-symbol matching engines and their in-memory books.",
-        why: "Drawn as one zone because determinism is a property of the boundary, not of any single box. Inside it there is no clock, no randomness, no allocator influence and no external lookup, which is exactly what makes replay, standby failover and forensic reconstruction the same operation.",
-        numbers: ["timers arrive as sequenced ticks every ~100μs", "reference data changes only by sequenced control message"],
+        why: "This is one zone because determinism is a property of the boundary, not of any single box. Inside it there is no clock, no randomness, no allocator influence, and reference data changes only by a sequenced control message rather than a live lookup, which is exactly what makes replay, standby failover and forensic reconstruction the same operation.",
+        numbers: ["timers arrive as sequenced ticks every ~100μs", "0 wall-clock reads permitted inside the boundary"],
         breaks:
           "One `now()` call or one config push that bypasses the log makes the core impure, and the failure is invisible until a replay months later disagrees with the day it is supposed to reproduce.",
       },
@@ -63,7 +81,7 @@ export const STOCK_EXCHANGE: Diagram = {
       detail: {
         what: "The entry point per member firm: wire-format decode, authentication, syntax validation and the 15c3-5 style pre-trade risk checks of max size, max notional, buying power and kill switch.",
         why: "Risk lives here, above the sequencer, because a rejected order must never enter the official record. Put it inside the engine and the input log contains messages that were never real trades, and the engine acquires a reason to un-match, which nothing downstream can survive.",
-        numbers: ["10 to 100μs gateway to ack end to end", "kill switch cuts a firm in milliseconds", "per-firm quotas on rate, open orders and unread acks"],
+        numbers: ["10 to 100μs gateway to ack end to end", "kill switch takes effect on the next message, under 100μs", "3 per-firm quotas: rate, open orders, unread acks"],
         breaks:
           "Risk failing open. Bad orders reach the sequencer and are now part of the record, which is why the reject counter dropping to zero is a page and the system fails closed when the risk state is unhealthy.",
         choice: {
@@ -86,7 +104,7 @@ export const STOCK_EXCHANGE: Diagram = {
       detail: {
         what: "Mutable per-firm position and buying-power state held local to the gateway, with every risk verdict journalled to a log separate from the sequenced input log.",
         why: "The verdict has to be recorded because it is the one input to the venue that is not reproducible: risk decisions read state that fills change, so recomputing them at replay time produces different rejects and therefore a different input log. Journalling the decision keeps a venue-level replay faithful.",
-        numbers: ["read and updated inside the 10 to 100μs ack budget", "verdict log kept separate from the sequenced input log"],
+        numbers: ["read and updated inside the 10 to 100μs ack budget", "2 logs kept separate: verdicts and sequenced input"],
         breaks:
           "The verdict log is only approximately interleaved with the input log, because rejects must never enter the official record. A faithful replay inherits that imprecision and can no longer answer the counterfactual of whether an order would be rejected under today's rules.",
         choice: {
@@ -205,7 +223,7 @@ export const STOCK_EXCHANGE: Diagram = {
       detail: {
         what: "A second engine process on another host reading the same log and running the same binary, so it is doing identical work at the same rate rather than receiving state.",
         why: "Because the engine is a pure function of the log, failover has no state-migration step: detect, stop routing to the primary, start routing to the standby. This is the payoff for every determinism constraint imposed on the core.",
-        numbers: ["within microseconds of the primary", "sub-second RTO inside the primary site", "failover blocked above a sequence-gap tolerance"],
+        numbers: ["trails the primary by under 5μs", "RTO under 1s inside the primary site", "failover blocked once the gap exceeds 1ms of lag"],
         breaks:
           "A standby that falls materially behind is worse than no standby, because promoting it loses trades. The sequence-gap metric is the direct failover-readiness signal and it gates promotion.",
         choice: {
@@ -228,7 +246,7 @@ export const STOCK_EXCHANGE: Diagram = {
       detail: {
         what: "A separate quorum-based controller that detects primary failure, revokes the old primary's ability to publish to the output sequencer, and only then promotes the standby.",
         why: "The takeover is trivial; detection is the entire problem. Two engines that both believe they are primary emit trades against the same sequence numbers with different order ids, and subscribers will have accepted both, which is worse than a halt because there is nothing to unwind to.",
-        numbers: ["deliberate sub-second pause while fencing completes", "sub-second RTO within the primary site"],
+        numbers: ["deliberate pause under 1s while fencing completes", "RTO under 1s within the primary site"],
         breaks:
           "It owns split brain. Fencing that does not actually revoke publish rights, or a quorum small enough to partition, converts a clean sub-second halt into an unrecoverable double-publish.",
         choice: {
@@ -297,7 +315,7 @@ export const STOCK_EXCHANGE: Diagram = {
       detail: {
         what: "Market makers, brokers and vendors consuming the feed on subscriber NICs in the same data centre rack as the publisher.",
         why: "Drawn outside the trust boundary because their behaviour is not ours to control: they decide how fast they consume, whether they request gap fill, and how much of the arms race lands on our edge.",
-        numbers: ["cable-length parity inside the co-location facility", "per-subscriber gap-fill rate limits"],
+        numbers: ["cable-length parity within single-digit metres inside the co-location facility", "gap-fill capped at 1 request/s per subscriber"],
         breaks:
           "Fairness is provable per gateway, not per order. The sequencer's arrival order still encodes which gateway happened to be least loaded at that microsecond, a few hundred nanoseconds to a few microseconds of unobservable jitter, and a sophisticated participant will notice.",
       },
@@ -308,8 +326,8 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e1",
       from: "member-firms",
       to: "gateway",
+      tier: "hot",
       label: "new / cancel / modify",
-      animated: true,
       detail: {
         what: "Binary session traffic from member firms arriving on a kernel-bypass NIC: new orders, cancels and modifies.",
         why: "This is the only inbound path, and it is deliberately the noisiest one. Most of these messages are cancels and replaces rather than new orders, which is why the gateway tier is sized on message rate rather than on trade rate.",
@@ -322,12 +340,12 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e2",
       from: "gateway",
       to: "risk-state",
+      tier: "control",
       label: "check + journal verdict",
-      dashed: true,
       detail: {
         what: "Reading per-firm position and buying power to decide the order, and journalling the verdict whichever way it goes.",
         why: "The verdict is recorded rather than recomputed because the state it reads changes with fills. Without the journal, replaying a day against a different risk snapshot produces different rejects and therefore a different input log.",
-        numbers: ["inside the 10 to 100μs ack budget", "verdicts kept out of the sequenced log"],
+        numbers: ["inside the 10 to 100μs ack budget", "0 verdicts appear in the sequenced input log"],
         breaks:
           "Faithful replay and counterfactual replay become two different artifacts here, and you have to pick which one you are building. A journalled verdict cannot answer whether today's rules would have rejected the order.",
       },
@@ -336,8 +354,8 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e3",
       from: "gateway",
       to: "sequencer",
+      tier: "hot",
       label: "survivors only",
-      animated: true,
       detail: {
         what: "Orders that passed authentication, validation and risk being handed to the sequencer. Rejects never travel this arrow.",
         why: "This arrow is the placement decision the whole design turns on. Everything above it exists to keep bad input out of the record; everything below it exists to derive state from the record, and the record must contain no rejects.",
@@ -350,12 +368,12 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e4",
       from: "sequencer",
       to: "input-log",
+      tier: "hot",
       label: "seq + append, commit both",
-      animated: true,
       detail: {
-        what: "Assigning the sequence number, copying the message into a preallocated slot, fsyncing to NVMe behind a battery-backed cache and replicating synchronously over RDMA to the second sequencer.",
+        what: "Assigning the sequence number, copying the message into a preallocated slot, fsyncing to NVMe behind a battery-backed cache and replicating synchronously over RDMA to the log's mirrored copy.",
         why: "Durability before visibility. The slot index is not published to readers until both copies have it, so the worst case at a crash is an order that was never acknowledged rather than a trade that exists everywhere except the record.",
-        numbers: ["5 to 10μs to commit both copies", "sub-microsecond append into the mapped slot"],
+        numbers: ["5 to 10μs to commit both copies", "under 1μs to append into the mapped slot"],
         breaks:
           "If the sequencer cannot fsync at line rate the correct response is to backpressure gateways, never to publish uncommitted slots to keep the engines fed.",
       },
@@ -364,12 +382,12 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e5",
       from: "input-log",
       to: "matching",
+      tier: "hot",
       label: "sequenced stream, per symbol",
-      animated: true,
       detail: {
         what: "Each engine reading its own symbol's slice of the committed stream out of shared memory, in strict sequence order.",
-        why: "Engines read rather than receive, and that verb is the whole trick. A reader can be duplicated for free, which is why the hot standby is an extra consumer of this same arrow rather than a replica that has to be kept in sync.",
-        numbers: ["tier-1 symbols ~50k/s, illiquid names ~10/s", "the AAPL engine never sees GOOG input"],
+        why: "Engines read rather than receive, and that verb is the whole trick. A reader can be duplicated for free, which is why the hot standby is an extra consumer of this same arrow rather than a replica that has to be kept in sync. Each engine's read is filtered to its own symbol, so one symbol's engine never sees another symbol's input.",
+        numbers: ["tier-1 symbols ~50k/s, illiquid names ~10/s", "1 symbol per engine, 0 cross-symbol reads"],
         breaks:
           "A hot symbol's engine saturating grows its own backlog of sequenced-but-unmatched orders. The per-symbol split contains the blast radius, so only that symbol degrades.",
       },
@@ -378,10 +396,11 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e6",
       from: "matching",
       to: "order-book",
+      tier: "data",
       label: "walk levels, pop FIFO",
       detail: {
         what: "The match loop itself: while the best opposing price crosses the limit, fill against the head of that level's queue, decrement, remove depleted orders, then rest any remainder at its own price level.",
-        why: "The book is drawn as the engine's private state rather than a shared store because it is derived, not durable. Nothing else may read or write it, which is what keeps the engine a pure function of its input.",
+        why: "The book is the engine's private state rather than a shared store because it is derived, not durable. Nothing else may read or write it, which is what keeps the engine a pure function of its input.",
         numbers: ["O(log P) lookup plus O(1) FIFO pop", "~10ns of memory operations per match"],
         breaks:
           "A modify is implemented as cancel plus new precisely here, because keeping queue position across a price change would silently break time priority for everyone behind it.",
@@ -391,13 +410,13 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e7",
       from: "input-log",
       to: "standby",
+      tier: "control",
       label: "same log, same binary",
-      dashed: true,
       offset: 100,
       detail: {
         what: "The standby consuming the identical committed stream on another host, at the same rate as the primary.",
         why: "This is why failover has no state-migration step. The standby is not behind and catching up; it is doing the same work concurrently, so promotion is a routing change rather than a recovery procedure.",
-        numbers: ["within microseconds of the primary", "sequence gap is the readiness metric"],
+        numbers: ["trails the primary by under 5μs", "readiness gates at a gap tolerance of 1ms of lag"],
         breaks:
           "If the gap grows past tolerance the standby is no longer promotable, and failover must be blocked rather than attempted, because promoting a lagging standby loses trades.",
       },
@@ -406,12 +425,12 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e8",
       from: "failover-ctl",
       to: "matching",
+      tier: "control",
       label: "fence the old primary",
-      dashed: true,
       detail: {
         what: "Revoking the suspected-dead primary's ability to publish to the output sequencer, before anything is promoted.",
         why: "Ordering matters more than speed. Fencing first turns the ambiguous case, a primary that is slow rather than dead, into a bounded halt instead of two engines emitting trades against the same sequence numbers.",
-        numbers: ["deliberate sub-second pause while fencing completes"],
+        numbers: ["deliberate pause under 1s while fencing completes"],
         breaks:
           "Fencing that does not actually revoke publish rights leaves a split brain that market data subscribers have already accepted, and there is nothing to unwind to.",
       },
@@ -420,12 +439,12 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e9",
       from: "failover-ctl",
       to: "standby",
+      tier: "control",
       label: "promote after fence",
-      dashed: true,
       detail: {
         what: "Promoting the standby to primary once the old primary is provably fenced, and redirecting gateway routing to it.",
         why: "The takeover itself is trivial because the log is the state. Putting promotion behind a quorum decision rather than a heartbeat is what stops two hosts reaching that conclusion independently.",
-        numbers: ["sub-second RTO inside the primary site"],
+        numbers: ["RTO under 1s inside the primary site"],
         breaks:
           "A quorum small enough to partition can promote on both sides, which is exactly the failure the controller exists to prevent.",
       },
@@ -434,8 +453,8 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e10",
       from: "matching",
       to: "output-seq",
+      tier: "hot",
       label: "fills + book deltas",
-      animated: true,
       detail: {
         what: "Execution reports and price-level deltas leaving each per-symbol engine for reassembly into one stream.",
         why: "Output is fanned back in because subscribers need one countable sequence, not ~10k of them. This is also the natural fence point: revoke an engine's right to publish here and it cannot affect the market even if it is still running.",
@@ -448,8 +467,8 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e11",
       from: "output-seq",
       to: "md-publisher",
+      tier: "hot",
       label: "one global sequence",
-      animated: true,
       detail: {
         what: "The globally numbered outbound stream handed to the multicast publisher.",
         why: "Numbering happens before publication so that loss detection is a subtraction on the subscriber side. Detecting a gap by counting is immediate; detecting it by timing out is unbounded and useless in a fast market.",
@@ -462,8 +481,8 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e12",
       from: "md-publisher",
       to: "subscribers",
+      tier: "hot",
       label: "reliable multicast",
-      animated: true,
       detail: {
         what: "One packet on the wire, fanned out by the network so every subscriber NIC receives the same bytes at the same instant, plus gap fill on a separate channel.",
         why: "Simultaneity has to be a property of the transport rather than of the publisher's send loop. A unicast loop delivers to somebody first, and at these speeds first is worth money.",
@@ -476,6 +495,7 @@ export const STOCK_EXCHANGE: Diagram = {
       id: "e13",
       from: "output-seq",
       to: "gateway",
+      tier: "data",
       label: "exec reports, TCP unicast",
       offset: 200,
       detail: {

@@ -10,12 +10,30 @@ export const RAG_SYSTEM: Diagram = {
     shape:
       "Two systems that meet only at three indexes: a continuous ingest pipeline that chunks and embeds 50M documents, and a request path that narrows 500M chunks down to the 8 passages a model is allowed to read.",
     beats: [
-      "Ingest is a pipeline, not a request path. Connectors take webhooks where a source offers them and poll from a watermark where it does not, a parser normalises to text, and the chunker splits on structural boundaries into roughly 512-token pieces with 64 tokens of overlap.",
-      "Chunk size is the parameter everything downstream inherits. At 128 tokens the retrieval metric looks wonderful and the chunk that says 26 weeks never says what the 26 weeks are for; at 2,000 tokens the embedding is an average of six unrelated ideas and four chunks exhaust the token budget. Measure recall and faithfulness together, per source type.",
-      "Every chunk is hashed, so a one-paragraph edit re-embeds one chunk rather than eleven, and roughly 70% of the 10M chunks touched daily are skipped outright. Chunks land in two indexes because dense and lexical fail on disjoint queries: an embedding cannot find JOB-4471, and BM25 cannot find a paraphrase.",
-      "A query resolves the caller to ACL group IDs, embeds the question with the same model used at ingest, and runs ANN and BM25 in parallel with the permission predicate evaluated inside each search. Post-filtering collapses top-k for exactly the users with least access: a contractor who can read 0.5% of the corpus retrieves 100 and keeps 0.",
-      "Reciprocal rank fusion merges the two ranked lists on rank alone, the cross-encoder rescores the top 100 by reading question and chunk jointly, and assembly dedupes, drops expired chunks and keeps the top 8 with the strongest at both ends of the prompt. Below the abstention floor the system says so instead of inventing an answer.",
-      "Generation is one box here and belongs to question 46. It costs an order of magnitude more than everything else combined, but it cannot rescue a bad context: the whole design spends its complexity upstream of that box, and the evaluation harness in CI is what tells you whether any of it helped.",
+      {
+        text: "Ingest is a pipeline, not a request path. Connectors take webhooks where a source offers them and poll from a watermark where it does not, a parser normalises to text, and the chunker splits on structural boundaries into roughly 512-token pieces with 64 tokens of overlap.",
+        lights: ["connectors", "chunker", "e1"],
+      },
+      {
+        text: "Chunk size is the parameter everything downstream inherits. At 128 tokens the retrieval metric looks wonderful and the chunk that says 26 weeks never says what the 26 weeks are for; at 2,000 tokens the embedding is an average of six unrelated ideas and four chunks exhaust the token budget. Measure recall and faithfulness together, per source type.",
+        lights: ["chunker"],
+      },
+      {
+        text: "Every chunk is hashed, so a one-paragraph edit re-embeds one chunk rather than eleven, and roughly 70% of the 10M chunks touched daily are skipped outright. Chunks land in two indexes because dense and lexical fail on disjoint queries: an embedding cannot find JOB-4471, and BM25 cannot find a paraphrase.",
+        lights: ["embed", "lexical-index", "vector-index", "e2", "e4", "e5"],
+      },
+      {
+        text: "A query resolves the caller to ACL group IDs, embeds the question with the same model used at ingest, and runs ANN and BM25 in parallel with the permission predicate evaluated inside each search. Post-filtering collapses top-k for exactly the users with least access: a contractor who can read 0.5% of the corpus retrieves 100 and keeps 0.",
+        lights: ["query-api", "hybrid", "vector-index", "lexical-index", "e7", "e8", "e9"],
+      },
+      {
+        text: "Reciprocal rank fusion merges the two ranked lists on rank alone, the cross-encoder rescores the top 100 by reading question and chunk jointly, and assembly dedupes, drops expired chunks and keeps the top 8 with the strongest at both ends of the prompt. Below the abstention floor the system says so instead of inventing an answer.",
+        lights: ["hybrid", "reranker", "assembler", "e10", "e12"],
+      },
+      {
+        text: "Generation is one box here, and everything about batching, KV cache and GPU economics belongs to the generation system itself, not to retrieval. It costs an order of magnitude more than everything else combined, but it cannot rescue a bad context: the whole design spends its complexity upstream of that box, and the evaluation harness in CI is what tells you whether any of it helped.",
+        lights: ["generation", "eval", "e14", "e16"],
+      },
     ],
     crux:
       "Retrieval quality bounds answer quality, and the failure is silent. When the retriever hands over the wrong chunks the model writes a fluent, correctly cited, wrong answer, nothing in the dashboards goes red, and the user reports it as the AI being unreliable rather than as a retrieval bug.",
@@ -132,14 +150,14 @@ export const RAG_SYSTEM: Diagram = {
     {
       id: "lexical-index",
       label: "Lexical index (BM25)",
-      sub: "inverted index, see #47",
+      sub: "inverted index, ACL filterable",
       kind: "database",
       col: 1,
       row: 1,
       detail: {
         what: "A classic inverted index over the same chunks, carrying the same filterable payload of ACL groups, effective dates and source type.",
         why: "Embeddings encode topic, and they compress away exactly the low-magnitude signals that identifiers are made of. This arm exists to catch error codes, ticket IDs, product names and acronyms the embedding model has effectively never seen.",
-        numbers: ["top 200 per query, ~30ms p95", "sharded by hash(doc_id), same as the vector index"],
+        numbers: ["top 200 per query, ~30ms p95", "sharded the same way as the vector index: hash(doc_id), 6 shards"],
         breaks:
           "It has the opposite blind spot: a paraphrased question with no shared vocabulary returns nothing useful, which is why neither arm is allowed to run alone.",
         choice: {
@@ -169,7 +187,7 @@ export const RAG_SYSTEM: Diagram = {
           instead: "IVF-PQ, which clusters and stores compressed residuals, fitting the same 500M chunks in ~32GB on 3 nodes.",
           decider:
             "Recall against RAM you are willing to buy. HNSW at int8 holds recall@100 near 0.96; IVF-PQ at m=64 lands near 0.85. That is 11 points of recall for roughly 600GB, and 15 questions in 100 silently missing their best chunk is not a policy-lookup product. fp32 would need 17 shards for about one point.",
-          flips: "Past roughly 2B chunks, where HNSW stops fitting any affordable fleet, or when queries are broad and many answers are acceptable, which is the recommender case in question 28.",
+          flips: "Past roughly 2B chunks, where HNSW stops fitting any affordable fleet, or when queries are broad and many answers are acceptable, which is a recommender-system case rather than this one.",
         },
       },
     },
@@ -208,7 +226,7 @@ export const RAG_SYSTEM: Diagram = {
       col: 2,
       row: 1,
       detail: {
-        what: "Fans the query out to the ANN and BM25 arms in parallel, both carrying the ACL predicate, then merges the two ranked lists into roughly 300 unique candidates.",
+        what: "Fans the query out to the ANN and BM25 arms in parallel, both carrying the ACL predicate, then merges the two ranked lists into roughly 300 unique matches.",
         why: "The two retrievers fail on disjoint query types, and merging two cheap rankings beats tuning one expensive one. Running them in parallel means the wall cost is the slower arm, about 30ms, not the sum.",
         numbers: ["200 from each arm, ~300 unique after merge", "ANN ~25ms, BM25 ~30ms, run in parallel", "RRF merge ~3ms"],
         breaks:
@@ -230,16 +248,16 @@ export const RAG_SYSTEM: Diagram = {
       col: 2,
       row: 2,
       detail: {
-        what: "Runs the question and one chunk through a single transformer together, so every query token attends to every chunk token, and rescores the top 100 candidates.",
+        what: "Runs the question and one chunk through a single transformer together, so every query token attends to every chunk token, and rescores the top 100 matches.",
         why: "This is the only stage that separates 'about this topic' from 'answers this question'. A dot product between two independently computed vectors cannot make that distinction, which is precisely the failure that produces a fluent, wrong answer.",
         numbers: ["50,000 pairs/s at peak", "~132 GFLOPs per pair, ~30 accelerators", "~90ms p95, the most expensive retrieval step"],
         breaks:
           "It sits directly in the latency path, so a traffic spike queues and TTFT breaches the SLO. Adaptive depth 100 to 50 to 25 costs about a point of recall@8 instead of seconds, but it must be logged and alertable, never a silent fallback.",
         choice: {
-          pick: "A ~110M-parameter cross-encoder over the top 100 candidates",
-          instead: "Trusting the fused bi-encoder ranking, or reranking a much deeper candidate set.",
+          pick: "A ~110M-parameter cross-encoder over the top 100 matches",
+          instead: "Trusting the fused bi-encoder ranking, or reranking a much deeper match set.",
           decider:
-            "Cost per candidate against candidate count. Joint scoring is roughly 1000x more expensive per pair than a dot product, which is exactly why it runs on 100 and not 500M. Going deeper than 100 multiplies a 6.6 PFLOP/s fleet for recall gains the top 8 will never see.",
+            "Cost per match against match count. Joint scoring is roughly 1000x more expensive per pair than a dot product, which is exactly why it runs on 100 and not 500M. Going deeper than 100 multiplies a 6.6 PFLOP/s fleet for recall gains the top 8 will never see.",
           flips: "An inline suggestion surface with a sub-100ms budget, where there is no room for a rerank pass at all and you live with bi-encoder ordering and a much smaller k.",
         },
       },
@@ -254,7 +272,7 @@ export const RAG_SYSTEM: Diagram = {
       detail: {
         what: "Drops near-duplicates and expired chunks, applies the recency prior, keeps the best 8, orders them strongest at both ends of the prompt, and decides whether to answer at all.",
         why: "More context makes answers worse: going from 5 chunks to 20 reliably lowers faithfulness, because each irrelevant chunk is one more thing a wrong sentence can plausibly be grounded in. This stage is where the budget is spent deliberately rather than filled.",
-        numbers: ["~85 candidates survive, top 8 kept", "~6k prompt tokens", "abstain below a ~0.45 rerank floor"],
+        numbers: ["~85 matches survive, top 8 kept", "~6k prompt tokens", "abstain below a ~0.45 rerank floor"],
         breaks:
           "Two in-date documents that disagree about the expenses limit are indistinguishable to a score. The prompt must surface the conflict and cite both, because a confident pick with a citation looks verified and is not.",
         choice: {
@@ -272,10 +290,10 @@ export const RAG_SYSTEM: Diagram = {
       kind: "external",
       col: 2,
       row: 4,
-      sub: "stream + cite, see #46",
+      sub: "stream + cite, a boundary here",
       detail: {
-        what: "The inference tier that reads the 8 assembled chunks and streams a cited answer. Batching, KV cache and GPU economics belong to question 46; this diagram treats it as a boundary.",
-        why: "It is drawn as one box on purpose. It dominates the bill and cannot fix a bad context, so the design's complexity belongs upstream: no model improves an answer built from the wrong chunks.",
+        what: "The inference tier that reads the 8 assembled chunks and streams a cited answer. Batching, KV cache and GPU economics belong to the generation system itself; this design treats it as a boundary.",
+        why: "It is one box on purpose. It dominates the bill and cannot fix a bad context, so the design's complexity belongs upstream: no model improves an answer built from the wrong chunks.",
         numbers: ["~3.3M prefill tokens/s at 500 q/s", "~220 accelerators, ~8x the reranker", "first token ~700ms, 400-token answer over ~8s"],
         breaks:
           "If the tier is degraded or rate-limited, fall back to a smaller model behind the same prompt contract; if all generation is down, return the reranked chunks as ranked links, because a working search product beats an error page.",
@@ -297,7 +315,7 @@ export const RAG_SYSTEM: Diagram = {
       row: 4,
       detail: {
         what: "A labelled question set plus retrieval metrics (recall@k, MRR, nDCG) and generation metrics (faithfulness, answer relevance, context relevance), wired into CI.",
-        why: "Every knob in this diagram is a quality risk taken on faith without it. It is the only thing that can tell you whether last week's chunker change made the product better, and it is a component rather than a phase before launch.",
+        why: "Every knob here is a quality risk taken on faith without it. It is the only thing that can tell you whether last week's chunker change made the product better, and it is a component rather than a phase before launch.",
         numbers: ["~2,000 labelled (question, doc_id, char_span) pairs", "retrieval metrics ~2 min, LLM-judged ~15 min", "blocks merge on -2 pts recall@10 or -1 pt faithfulness"],
         breaks:
           "Production has no ground truth. A confidently wrong answer to a question nobody anticipated produces no signal at all, and the 1% offline judge shares the failure modes of the system it judges.",
@@ -349,7 +367,7 @@ export const RAG_SYSTEM: Diagram = {
       detail: {
         what: "The chunk text, heading path, char span, effective dates and ACL group IDs written as the durable record.",
         why: "This write is what makes an ACL change cheap later: permissions live on the row, so re-sharing a document is a metadata upsert on its ~12 chunks with no embedding involved.",
-        numbers: ["~2.4KB per record", "keyed by (doc_id, ordinal)"],
+        numbers: ["~2.4KB per record", "1 row per (doc_id, ordinal)"],
         breaks:
           "If this write lands and the index upsert does not, the text exists but is unreachable, which reads as a missing document rather than an error.",
       },
@@ -364,7 +382,7 @@ export const RAG_SYSTEM: Diagram = {
       detail: {
         what: "Tokenised chunk text and an identical filterable payload posted into the inverted index.",
         why: "Both indexes must carry the same ACL and date fields, or the two arms of a hybrid query apply different filters and the fusion step is merging two different corpora.",
-        numbers: ["sharded by hash(doc_id), matching the vector index"],
+        numbers: ["sharded the same way as the vector index: hash(doc_id), 6 shards"],
         breaks:
           "Payload drift between the two indexes is silent: the lexical arm returns chunks the dense arm has already filtered out, and the leak shows up in an ACL audit rather than in a metric.",
       },
@@ -433,8 +451,8 @@ export const RAG_SYSTEM: Diagram = {
       tier: "hot",
       label: "top 100 by RRF",
       detail: {
-        what: "The 100 highest-fused candidates out of roughly 300 unique, handed to joint scoring.",
-        why: "This is the narrowing that makes an expensive model affordable: cost per candidate rises exactly as candidate count falls, which is the shape of the whole funnel.",
+        what: "The 100 highest-fused matches out of roughly 300 unique, handed to joint scoring.",
+        why: "This is the narrowing that makes an expensive model affordable: cost per match rises exactly as match count falls, which is the shape of the whole funnel.",
         numbers: ["500M to 400 to ~300 unique to 100"],
         breaks:
           "Cutting at 100 caps recall for the rest of the pipeline. Anything the fusion ranked 101st can never be recovered, however well the cross-encoder would have scored it.",
@@ -448,7 +466,7 @@ export const RAG_SYSTEM: Diagram = {
       label: "fetch ~300 texts",
       offset: 90,
       detail: {
-        what: "Pulling the actual chunk prose for the candidate set, because both the cross-encoder and the prompt need words rather than vectors.",
+        what: "Pulling the actual chunk prose for the match set, because both the cross-encoder and the prompt need words rather than vectors.",
         why: "Retrieval returns IDs and scores; nothing before this point has read any text. The fetch is batched because 300 individual round trips would cost more than the rerank itself.",
         numbers: ["~15ms p95 batched", "~150k reads/s at peak, ~80% LRU hit rate"],
         breaks:
@@ -460,13 +478,13 @@ export const RAG_SYSTEM: Diagram = {
       from: "reranker",
       to: "assembler",
       tier: "hot",
-      label: "~85 scored candidates",
+      label: "~85 scored matches",
       detail: {
-        what: "Candidates carrying a joint relevance score, which is the first number in the pipeline that means 'answers this question' rather than 'is about this topic'.",
+        what: "Matches carrying a joint relevance score, which is the first number in the pipeline that means 'answers this question' rather than 'is about this topic'.",
         why: "Assembly needs a calibrated score, not a rank, because both the abstention floor and the recency prior are multiplicative on it and a rank has no scale to threshold against.",
         numbers: ["~85 left after dedupe and effective-date filtering"],
         breaks:
-          "Under adaptive depth reduction these scores come from a shallower candidate set, so the floor is calibrated against a distribution that has quietly shifted.",
+          "Under adaptive depth reduction these scores come from a shallower match set, so the floor is calibrated against a distribution that has quietly shifted.",
       },
     },
     {
@@ -519,9 +537,9 @@ export const RAG_SYSTEM: Diagram = {
       tier: "control",
       label: "1% judged offline",
       detail: {
-        what: "A sampled stream of production candidate sets and answers, plus mined thumbs-down and rephrase events, feeding the labelled set and the rolling faithfulness estimate.",
+        what: "A sampled stream of production match sets and answers, plus mined thumbs-down and rephrase events, feeding the labelled set and the rolling faithfulness estimate.",
         why: "The 2,000-question set cannot cover what people actually ask, so the hard cases have to be harvested from traffic. Mining rephrases matters most: they mark questions the system answered badly enough to be asked again.",
-        numbers: ["1% offline judge sample", "~30% of generated candidate questions discarded as ambiguous"],
+        numbers: ["1% offline judge sample", "~30% of generated eval questions discarded as ambiguous"],
         breaks:
           "Thumbs-down and rephrase signals are biased toward users who noticed they were misled, so the failures nobody catches are invisible here by construction.",
       },

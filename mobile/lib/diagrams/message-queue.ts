@@ -10,13 +10,34 @@ export const MESSAGE_QUEUE: Diagram = {
     shape:
       "This is a partitioned, replicated, append-only log, not a mailbox: writes go to the end of a file, nothing is removed when it is read, and each reader carries its own position.",
     beats: [
-      "Everything starts with the partition. A topic splits into partitions, the producer hashes the message key to pick one, and that single function decides both what is ordered relative to what and which broker holds the bytes. Partition count is the ceiling on consumer parallelism and it is close to irreversible.",
-      "The write path is one leader and two followers. The leader appends the batch to the tail of the active segment, assigns offsets, and the followers replicate by issuing the same FetchRequest a consumer issues, so there is no separate replication wire. The high watermark advances to the minimum log-end-offset across the in-sync set, and that advance is what releases an acks=all producer.",
-      "Committed means present in the page cache of every in-sync replica, not on any disk. Kafka does not fsync per batch; durability is replication. That makes rack-aware placement matter more than the ack setting, because three replicas behind one power distribution unit is one failure domain rather than three.",
-      "Throughput is hardware rather than cleverness. Records are never updated in place so the disk head never seeks, the kernel page cache holds recent segments with no cache the broker had to write, and sendfile pipes log bytes straight to the socket without touching the JVM heap. Roughly 1GB/s per broker on NVMe.",
-      "Consumers pull and own their read position. The broker keeps one committed offset per group per partition and nothing else, which is why the twentieth consumer group costs a sequential read that mostly hits RAM, and why replay is committing a lower number rather than a feature. Those offsets live in an internal Kafka topic, so they replicate and fail over exactly like data.",
-      "Retention runs off a clock or a size, never off consumption. Seven days at 3GB/s is 5.5PB with replication, which is 92TB a broker, so closed segments go to object storage and only the recent working set stays on local NVMe.",
-      "What the log cannot express is per-message state. One unprocessable record holds up everything behind it on its partition, and a dead-letter topic relocates that blocking rather than removing it. If the requirement is per-message retry, backoff and priority, the answer is a broker-tracked queue, not this.",
+      {
+        text: "Everything starts with the partition. A topic splits into partitions, the producer hashes the message key to pick one, and that single function decides both what is ordered relative to what and which broker holds the bytes. Partition count is the ceiling on consumer parallelism and it is close to irreversible.",
+        lights: ["partitioner", "e1"],
+      },
+      {
+        text: "The write path is one leader and two followers. The leader appends the batch to the tail of the active segment, assigns offsets, and the followers replicate by issuing the same FetchRequest a consumer issues, so there is no separate replication wire. The high watermark advances to the minimum log-end-offset across the in-sync set, and that advance is what releases an acks=all producer.",
+        lights: ["append", "followers", "hwm", "e4", "e6", "e7", "e8"],
+      },
+      {
+        text: "Committed means present in the page cache of every in-sync replica, not on any disk. Kafka does not fsync per batch; durability is replication. That makes rack-aware placement matter more than the ack setting, because three replicas behind one power distribution unit is one failure domain rather than three.",
+        lights: ["rack", "followers"],
+      },
+      {
+        text: "Throughput is hardware rather than cleverness. Records are never updated in place so the disk head never seeks, the kernel page cache holds recent segments with no cache the broker had to write, and sendfile pipes log bytes straight to the socket without touching the JVM heap. Roughly 1GB/s per broker on NVMe.",
+        lights: ["partitionlog", "pagecache", "fetchsvc", "e5", "e10", "e12"],
+      },
+      {
+        text: "Consumers pull and own their read position. The broker keeps one committed offset per group per partition and nothing else, which is why the twentieth consumer group costs a sequential read that mostly hits RAM, and why replay is committing a lower number rather than a feature. Those offsets live in an internal Kafka topic, so they replicate and fail over exactly like data.",
+        lights: ["consumer", "offsets", "e19", "e21"],
+      },
+      {
+        text: "Retention runs off a clock or a size, never off consumption. Seven days at 3GB/s is 5.5PB with replication, which is 92TB a broker, so closed segments go to object storage and only the recent working set stays on local NVMe.",
+        lights: ["retention", "objectstore", "e13", "e14"],
+      },
+      {
+        text: "What the log cannot express is per-message state. One unprocessable record holds up everything behind it on its partition, and a dead-letter topic relocates that blocking rather than removing it. If the requirement is per-message retry, backoff and priority, the answer is a broker-tracked queue, not this.",
+        lights: ["dlq", "e18"],
+      },
     ],
     crux:
       "Ordering only holds inside a partition, so the partition key is the most consequential choice a producer ever makes. Pick it too coarse and one tenant saturates a partition nobody can split; pick it too fine and the ordering the design was sold on was never there. Changing your mind means changing hash(key) % count, which reorders history once, silently, with nothing in the data recording it.",
@@ -45,6 +66,14 @@ export const MESSAGE_QUEUE: Diagram = {
         ],
         breaks:
           "These are library defaults on a hundred teams' classpaths. A service that ships with acks=1, or with a null key, looks identical from the broker side, and there is no cluster-side control that catches either.",
+        choice: {
+          pick: "Routing, batching and sending as in-process stages of one client library",
+          instead: "Three peer services, a router, a batcher and a sender, communicating over the network.",
+          decider:
+            "The p99 produce ack budget of ~10ms. All three stages see the same 3M msg/s at 1:1, so there is no independent-scaling reason to split them, and adding 2 network hops on a 10ms budget would eat most of it before a byte reaches a broker.",
+          flips:
+            "Never inside one producer. The only real split is across producing applications, which already run as independent processes by virtue of being different teams' code.",
+        },
       },
     },
     {
@@ -143,9 +172,9 @@ export const MESSAGE_QUEUE: Diagram = {
       row: 0,
       detail: {
         what: "Three or five controller nodes replicating one internal metadata log that every broker tails: which brokers exist, which one leads each partition, topic config and ACLs.",
-        why: "Making leadership a subscription rather than a poll means a controller is already current when it is elected, so failover is a Raft election instead of a full metadata reload. It knows nothing about message content, only about who owns what.",
+        why: "Making leadership a subscription rather than a poll means a controller is already current when it is elected, so failover is a Raft election instead of a full metadata reload. It knows nothing about message content, only about who owns what. KRaft's own tested ceiling is ~2M partitions against ~200k for ZooKeeper, but that is the control plane's limit, not this cluster's: broker disk and network capacity caps this cluster at 240k long before KRaft would ever bind.",
         numbers: [
-          "~2M partition ceiling against ~200k on ZooKeeper",
+          "~2M partition ceiling for KRaft itself, this cluster's real ceiling is 240k",
           "failover in hundreds of ms rather than minutes",
           "ControllerActiveCount must be exactly 1 cluster-wide",
         ],
@@ -169,7 +198,7 @@ export const MESSAGE_QUEUE: Diagram = {
       sub: "one failure domain: power, switch, AZ",
       kind: "zone",
       detail: {
-        what: "One failure domain, drawn as a boundary rather than a machine: the leader broker for this partition, the NVMe log directory it appends to and the kernel page cache over that log, all behind one power distribution unit and one top-of-rack switch.",
+        what: "One failure domain, treated as a boundary rather than a machine: the leader broker for this partition, the NVMe log directory it appends to and the kernel page cache over that log, all behind one power distribution unit and one top-of-rack switch.",
         why: "Committed means present in the page cache of every in-sync replica and on no disk anywhere, so durability is entirely a claim about how many independent failure domains hold the bytes. Three replicas inside this one rectangle would be one failure domain wearing the number three, which is why the followers are drawn outside it.",
         numbers: [
           "20 brokers in this rack, 60 in the cluster across 3 racks",
@@ -248,7 +277,6 @@ export const MESSAGE_QUEUE: Diagram = {
         what: "The bookkeeping that tracks each follower's log-end-offset, advances the high watermark to the minimum across the in-sync set, and releases the acks=all ProduceResponse once that watermark passes the batch.",
         why: "This is the moment 'committed' is defined, and it means present in the page cache of every in-sync replica: not durable on any disk, and not necessarily readable on the followers yet. It also gates reads, because a consumer may not read past the watermark, so nothing a consumer has seen can later be truncated.",
         numbers: [
-          "HW = min log-end-offset across the ISR",
           "p99 produce ack ~10ms",
           "same-AZ round trip ~0.5ms, cross-AZ ~1ms",
         ],
@@ -477,11 +505,9 @@ export const MESSAGE_QUEUE: Diagram = {
       row: 2,
       detail: {
         what: "The broker that owns a consumer group: it tracks membership by heartbeat, assigns partitions to members, and runs a rebalance whenever a consumer joins or leaves.",
-        why: "Exactly one consumer may own a partition at a time, or two of them advance the same cursor, so membership changes need a coordinated reassignment rather than each consumer deciding for itself. The new owner then resumes from the committed offset, which is why a departure costs duplicates rather than gaps.",
+        why: "Exactly one consumer may own a partition at a time, or two of them advance the same cursor, so membership changes need a coordinated reassignment rather than each consumer deciding for itself. The new owner then resumes from the committed offset, which is why a departure costs duplicates rather than gaps. session.timeout.ms has to exceed the worst GC pause the JVM can stall for, or a pause is indistinguishable from a death; cooperative rebalancing then revokes only the partitions that actually move.",
         numbers: [
-          "session.timeout.ms must exceed your GC pauses",
           "eager stops all 100 consumers for seconds per rebalance",
-          "cooperative revokes only the partitions that move",
         ],
         breaks:
           "A flaky consumer flapping in and out triggers a rebalance storm, and under the eager protocol group throughput collapses because every member stops for every round.",
@@ -504,11 +530,9 @@ export const MESSAGE_QUEUE: Diagram = {
       row: 4,
       detail: {
         what: "A separate topic a consumer publishes an unprocessable record to, so it can commit past that offset and keep the cursor moving.",
-        why: "A cursor advances or it does not, so one bad record at offset N holds up every record behind it on that partition. Publishing it elsewhere is the only way to advance without dropping it, which is the closest a log gets to per-message handling.",
+        why: "A cursor advances or it does not, so one bad record at offset N holds up every record behind it on that partition. Publishing it elsewhere is the only way to advance without dropping it, which is the closest a log gets to per-message handling. Depth here is tracked as its own SLO, and replay tooling re-ingests from it once a code patch fixes the underlying failure.",
         numbers: [
           "one poison record blocks one partition, not the group",
-          "track DLQ depth as an SLO",
-          "replay tooling re-ingests after a code patch",
         ],
         breaks:
           "It relocates head-of-line blocking rather than removing it. When the failure is a downstream dependency that has been down four minutes, this absorbs several million perfectly good records, their order relative to the main topic is gone, and re-injecting them later replays them against state that has moved past them.",
@@ -567,6 +591,14 @@ export const MESSAGE_QUEUE: Diagram = {
         ],
         breaks:
           "Consumer count above partition count does nothing: the 51st consumer on a 50-partition topic polls nothing. Past that ceiling the only move is a repartition, which is the one-way door.",
+        choice: {
+          pick: "One member process running fetch, process and commit as three stages of a single loop",
+          instead: "Separate services for fetching, processing and committing, coordinated over a queue between them.",
+          decider:
+            "Commit-after-work ordering only has to be enforced within one process; splitting the loop across 3 services reintroduces a coordination problem the in-process ordering already solves for free, across a design already running 100k instances.",
+          flips:
+            "When processing genuinely needs its own scaling curve independent of fetch rate, for example a call to a slow external model per record, at which point handing records to a separate pool is worth the queue in between.",
+        },
       },
     },
     {
@@ -579,11 +611,10 @@ export const MESSAGE_QUEUE: Diagram = {
       parent: "consumer",
       detail: {
         what: "The poll: give me messages from this partition starting at this offset, with a bounded wait if there is nothing yet. The same thread heartbeats to the coordinator to keep this member in the group.",
-        why: "The consumer names the position rather than being handed one, which is why replay is a smaller number in this request rather than a feature, and why the broker keeps no delivery state for anyone.",
+        why: "The consumer names the position rather than being handed one, which is why replay is a smaller number in this request rather than a feature, and why the broker keeps no delivery state for anyone. session.timeout.ms must exceed the worst GC pause the process can stall for, or that pause reads as a death.",
         numbers: [
           "fetch.max.wait.ms=10, so ~5ms average wait",
           "end to end ~20 to 50ms",
-          "session.timeout.ms must exceed your GC pauses",
         ],
         breaks:
           "A consumer that stops fetching costs the cluster one stale offset and nothing else, so lag is invisible to the broker and has to be alerted on from outside as latest_offset - committed_offset.",
@@ -591,7 +622,7 @@ export const MESSAGE_QUEUE: Diagram = {
           pick: "Long poll at fetch.max.wait.ms=10, session.timeout.ms above your worst GC pause",
           instead: "Tight polling with a short session timeout for faster failure detection.",
           decider:
-            "A session timeout below your worst stop-the-world pause makes a GC hiccup indistinguishable from a death, so the group rebalances around a consumer that is about to come back and do it again. Detection gets faster by a few seconds; a rebalance storm costs the whole group its throughput for as long as it lasts.",
+            "A session timeout below your worst stop-the-world pause makes a GC hiccup indistinguishable from a death, so the group rebalances around a consumer that is about to come back and do it again. Detection gets faster by a few seconds, against a rebalance storm that can cost all 100 consumers in the group their throughput for as long as it lasts.",
           flips:
             "Very small groups where a rebalance completes in milliseconds, so losing seconds to a genuinely dead member is the larger cost.",
         },
@@ -607,9 +638,8 @@ export const MESSAGE_QUEUE: Diagram = {
       parent: "consumer",
       detail: {
         what: "The application work: each record is transformed, written to a sink, or turned into a side effect, and none of it is committed until this returns.",
-        why: "Delivery is at-least-once, so this stage has to be safe to run twice. An idempotency key the sink honours is what makes a replayed record harmless, and once the output leaves Kafka it is the only remedy there is.",
+        why: "Delivery is at-least-once, so this stage has to be safe to run twice. An idempotency key the sink honours is what makes a replayed record harmless, and once the output leaves Kafka it is the only remedy there is. A rebalance replays everything since the last commit, which is exactly the case this key has to absorb.",
         numbers: [
-          "a rebalance replays everything since the last commit",
           "at 3M msg/s with 30s of work, broker-tracked delivery would track 90M records",
           "one poison record blocks its partition, not the group",
         ],
@@ -620,7 +650,7 @@ export const MESSAGE_QUEUE: Diagram = {
           instead:
             "Kafka transactions plus isolation.level=read_committed for exactly-once semantics.",
           decider:
-            "Where the output lands. Transactions make consume-transform-produce atomic as long as both ends are Kafka; the moment a sink sits outside the cluster the guarantee reverts and the idempotency key is doing all the work anyway. Paying transaction overhead for a guarantee that stops at the boundary buys nothing, and most consumers are on the boundary.",
+            "Where the output lands. Transactions make consume-transform-produce atomic as long as both ends are Kafka; the moment a sink sits outside the cluster the guarantee reverts and the idempotency key is doing all the work anyway. Paying transaction overhead for a guarantee that stops at the boundary buys nothing on a design already carrying 90M in-flight records without it, and most consumers are on the boundary.",
           flips:
             "A pure Kafka-to-Kafka pipeline, such as a streaming join or aggregation whose only output is another topic. There transactions genuinely close the loop, and read_committed is what keeps aborted writes invisible.",
         },
@@ -661,8 +691,8 @@ export const MESSAGE_QUEUE: Diagram = {
       id: "e1",
       from: "partitioner",
       to: "accumulator",
+      tier: "hot",
       label: "hash(key) % partitions",
-      animated: true,
       detail: {
         what: "The record, now carrying a destination partition, handed to that partition's buffer.",
         why: "The destination has to be known first, because a batch is a unit of one partition's log. Routing precedes accumulation rather than following it.",
@@ -675,8 +705,8 @@ export const MESSAGE_QUEUE: Diagram = {
       id: "e2",
       from: "accumulator",
       to: "sender",
+      tier: "hot",
       label: "16KB batch or linger 5ms",
-      animated: true,
       detail: {
         what: "A batch released to the I/O thread once it hits batch.size or linger.ms elapses, whichever comes first.",
         why: "This is the latency-for-throughput trade, made once per batch and entirely on the client. Nothing downstream can undo a producer that chose to send one record at a time.",
@@ -752,7 +782,7 @@ export const MESSAGE_QUEUE: Diagram = {
       detail: {
         what: "The follower's next FetchRequest, asking for offset N+1, which is how the leader learns it holds everything up to N.",
         why: "There is no separate acknowledgement message: the next fetch is the acknowledgement. The leader uses these positions to advance the high watermark to the minimum log-end-offset across the in-sync set.",
-        numbers: ["HW = min log-end-offset across the ISR", "replica.lag.time.max.ms 30s"],
+        numbers: ["replica.lag.time.max.ms 30s"],
         breaks:
           "Reverse this with the produce response and you have built acks=1 with extra latency; the ordering of these steps is the entire guarantee.",
       },
@@ -885,8 +915,8 @@ export const MESSAGE_QUEUE: Diagram = {
       id: "e16",
       from: "fetcher",
       to: "processor",
+      tier: "hot",
       label: "poll() returns a batch",
-      animated: true,
       detail: {
         what: "The records handed to application code, in offset order within each partition.",
         why: "Order is only defined inside one partition, so this batch is ordered for the key that hashed here and has no defined relation to anything on another partition.",
@@ -899,8 +929,8 @@ export const MESSAGE_QUEUE: Diagram = {
       id: "e17",
       from: "processor",
       to: "committer",
+      tier: "hot",
       label: "only after the work lands",
-      animated: true,
       detail: {
         what: "The handoff from finished work to the commit, in that order and never the reverse.",
         why: "This ordering is the delivery guarantee. Work first then commit is at-least-once; commit first then work is at-most-once, and there is nothing else in the system that distinguishes them.",
@@ -917,8 +947,8 @@ export const MESSAGE_QUEUE: Diagram = {
       label: "deterministic failures only",
       detail: {
         what: "An unprocessable record published to a separate topic so the consumer can commit past it and keep the partition moving.",
-        why: "The cursor cannot skip a record without committing past it, so the record has to go somewhere first. This is the log's only answer to per-message failure.",
-        numbers: ["track DLQ depth as an SLO", "one poison record blocks one partition"],
+        why: "The cursor cannot skip a record without committing past it, so the record has to go somewhere first. This is the log's only answer to per-message failure. Depth here is tracked as its own SLO.",
+        numbers: ["one poison record blocks one partition"],
         breaks:
           "Sending retriable failures down here is the common mistake: a downstream outage dumps millions of good records into the dead-letter topic, out of order relative to the main one, and re-injecting them replays them against state that has already moved on.",
       },
@@ -945,8 +975,7 @@ export const MESSAGE_QUEUE: Diagram = {
       label: "heartbeat, join, leave",
       detail: {
         what: "Group membership traffic: heartbeats on a session timeout, plus explicit joins and leaves that trigger a reassignment.",
-        why: "Partition ownership must be exclusive, so somebody has to decide it centrally. Heartbeats are how a dead consumer is distinguished from a slow one, badly, on a timeout.",
-        numbers: ["session.timeout.ms above your GC pauses"],
+        why: "Partition ownership must be exclusive, so somebody has to decide it centrally. Heartbeats are how a dead consumer is distinguished from a slow one, badly, on a timeout. session.timeout.ms has to sit above the worst GC pause the process can stall for.",
         breaks:
           "A GC pause longer than the session timeout looks exactly like a death, so the group rebalances around a consumer that is about to come back and do it again.",
       },

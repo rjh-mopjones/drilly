@@ -10,12 +10,30 @@ export const ECOMMERCE: Diagram = {
     shape:
       "Two systems sharing one gateway: an enormous read path that is pure caching and never authoritative, and a small write path whose entire difficulty is one inventory counter under thousands of simultaneous writers.",
     beats: [
-      "Two systems in one product, and the usual failure is designing them as one. At roughly 1,600 page views per order, browsing is a caching problem and buying is a contention problem, so they are wired to share only the gateway and nothing else.",
-      "The read path is built never to reach the origin. The product page is split where volatility changes: a near-static shell of title, media and description cached at the CDN for five minutes, and a small price, stock band and promo fragment served from edge KV for fifteen seconds.",
-      "Nothing on that read path is authoritative, and that is the rule rather than a compromise. Checkout re-prices and re-reserves against the source of truth, so a stale cache costs a re-quote and never a wrong charge. Never make cache invalidation load-bearing for money.",
-      "The cart is durable and server-side, keyed by a cart_id cookie so guests get one too, but a cart line is deliberately not a reservation. It carries a price snapshot for display and nothing more, which keeps roughly 100 add-to-carts a second away from the inventory counters entirely.",
-      "Reserving happens at checkout entry, the moment the shopper commits to paying. At 2.5% session conversion, reserving at add-to-cart makes 97.5% of holds expire unused, so effective sellable stock deflates by the abandonment rate and the site reports sold out with full warehouses.",
-      "Inventory is 600M rows and about 40GB, so it fits in memory and is never a capacity problem, only a contention one. A classifier measures each SKU's reserve rate over a rolling 10 seconds and routes it into one of three lanes, and that classifier is the design.",
+      {
+        text: "Two systems in one product, and the usual failure is designing them as one. At roughly 1,600 page views per order, browsing is a caching problem and buying is a contention problem, so they are wired to share only the gateway and nothing else.",
+        lights: ["gateway", "cdn", "saga"],
+      },
+      {
+        text: "The read path is built never to reach the origin. The product page is split where volatility changes: a near-static shell of title, media and description cached at the CDN for five minutes, and a small price, stock band and promo fragment served from edge KV for fifteen seconds.",
+        lights: ["cdn", "catalog", "e1", "e2"],
+      },
+      {
+        text: "Nothing on that read path is authoritative, and that is the rule rather than a compromise. Checkout re-prices and re-reserves against the source of truth, so a stale cache costs a re-quote and never a wrong charge. Never make cache invalidation load-bearing for money.",
+        lights: ["pricing", "saga", "e5", "e18"],
+      },
+      {
+        text: "The cart is durable and server-side, keyed by a cart_id cookie so guests get one too, but a cart line is deliberately not a reservation. It carries a price snapshot for display and nothing more, which keeps roughly 100 add-to-carts a second away from the inventory counters entirely.",
+        lights: ["cart", "e3", "e4"],
+      },
+      {
+        text: "Reserving happens at checkout entry, the moment the shopper commits to paying. At 2.5% session conversion, reserving at add-to-cart makes 97.5% of holds expire unused, so effective sellable stock deflates by the abandonment rate and the site reports sold out with full warehouses.",
+        lights: ["saga", "cart", "e4"],
+      },
+      {
+        text: "Inventory is 600M rows and about 40GB, so it fits in memory and is never a capacity problem, only a contention one. A heat classifier that lives on the holds store measures each SKU's reserve rate over a rolling 10 seconds and routes it into one of three lanes, and that classifier is the design.",
+        lights: ["holds", "lanes-group", "cold", "warm", "hot", "e7", "e8", "e9"],
+      },
     ],
     crux:
       "The last unit of a doorbuster is a single row absorbing about 8,000 reserve attempts a second. Optimistic retry livelocks, because retries stack on top of fresh arrivals and goodput falls as load rises. A row lock is correct but sustains roughly 330 decrements a second, so its wait queue grows by about 7,670 every second, pins connections and starves SKUs nobody is fighting over. The escape is to stop applying one concurrency mechanism to all 200M SKUs.",
@@ -163,7 +181,7 @@ export const ECOMMERCE: Diagram = {
       detail: {
         what: "A rules evaluator over (sku, market, customer segment, cart contents) that produces the quoted_total the shopper is asked to accept.",
         why: "The product page physically cannot hold the authoritative number, because a buy-three-get-one promotion depends on the rest of the cart and tax depends on an address. The page shows a cached opinion and this is the fact.",
-        numbers: ["quoted_total plus a changes[] array", "accepted_total echoed on POST /orders", "absorb increases under 2% or GBP 1"],
+        numbers: ["quoted_total + 1 changes[] array of deltas", "accepted_total echoed 1x on POST /orders", "absorb increases under 2% or GBP 1"],
         breaks:
           "A re-quote is structural rather than a bug, and no amount of presentation makes being shown GBP 40 and asked for GBP 43 pleasant. A spike in price_changed responses means edge KV TTLs and promo propagation are out of step.",
         choice: {
@@ -250,7 +268,7 @@ export const ECOMMERCE: Diagram = {
     },
     {
       id: "holds",
-      sub: "in-memory, native TTL",
+      sub: "in-memory, TTL, heat classifier",
       kind: "database",
       label: "Counters + holds",
       col: 3,
@@ -303,11 +321,11 @@ export const ECOMMERCE: Diagram = {
       id: "payment",
       label: "Payment service",
       kind: "external",
-      sub: "auth, capture, ledger, see #23",
+      sub: "auth, capture, ledger",
       col: 0,
       row: 4,
       detail: {
-        what: "The downstream that authorises and captures the charge. Out of scope here: question 23 owns the ambiguous-timeout problem and the double-entry ledger.",
+        what: "The downstream that authorises and captures the charge. The ambiguous-timeout problem and the double-entry ledger are that system's own concern, not checkout's.",
         why: "It is drawn because it sets the constraints checkout answers to. It contributes about 700ms of a ~900ms checkout, it is the step that cannot be rolled back cheaply, and it is the only participant with its own rate limits.",
         numbers: ["~700ms of the ~900ms checkout", "800 orders/s in a flash sale can exceed a per-merchant limit"],
         breaks:
@@ -465,7 +483,7 @@ export const ECOMMERCE: Diagram = {
       detail: {
         what: "A coordinator taking a brief exclusive window across all 32 rows, summing them into one, and promoting the SKU to the queue lane.",
         why: "The bucket endgame produces undersells, and an undersell costs about 1.7x an oversell. Collapsing the buckets before the tail of the stock is stranded is the whole reason the threshold exists.",
-        numbers: ["threshold at total_remaining < 2N = 64", "a genuine stall of tens of milliseconds"],
+        numbers: ["threshold at total_remaining < 2N = 64", "a genuine stall, typically 20-50ms"],
         breaks:
           "Take it under a distributed lock with a hard timeout, and fail closed into the queue lane on the last consistent total. Half-merged buckets are how you actually lose count.",
       },
@@ -503,11 +521,11 @@ export const ECOMMERCE: Diagram = {
       from: "saga",
       to: "payment",
       tier: "hot",
-      label: "capture, see #23",
+      label: "capture the charge",
       detail: {
         what: "The charge step, called with the hold already taken and the order row already durable.",
         why: "It is the last irreversible step for a reason: every cheap thing that can fail has been tried first, so a failure here compensates by releasing holds rather than by refunding money.",
-        numbers: ["~700ms of the ~900ms checkout", "bulkheaded concurrency budget"],
+        numbers: ["~700ms of the ~900ms checkout", "bulkhead capped at 800 concurrent calls"],
         breaks:
           "The hold TTL is refreshed to now plus the payment timeout plus margin before this call, or a hold can expire under a live authorisation and land the order in PAID_UNRESERVED.",
       },
@@ -549,8 +567,8 @@ export const ECOMMERCE: Diagram = {
       label: "price fragment, 15s TTL",
       detail: {
         what: "A display-only projection of the rules store pushed into edge KV: price, stock band and promo badge, keyed by (sku_id, market).",
-        why: "Drawn as a control path because it carries an opinion rather than a fact. The projection exists so a product page can show a number without a round trip to a rules engine that is busy being authoritative for checkout.",
-        numbers: ["15-second TTL", "stock band, never an exact count"],
+        why: "It is a control path because it carries an opinion rather than a fact. The projection exists so a product page can show a number without a round trip to a rules engine that is busy being authoritative for checkout.",
+        numbers: ["15-second TTL", "0 exact counts published, only a stock band"],
         breaks:
           "Publishing an exact remaining count here rather than a band turns the fragment into a scraping oracle for a drop and makes every stale read look like a lie.",
       },

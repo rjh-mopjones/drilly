@@ -8,19 +8,37 @@ export const PROXIMITY_SERVICE: Diagram = {
   itemId: 13,
   overview: {
     shape:
-      "A two-phase filter over a file: a cheap approximate prune that turns a circle on the map into a block of pre-computed cells, then an exact distance test over the few thousand candidates that block returned.",
+      "A two-phase filter over a file: a cheap approximate prune that turns a circle on the map into a block of pre-computed cells, then an exact distance test over the few thousand matches that block returned.",
     beats: [
-      "No storage engine has a near operator. You manufacture a one-dimensional key out of a latitude and a longitude, so a nearby search becomes an equality lookup on a handful of cell ids rather than a distance computation over 200M rows.",
-      "That key is lossy in a specific way, and every remaining decision is a consequence of the loss. A circle never aligns to cell edges, so you read the whole block that covers the radius: at a 1km radius on 1.22km by 0.61km cells that is 3 by 5, fifteen cells, 11.2km2 against a 3.14km2 circle, a 3.6x over-fetch.",
-      "Density is what makes the block dangerous. The same fifteen cells return about 22,000 candidates in Midtown, 1,700 in a suburb and 20 in a rural county, a 1000x spread against a query that does not change, so the per-candidate cost is the number the whole design turns on.",
-      "Keeping that cost at about 5ns means the four stages of a search and the 10GB index are one process on one machine: the scan is a memory walk over packed 48-byte structs, filtering and ranking happen inside it, and only the 20 rows you actually return are ever hydrated from the card store.",
-      "Businesses do not move. Coordinate changes run at 0.6/s against 60k searches/s, a ratio near 100,000:1, which makes the index derived, disposable state: built offline, checksummed, diffed, canaried and swapped in by pointer flip, with the day's moves carried in a small overlay map alongside.",
-      "The result cache is keyed on the cell rather than on raw coordinates, so everyone standing anywhere inside one cell shares one entry. That single key choice is what turns a key space with millions of distinct values into a few thousand hot ones and takes 300k/s peak down to 120k/s at the index.",
+      {
+        text: "No storage engine has a near operator. You manufacture a one-dimensional key out of a latitude and a longitude, so a nearby search becomes an equality lookup on a handful of cell ids rather than a distance computation over 200M rows.",
+        lights: ["block"],
+      },
+      {
+        text: "That key is lossy in a specific way, and every remaining decision is a consequence of the loss. A circle never aligns to cell edges, so you read the whole block that covers the radius: at a 1km radius on 1.22km by 0.61km cells that is 3 by 5, fifteen cells, 11.2km2 against a 3.14km2 circle, a 3.6x over-fetch.",
+        lights: ["block", "e4"],
+      },
+      {
+        text: "Density is what makes the block dangerous. The same fifteen cells return about 22,000 matches in Midtown, 1,700 in a suburb and 20 in a rural county, a 1000x spread against a query that does not change, so the per-match cost is the number the whole design turns on.",
+        lights: ["scan"],
+      },
+      {
+        text: "Keeping that cost at about 5ns means the four stages of a search and the 10GB index are one process on one machine: the scan is a memory walk over packed 48-byte structs, filtering and ranking happen inside it, and only the 20 rows you actually return are ever hydrated from the card store.",
+        lights: ["serving-node", "search-svc", "geo-index"],
+      },
+      {
+        text: "Businesses do not move. Coordinate changes run at 0.6/s against 60k searches/s, a ratio near 100,000:1, which makes the index derived, disposable state: built offline, checksummed, diffed, canaried and swapped in by pointer flip, with the day's moves carried in a small overlay map alongside.",
+        lights: ["edit-stream", "overlay", "artifact-store", "index-build"],
+      },
+      {
+        text: "The result cache is keyed on the cell rather than on raw coordinates, so everyone standing anywhere inside one cell shares one entry. That single key choice is what turns a key space with millions of distinct values into a few thousand hot ones and takes 300k/s peak down to 120k/s at the index.",
+        lights: ["result-cache", "e2"],
+      },
     ],
     crux:
-      "The query is a circle, the index is made of boxes, and population density across those boxes varies by three orders of magnitude. You cannot make the boxes fit the circle, so you pay the over-fetch and make each wasted candidate cost nanoseconds instead of a row read.",
+      "The query is a circle, the index is made of boxes, and population density across those boxes varies by three orders of magnitude. You cannot make the boxes fit the circle, so you pay the over-fetch and make each wasted match cost nanoseconds instead of a row read.",
     numbers: [
-      "~22,000 candidates in a Midtown block, ~20 in a rural county",
+      "~22,000 matches in a Midtown block, ~20 in a rural county",
       "48B packed entry, ~5ns to test, so a p99 scan is 110µs of a 200ms budget",
       "0.6 coordinate writes/s against 60k reads/s, near 100,000:1",
     ],
@@ -48,15 +66,15 @@ export const PROXIMITY_SERVICE: Diagram = {
       kind: "zone",
       detail: {
         what: "One search machine: the stateless search binary, the 10GB index artifact memory-mapped from its local disk, and the overlay of coordinate changes made since that artifact was built.",
-        why: "The frame is a co-residency claim, not a deployment one. The service and the artifact ship on completely different pipelines, a normal binary rollout for one and a canaried pointer flip for the other, but they have to sit in the same address space: phase one is a walk over up to 22,000 packed entries, and the moment a candidate costs a network round trip the two-phase filter stops paying for itself and the design collapses back into a per-candidate fetch.",
-        numbers: ["10GB artifact, memory-resident on every node", "~50k overlay entries per day", "candidate cost ~5ns in-process"],
+        why: "The frame is a co-residency claim, not a deployment one. The service and the artifact ship on completely different pipelines, a normal binary rollout for one and a canaried pointer flip for the other, but they have to sit in the same address space: phase one is a walk over up to 22,000 packed entries, and the moment a match costs a network round trip the two-phase filter stops paying for itself and the design collapses back into a per-match fetch.",
+        numbers: ["10GB artifact, memory-resident on every node", "~50k overlay entries per day", "match cost ~5ns in-process"],
         breaks:
           "The artifact is global, so a bad build is a global search outage rather than a partial one, and every node holds the whole world rather than a shard of it. Canary promotion and keeping the previous artifact resident on local disk are what bound that.",
         choice: {
           pick: "A packed read-only artifact memory-mapped into every serving node",
           instead: "A shared remote index tier, for example Redis sorted sets holding cell members.",
           decider:
-            "Cost per candidate. A packed 48-byte entry tests in ~5ns in-process, so 22,000 of them is 110µs; a general-purpose sorted set costs closer to 80B per member (16GB rather than 10GB) and every cell probe becomes a network hop. At 15 probes per query and 120k/s that is the whole budget, spent on transport.",
+            "Cost per match. A packed 48-byte entry tests in ~5ns in-process, so 22,000 of them is 110µs; a general-purpose sorted set costs closer to 80B per member (16GB rather than 10GB) and every cell probe becomes a network hop. At 15 probes per query and 120k/s that is the whole budget, spent on transport.",
           flips:
             "When the index no longer fits in a node's RAM, or when it is mutated constantly rather than rebuilt, at which point a shared write-absorbing tier is the only option.",
         },
@@ -70,11 +88,19 @@ export const PROXIMITY_SERVICE: Diagram = {
       row: 0,
       parent: "serving-node",
       detail: {
-        what: "One stateless deployable that runs the whole request: validate and clamp, encode the cell and compute the block, scan the candidates, then rank and hydrate.",
-        why: "The prose's hot path is a single function, tier then cells_covering then the comprehension then nlargest then mget, and drawing those four stages as peer services would claim an independence that does not exist. They deploy together, scale on the same signal, and each stage exists only to make the next one affordable. Splitting them would also put a network hop where the design has budgeted 5ns.",
+        what: "One stateless deployable that runs the whole request: validate and clamp, encode the cell and compute the block, scan the matches, then rank and hydrate.",
+        why: "The hot path is a single function internally, tier then cells_covering then the comprehension then nlargest then mget, and drawing those four stages as peer services would claim an independence that does not exist. They deploy together, scale on the same signal, and each stage exists only to make the next one affordable. Splitting them would also put a network hop where the design has budgeted 5ns.",
         numbers: ["60k/s average, 300k/s peak", "~120k/s reaches the scan after the cache", "~5ms server time, 200ms p99 budget"],
         breaks:
           "Being stateless is what makes it disposable, but it holds a 10GB mapping, so a node is not cheap to start: it has to fetch or open the artifact and warm it before it can serve. Autoscaling on a traffic spike is minutes, not seconds, so the fleet is sized for peak rather than scaled into it.",
+        choice: {
+          pick: "One stateless deployable running validate, block, scan and rank as in-process stages",
+          instead: "Four separate services on the request path: validate, cell-encode, scan, rank.",
+          decider:
+            "Cost per match. A packed match tests in ~5ns in-process; splitting these four stages into services would put a network hop between the scan and the rank at exactly the point the design has budgeted 5ns per match, multiplied by however many hundreds of matches a query touches.",
+          flips:
+            "If one stage needed meaningfully different hardware, for example the rank stage moving onto a GPU-scored model, at which point the extra hop would be worth paying for independent scaling.",
+        },
       },
     },
     {
@@ -123,7 +149,7 @@ export const PROXIMITY_SERVICE: Diagram = {
           pick: "Geohash, compared on the shorter cell dimension",
           instead: "S2 cells on a Hilbert curve, or H3 hexagons.",
           decider:
-            "For a static catalogue all three answer the same question and the choice barely moves the design, which is worth saying out loud because candidates burn ten minutes here. Geohash string prefixes drop into any store; the cost is 2:1 cells at even lengths and distortion near the poles, both handled in this one stage.",
+            "For a static catalogue all three answer the same question and the choice barely moves the design, though teams routinely spend disproportionate time debating it anyway. Geohash string prefixes drop into any store; the cost is 2:1 cells at even lengths and distortion near the poles, both handled in this one stage.",
           flips:
             "S2 when you need hierarchical roll-ups across a genuinely global surface with sane polar behaviour, H3 when cells are demand buckets for moving entities and expanding by k rings has to be a uniform operation across all six neighbours.",
         },
@@ -131,7 +157,7 @@ export const PROXIMITY_SERVICE: Diagram = {
     },
     {
       id: "scan",
-      label: "Candidate scan",
+      label: "Block scan",
       sub: "bitmask + hours in the scan",
       kind: "process",
       col: 1,
@@ -149,11 +175,11 @@ export const PROXIMITY_SERVICE: Diagram = {
           "Only attributes that live in the 48-byte entry can be filtered here. The bitmask holds 64 category bits and the hours bitmap is a coarse approximation; a filter that does not fit forces either a wider entry across 200M rows or a post-scan fetch, which reintroduces the 100x hydration cost this design exists to avoid.",
         choice: {
           pick: "Filter and rank inside the scan over self-contained entries",
-          instead: "An index of business ids only: fetch every candidate, then filter and rank.",
+          instead: "An index of business ids only: fetch every match, then filter and rank.",
           decider:
-            "Candidates per query times backend QPS. Filtering first is 120k x 20 = 2.4M card reads/s; hydrating first is 120k x 2,000 mean candidates = 240M reads/s, 100x more, and a single Midtown query moves 22,000 x 2KB = 44MB. Break-even sits near 20 candidates, roughly a 200m radius in a suburb.",
+            "Matches per query times backend QPS. Filtering first is 120k x 20 = 2.4M card reads/s; hydrating first is 120k x 2,000 mean matches = 240M reads/s, 100x more, and a single Midtown query moves 22,000 x 2KB = 44MB. Break-even sits near 20 matches, roughly a 200m radius in a suburb.",
           flips:
-            "When candidates are naturally few, meaning a hard sub-500m radius cap in one non-dense market, or when the filter set changes faster than you can rebuild, since denormalising a user-generated tag means a 10GB rebuild per tag.",
+            "When matches are naturally few, meaning a hard sub-500m radius cap in one non-dense market, or when the filter set changes faster than you can rebuild, since denormalising a user-generated tag means a 10GB rebuild per tag.",
         },
       },
     },
@@ -191,17 +217,17 @@ export const PROXIMITY_SERVICE: Diagram = {
       parent: "serving-node",
       detail: {
         what: "A packed, read-only array of 48-byte entries sorted by cell id: business id, coordinates, cell id, category bitmask, rating, popularity and an open-hours bitmap, memory-mapped from local disk.",
-        why: "It is drawn as a cache rather than a store because losing it costs nothing but a warm-up: the catalogue is the record and this file is derived from it, checksummed and re-downloadable. Everything needed to filter and rank lives here, which is why hydration is 20 rows rather than 22,000, and being an immutable sorted array rather than a mutable structure is what makes a probe an array offset instead of a tree walk.",
-        numbers: ["200M x 48B = ~10GB", "15 range probes per query", "candidates 20 to 22,000, a 1000x spread"],
+        why: "It is a cache rather than a store because losing it costs nothing but a warm-up: the catalogue is the record and this file is derived from it, checksummed and re-downloadable. Everything needed to filter and rank lives here, which is why hydration is 20 rows rather than 22,000, and being an immutable sorted array rather than a mutable structure is what makes a probe an array offset instead of a tree walk.",
+        numbers: ["200M x 48B = ~10GB", "15 range probes per query", "matches 20 to 22,000, a 1000x spread"],
         breaks:
           "Denormalised attributes drift. Rating and popularity change continuously in the catalogue, so between builds the index ranks on stale values, and those are exactly the fields that actually move. They are rebuilt on a faster cadence than the geometry for that reason.",
         choice: {
-          pick: "A uniform cell grid at three precision tiers, with a per-cell candidate cap as a backstop",
-          instead: "Adaptive subdivision: a quadtree whose leaves hold at most k places, bounding candidates by construction.",
+          pick: "A uniform cell grid at three precision tiers, with a per-cell match cap as a backstop",
+          instead: "Adaptive subdivision: a quadtree whose leaves hold at most k places, bounding matches by construction.",
           decider:
-            "The cost of a single candidate, not the number of them. Both pay the same boundary tax. The grid's candidate count spans 20 to 22,000, but a packed 48-byte entry tests in ~5ns so p99 scan is 110µs against a 200ms budget, 0.06%. A 1000x spread on a term worth 0.06% is not worth a tree.",
+            "The cost of a single match, not the number of them. Both pay the same boundary tax. The grid's match count spans 20 to 22,000, but a packed 48-byte entry tests in ~5ns so p99 scan is 110µs against a 200ms budget, 0.06%. A 1000x spread on a term worth 0.06% is not worth a tree.",
           flips:
-            "When a candidate costs a row read rather than an array probe, since 22,000 reads at 10µs is 220ms on its own. Also when radius is absent so precision cannot be bucketed and you need a real k-nearest-neighbour walk, or when the cap is measurably dropping wanted results.",
+            "When a match costs a row read rather than an array probe, since 22,000 reads at 10µs is 220ms on its own. Also when radius is absent so precision cannot be bucketed and you need a real k-nearest-neighbour walk, or when the cap is measurably dropping wanted results.",
         },
       },
     },
@@ -216,7 +242,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "A per-node in-memory hash map of business id to new cell id for coordinate changes since the last build, plus a tombstone set filtered during the scan. Rebuilt by replaying the stream, never persisted.",
         why: "It is what makes an immutable artifact acceptable. Without it, freshness for a moved or deleted business is a whole build cycle, and you would be tempted into a live index for a write rate of 0.6/s.",
-        numbers: ["~50k coordinate changes/day", "0.6 writes/s", "consulted on every candidate"],
+        numbers: ["~50k coordinate changes/day", "0.6 writes/s", "consulted once per match"],
         breaks:
           "It grows until the next build lands, so a stalled build turns a trivial map into an unbounded one. Overlay size is the leading indicator that index freshness lag is about to become a real problem. A business that moved also has to be suppressed at its old cell as well as added at its new one, or it appears twice in one result set.",
         choice: {
@@ -289,7 +315,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "Object storage holding each build as an immutable versioned file: the 10GB index artifact and the 60GB card set, with the previous version retained and distributed to every region.",
         why: "It is what makes the index a release rather than a write. Regions pull a file instead of talking to a central index tier, so there is no cross-region index traffic and a node recovering is a copy from local disk or the bucket, not a rebuild. Rollback needs the previous artifact to already exist somewhere durable.",
-        numbers: ["10GB index + 60GB cards per build cycle", "N-1 versions retained", "distribution is bandwidth-cheap, it does not scale with traffic"],
+        numbers: ["10GB index + 60GB cards per build cycle", "N-1 versions retained", "1 file pulled per node, not per request"],
         breaks:
           "If distribution stalls, nodes serve whatever they already have and nothing looks broken: search still answers, just from a stale world. Artifact age across the fleet has to be a monitored number rather than an assumption.",
         choice: {
@@ -312,7 +338,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "The ordered log of catalogue changes that matter between builds: coordinate moves and deletions fanned out to every serving node's overlay, and cell-prefix invalidation messages fanned out to the result cache.",
         why: "It exists because two different derived stores have to hear about the same edit and neither can poll 200M rows. It is also the only place bulk edits can be rate-limited: a chain updating 3,000 locations is one producer, and throttling it here is what stops it becoming a cache-wide event.",
-        numbers: ["50k of 10M daily edits carry a coordinate", "0.6/s against 60k reads/s", "fan-out to every serving node"],
+        numbers: ["50k of 10M daily edits carry a coordinate", "0.6/s against 60k reads/s", "1 broadcast stream reaches every serving node"],
         breaks:
           "If the stream stalls, the overlay silently stops growing and search keeps returning confidently stale locations, with no error anywhere. Overlay size and stream lag are monitored as freshness indicators rather than assumed healthy.",
         choice: {
@@ -334,7 +360,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "The offline pipeline that turns the catalogue into a released artifact: map and sort, then validate against the outgoing version, then promote by canary.",
         why: "Because the entities are static, the index is a file you release rather than a structure you mutate, and a release has stages a write does not: you can replay a recorded query corpus against two versions and compare result sets before anyone sees the new one. The three stages are one job on one schedule, which is why they are one deployable rather than three.",
-        numbers: ["build is 5 to 10 minutes on a modest cluster", "one scheduled run, plus on demand", "rebuild is an ordinary response, not an incident"],
+        numbers: ["build is 5 to 10 minutes on a modest cluster", "one scheduled run, plus on demand", "an ordinary response: same 5 to 10 min as any build"],
         breaks:
           "It is a batch job on a schedule, so its failure is silent by construction: nothing on the read path degrades, the fleet just keeps serving the previous artifact while the overlay grows underneath it.",
         choice: {
@@ -358,7 +384,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "Promotion: publish the validated artifact, have one canary node memory-map it, warm it and flip its pointer, diff its live results against the outgoing version, then roll the fleet.",
         why: "Validation catches an artifact that is wrong on its own terms; only live traffic catches one that is wrong in a way the corpus did not cover. The flip is a pointer rather than a restart because the previous mapping has to stay resident for the rollback to be seconds.",
-        numbers: ["one canary node first", "previous artifact stays resident on disk", "rollback is a pointer flip"],
+        numbers: ["one canary node first", "1 previous artifact stays resident on disk", "rollback: 1 pointer flip"],
         breaks:
           "The fleet is briefly mixed during a roll, so two users in the same cell can get different results for a few minutes. Fine for a business catalogue, not fine for anything with a consistency requirement.",
         choice: {
@@ -382,7 +408,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "The gate: entry-count and per-region checksums against the previous artifact, then a replay of a recorded query corpus against both versions with the result sets compared within tolerance.",
         why: "A truncated artifact from a half-failed build looks exactly like a valid one, and there is no runtime error to catch it: the file opens, the probes work, the results are just missing. Comparing against the outgoing version is the only signal that exists.",
-        numbers: ["refuse promotion if entry count moves more than 1%", "recorded query corpus replayed against both versions"],
+        numbers: ["refuse promotion if entry count moves more than 1%", "corpus replayed, 2 result sets compared within tolerance"],
         breaks:
           "It is a diff against yesterday, so it cannot catch an error that has been present in every build. A genuine 2% catalogue growth also trips it, which is deliberate: the band needs a human, not an override.",
       },
@@ -397,7 +423,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       parent: "index-build",
       detail: {
         what: "A map over the whole catalogue producing one packed 48-byte entry per place, sorted by cell id, plus the 300B display projection for the card set in the same pass.",
-        why: "Both derived stores come out of one pass so they cannot disagree about which places exist: a card missing for an id the index still returns is a partially rendered result. Sorting by cell id is what makes a cell a contiguous range and therefore a probe rather than a seek per candidate.",
+        why: "Both derived stores come out of one pass so they cannot disagree about which places exist: a card missing for an id the index still returns is a partially rendered result. Sorting by cell id is what makes a cell a contiguous range and therefore a probe rather than a seek per match.",
         numbers: ["400GB mapped, 10GB sorted, 60GB of cards", "5 to 10 minutes"],
         breaks:
           "Rebuild time is the floor on how fast a bad coordinate can be removed from search, so it is a latency number rather than a batch-job detail. Ten minutes is what makes rebuild an ordinary response instead of an outage.",
@@ -420,7 +446,7 @@ export const PROXIMITY_SERVICE: Diagram = {
           pick: "Keep the transactional store off the search path entirely",
           instead: "Push the geometry into the store that already holds the rows and answer search there with a bounding-box index.",
           decider:
-            "What a candidate costs when the index and the store are the same system. A row read is ~10µs, so 22,000 candidates is 220ms and blows a 200ms budget before ranking, and per-node throughput drops by roughly an order of magnitude.",
+            "What a match costs when the index and the store are the same system. A row read is ~10µs, so 22,000 matches is 220ms and blows a 200ms budget before ranking, and per-node throughput drops by roughly an order of magnitude.",
           flips:
             "Polygon and drive-time queries, which radius search cannot express at all. Those route to this store's bounding-box index instead, at maybe thousands of QPS per node, which is fine because they are operator-facing and rare.",
         },
@@ -443,7 +469,7 @@ export const PROXIMITY_SERVICE: Diagram = {
           pick: "Validate and quarantine coordinates at write time",
           instead: "Accept anything and filter suspect entries during the build or at query time.",
           decider:
-            "Where the cost lands. Rejecting at write is one bounds check on 120 writes/s; filtering at build is a rule applied to 200M rows every cycle, and filtering at query time is per-candidate work on a path budgeted at 5ns. The asymmetry is 120/s against 2.4M/s.",
+            "Where the cost lands. Rejecting at write is one bounds check on 120 writes/s; filtering at build is a rule applied to 200M rows every cycle, and filtering at query time is per-match work on a path budgeted at 5ns. The asymmetry is 120/s against 2.4M/s.",
           flips:
             "Bulk imports from a partner feed, where rejecting a row at write means rejecting the whole file, and quarantine plus reconciliation is the only workable shape.",
         },
@@ -459,7 +485,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       tier: "hot",
       detail: {
         what: "The search request: a point, a radius in kilometres, an optional category and an open-now flag.",
-        why: "Everything about the cost of this query is decided by two of these fields. The point selects the cell and the radius selects the precision tier, which together fix how many candidates the scan will touch.",
+        why: "Everything about the cost of this query is decided by two of these fields. The point selects the cell and the radius selects the precision tier, which together fix how many matches the scan will touch.",
         numbers: ["5B searches/day", "60k/s average, 300k/s peak"],
         breaks:
           "The radius arrives untrusted. One client asking for 50km in a dense metro is 15.7M entries scanned, so validation here is a capacity control rather than input hygiene.",
@@ -488,7 +514,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "The 40% of queries the cache did not answer, carrying a clamped radius and a validated point, handed to the next stage in the same process.",
         why: "The radius is already bucketed by the time it gets here, so the planner only has to map a bucket to a precision tier rather than reason about arbitrary values. That is what keeps three tiers sufficient.",
-        numbers: ["300k/s peak x (1 - 0.6) = ~120k/s", "a function call, not a hop"],
+        numbers: ["300k/s peak x (1 - 0.6) = ~120k/s", "0 network hops: a function call"],
         breaks:
           "If the cache hit rate collapses, for example after a bulk edit triggers cell-prefix invalidation, this arrow instantly carries 300k/s and the index tier is sized for 120k/s.",
       },
@@ -516,7 +542,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "Entries that passed the category bitmask and the open-hours test, handed to the exact distance pass.",
         why: "The cheap approximate phase has already discarded about 98% of the block, so the expensive exact test runs over hundreds rather than tens of thousands. That ratio is what makes a two-phase filter worth building at all.",
-        numbers: ["22,000 candidates in, ~330 out", "~90 of those inside 1km"],
+        numbers: ["22,000 matches in, ~330 out", "~90 of those inside 1km"],
         breaks:
           "Anything the bitmask cannot express leaks past this arrow and has to be evaluated on a hydrated record, which is exactly the 100x cost the design is built to avoid.",
       },
@@ -529,7 +555,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       label: "15 range probes",
       detail: {
         what: "Fifteen range reads into the sorted packed array, one per cell id in the block, returning every entry filed under those cells.",
-        why: "Entries are sorted by cell id, so a cell is a contiguous range rather than a scattered set of rows, and the mapping is local, so this is a memory walk rather than a network call. Both properties are why a candidate costs 5ns.",
+        why: "Entries are sorted by cell id, so a cell is a contiguous range rather than a scattered set of rows, and the mapping is local, so this is a memory walk rather than a network call. Both properties are why a match costs 5ns.",
         numbers: ["p99 ~22,000 entries returned", "48B each, ~5ns to test", "110µs at p99, 8.5µs at the median"],
         breaks:
           "The first probe after a promotion touches cold pages, so a freshly flipped node runs slow until the mapping is warm. Warming before the flip is part of promotion for that reason.",
@@ -545,8 +571,8 @@ export const PROXIMITY_SERVICE: Diagram = {
       label: "moves + tombstones",
       detail: {
         what: "The overlay consulted alongside the artifact: businesses whose coordinates changed since the build, and deletions filtered out during the scan.",
-        why: "It is what stops index freshness being a whole build cycle. At 0.6 coordinate writes a second the correction set is tiny, so correctness costs a hash probe per candidate rather than a different architecture.",
-        numbers: ["~50k entries", "checked per candidate"],
+        why: "It is what stops index freshness being a whole build cycle. At 0.6 coordinate writes a second the correction set is tiny, so correctness costs a hash probe per match rather than a different architecture.",
+        numbers: ["~50k entries", "checked once per match"],
         breaks:
           "A business that moved has to be suppressed at its old cell as well as added at its new one, or the same place appears twice in one result set.",
       },
@@ -588,7 +614,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "A node pulling the current artifact version to local disk, memory-mapping it, warming it and flipping its pointer to the new mapping.",
         why: "This is the only way new geometry reaches a serving node, and it is a file operation rather than a write, which is what makes rollback a pointer flip back to a mapping that is still open.",
-        numbers: ["10GB per version", "previous mapping stays resident", "flip is atomic per node"],
+        numbers: ["10GB per version", "1 previous mapping stays resident", "flip touches 1 pointer per node, atomically"],
         breaks:
           "The artifact is global, so a bad version promoted here is a global search outage rather than a partial one. Nothing downstream of this arrow can detect that the geometry is wrong, only that it changed.",
       },
@@ -602,7 +628,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "The display projection from the same build pass, 60GB of 300-byte cards loaded across the in-memory shards.",
         why: "Both derived stores come out of one pass over the catalogue so they cannot disagree about which places exist. A card missing for an id the index still returns is a partially rendered result.",
-        numbers: ["200M x 300B = ~60GB", "distributed per build cycle"],
+        numbers: ["200M x 300B = ~60GB", "redistributed once per build cycle"],
         breaks:
           "Cards and index entries land independently, so an id in the new artifact may have no card yet. The result degrades to name and rating rather than failing, which is why hydration has a fallback at all.",
       },
@@ -630,7 +656,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "Best-effort invalidation: an edit is translated into the cell prefixes whose cached pages might contain it, and those keys are dropped.",
         why: "The key includes category, radius bucket and page, so one business edit touches an unbounded set of keys that cannot be enumerated. Prefix invalidation is the only tractable approximation, and it is an optimisation on top of the TTL rather than the mechanism.",
-        numbers: ["60s TTL is the real mechanism", "bulk edits rate-limited into this path"],
+        numbers: ["60s TTL is the real mechanism", "bulk edits (e.g. 3,000-location chains) rate-limited into this path"],
         breaks:
           "It over-invalidates badly. A chain updating hours across 3,000 locations wipes the hot cells in every major metro at once, the blended hit rate falls from 60% toward zero for the 60 seconds it takes to refill, and backend QPS triples at the worst possible moment.",
       },
@@ -644,7 +670,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "The validated build published as a new immutable version, with the previous version retained for rollback.",
         why: "Publishing and promoting are the same step only because the artifact is immutable: nodes discover the new version and flip on their own schedule, so a roll is a property of the fleet rather than a coordinated event.",
-        numbers: ["N-1 versions retained", "rollback is a pointer flip, not a rebuild"],
+        numbers: ["N-1 versions retained", "rollback: 1 pointer flip, not a 5 to 10 min rebuild"],
         breaks:
           "A publish that succeeds but distributes slowly leaves the fleet mixed for longer than the canary window assumed, so artifact age across the fleet is the metric, not publish success.",
       },
@@ -684,9 +710,9 @@ export const PROXIMITY_SERVICE: Diagram = {
       tier: "data",
       label: "10GB sorted by cell id",
       detail: {
-        what: "The candidate artifact handed to validation before anything is published.",
+        what: "The freshly built artifact handed to validation before anything is published.",
         why: "Nothing between here and the fleet can tell a truncated artifact from a valid one, so this is the last point where the previous version is still available for comparison.",
-        numbers: ["10GB index, 60GB cards", "compared against the outgoing version"],
+        numbers: ["10GB index, 60GB cards", "diffed against 1 prior version before publish"],
         breaks:
           "A half-failed build produces a file that opens and probes correctly and is simply missing places. The failure is silent by construction, which is why the next stage is a diff rather than a health check.",
       },
@@ -700,7 +726,7 @@ export const PROXIMITY_SERVICE: Diagram = {
       detail: {
         what: "The gate's verdict: entry count within 1% of the previous artifact, per-region checksums sane, and the recorded query corpus returning matching result sets within tolerance.",
         why: "Promotion is the irreversible-ish step, so everything that can be checked offline is checked before it. The band is deliberately tight enough to trip on real growth, because a human confirming 2% is cheaper than a global outage.",
-        numbers: ["refuse promotion outside a 1% entry-count band", "corpus replayed against both versions"],
+        numbers: ["refuse promotion outside a 1% entry-count band", "2 result sets compared within tolerance"],
         breaks:
           "It compares against yesterday, so an error present in every build passes every time. The canary diff on live traffic is the second net, and neither catches a systematic bug in the encoder.",
       },

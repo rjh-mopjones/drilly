@@ -10,12 +10,30 @@ export const ZOOM: Diagram = {
     shape:
       "Two planes that share nothing: a tiny stateful WebSocket carrying join, mute and layout, and a UDP media path to a relay that forwards already-encoded video and never decodes a pixel.",
     beats: [
-      "Split the planes before anyone asks why. Signalling is stateful, must not lose a message, and a 200ms delay on a mute event is invisible. Media tolerates nothing, drops rather than retries, and is two orders of magnitude larger in every dimension, so the two fleets are sized independently.",
-      "The topology falls out of uplink arithmetic in fifteen seconds. Mesh costs (N-1) x 1.5 Mbps up for a single 720p encode against a flat 2.5 Mbps to a relay, so the crossover is at three participants and by five mesh needs 6 Mbps up. Total flows are N(N-1), so eight people is 56 streams and seven encoder instances per client.",
-      "The sender publishes three times at once, 180p at 200 kbps, 480p at 800 kbps and 720p at 1.5 Mbps, and the relay picks which already-encoded version each receiver gets. That costs the sender 1.67x upload and buys a relay that never transcodes: roughly a tenth of a core per meeting instead of a core per composited output.",
-      "The picking is a control loop, not a setting. Receivers report per-packet arrival times, bandwidth is estimated from the delay trend rather than from loss, and every 100 to 500ms the relay solves a small knapsack per receiver: audio first at 150 kbps, then layers up to about 90 percent of the estimate.",
-      "Repair races the playout deadline and loses gracefully. Under about 30ms RTT a retransmit lands inside the 50 to 100ms jitter buffer and is free; beyond about 70ms it arrives after the frame was due, so you pay 20 to 30 percent forward error correction instead. Playout is never delayed to wait for a fix.",
-      "Scale is regional relays cascading over the backbone so every participant pays a short first mile, plus a compositing mixer hung off to one side for the legs that can only accept one stream: dial-in, room systems, and a view-only audience handed to a CDN.",
+      {
+        text: "Split the planes from the start. Signalling is stateful, must not lose a message, and a 200ms delay on a mute event is invisible. Media tolerates nothing, drops rather than retries, and is two orders of magnitude larger in every dimension, so the two fleets are sized independently.",
+        lights: ["signalling", "publisher", "sfu", "e-ws", "e-pub"],
+      },
+      {
+        text: "The topology falls out of uplink arithmetic. Mesh costs (N-1) x 1.5 Mbps up for a single 720p encode against a flat 2.5 Mbps to a relay, so the crossover is at three participants and by five mesh needs 6 Mbps up. Total flows are N(N-1), so eight people is 56 streams and seven encoder instances per client.",
+        lights: ["sfu"],
+      },
+      {
+        text: "The sender publishes three times at once, 180p at 200 kbps, 480p at 800 kbps and 720p at 1.5 Mbps, and the relay picks which already-encoded version each receiver gets. That costs the sender 1.67x upload and buys a relay that never transcodes: roughly a tenth of a core per meeting instead of a core per composited output.",
+        lights: ["publisher", "sfu", "e-pub", "e-egress"],
+      },
+      {
+        text: "The picking is a control loop, not a setting. Receivers report per-packet arrival times, bandwidth is estimated from the delay trend rather than from loss, and every 100 to 500ms the relay solves a small knapsack per receiver: audio first at 150 kbps, then layers up to about 90 percent of the estimate.",
+        lights: ["allocator", "jitter", "receiver", "e-twcc", "e-hint", "e-decide"],
+      },
+      {
+        text: "Repair races the playout deadline and loses gracefully. Under about 30ms RTT a retransmit lands inside the 50 to 100ms jitter buffer and is free; beyond about 70ms it arrives after the frame was due, so you pay 20 to 30 percent forward error correction instead. Playout is never delayed to wait for a fix.",
+        lights: ["jitter", "e-play"],
+      },
+      {
+        text: "Scale is regional relays cascading over the backbone so every participant pays a short first mile, plus a compositing mixer hung off to one side for the legs that can only accept one stream: dial-in, room systems, and a view-only audience handed to a CDN.",
+        lights: ["cascade", "mcu", "cdn", "e-cascade", "e-mcu", "e-cdn"],
+      },
     ],
     crux:
       "Late media is useless media, so the design triages instead of delivering. Every frame has a playout deadline and one that misses it is not late data but wrong data, which means the interesting question is what you give up first, per receiver, and how fast the loop notices. Bring durability instincts here and you build a system that freezes instead of blurring.",
@@ -89,7 +107,7 @@ export const ZOOM: Diagram = {
       row: 1,
       detail: {
         what: "The control loop that answers one question per sender-receiver pair, over and over: which of this sender's three layers do I forward to this receiver right now, or none at all.",
-        why: "A receiver with 3 Mbps down in a nine-person call cannot take eight 720p streams, which would be 12 Mbps. So the budget is spent rather than filled: audio is allocated first and is never a candidate for sacrifice, then video layers are chosen to maximise a weighted quality score under the estimate.",
+        why: "A receiver with 3 Mbps down in a nine-person call cannot take eight 720p streams, which would be 12 Mbps. So the budget is spent rather than filled: audio is allocated first and is never sacrificed, then video layers are chosen to maximise a weighted quality score under the estimate.",
         numbers: [
           "re-solved every 100 to 500ms, capped at ~90% of the estimate",
           "three concurrent speakers at 50 kbps is 150 kbps, ~5% of the budget",
@@ -130,7 +148,7 @@ export const ZOOM: Diagram = {
           pick: "UDP with an adaptive buffer: retransmit inside the deadline, FEC beyond it",
           instead: "A reliable ordered transport for media, TCP or a QUIC stream, so nothing is ever lost.",
           decider:
-            "Head-of-line blocking against the deadline. One lost packet on a 140ms path freezes the picture for 280ms while it is repaired, and the frames queued behind it then arrive as a burst the buffer has to absorb or discard anyway. The rule is retransmit while RTT is under about half the buffer and FEC beyond it, and reliable delivery at no RTT at all.",
+            "Head-of-line blocking against the deadline. One lost packet on a 140ms path freezes the video for 280ms while it is repaired, and the frames queued behind it then arrive as a burst the buffer has to absorb or discard anyway. The rule is retransmit while RTT is under about half the buffer and FEC beyond it, and reliable delivery at no RTT at all.",
           flips:
             "Content with no expiry. Screen share of a static slide runs a longer buffer and near-unlimited retransmit, because a corrupted region persists until the next keyframe and a reader would rather wait 200ms than squint at a smeared slide.",
         },
@@ -206,7 +224,7 @@ export const ZOOM: Diagram = {
           "~2 min for a full regional signalling failover",
         ],
         breaks:
-          "Nothing here constrains anything, which makes it the easiest place in this design to waste interview time. The failure that matters is availability during a join storm, not capacity.",
+          "Nothing here constrains anything else in the design. The failure that matters is availability during a join storm, not capacity.",
         choice: {
           pick: "A wide-column store keyed by meeting_id",
           instead: "PostgreSQL.",
@@ -229,7 +247,7 @@ export const ZOOM: Diagram = {
         why: "Every participant should pay a short first mile, because the last mile is the expensive part and the part nobody controls. Cascading trades one provisioned backbone hop for the transatlantic leg that half the call would otherwise pay on every single packet.",
         numbers: [
           "adds 30 to 50ms transatlantic",
-          "cascade root chosen on median participant latency",
+          "cascade root recomputed if median participant latency shifts by more than 20ms",
           "~10 to 25 Tbps per major region out of ~75 Tbps across the fleet",
         ],
         breaks:
@@ -391,7 +409,7 @@ export const ZOOM: Diagram = {
       detail: {
         what: "The control plane picking the nearest healthy relay for a joining client and issuing a short-lived meeting token bound to that invitee.",
         why: "Allocation deliberately happens after authorisation and after the waiting room, so a join storm consumes signalling capacity and never causes a relay to be allocated. It is also where anycast routing sends a client to a different region during an outage.",
-        numbers: ["99.9% of media planes established within 3s of join", "JWTs short-lived and cached at the signalling edge"],
+        numbers: ["99.9% of media planes established within 3s of join", "JWTs valid under 60s, cached at the signalling edge"],
         breaks:
           "If token validation degrades under a join storm the whole meeting fails to start, which is why the auth 5xx rate is a paging signal and the rate limits sit in front of it.",
       },
@@ -412,7 +430,7 @@ export const ZOOM: Diagram = {
           "first mile 10 to 30ms, relay hop adds 15 to 40ms",
         ],
         breaks:
-          "Symmetric NAT and corporate firewalls that block UDP fail every candidate pair, falling back to TURN and sometimes TCP on 443. This leg is also the sender's own uplink, so congestion here degrades that participant for everybody at once.",
+          "Symmetric NAT and corporate firewalls that block UDP fail every path ICE tries to pair, falling back to TURN and sometimes TCP on 443. This leg is also the sender's own uplink, so congestion here degrades that participant for everybody at once.",
       },
     },
     {
@@ -480,7 +498,7 @@ export const ZOOM: Diagram = {
       detail: {
         what: "The selection itself: for each sender-receiver pair, the target layer the forwarding loop should match packets against.",
         why: "This is the one decision in the media path and everything else is plumbing around it. Making it per receiver is what stops one participant's bad wifi from being visible to anybody else on the call.",
-        numbers: ["re-solved every 100 to 500ms", "sum of chosen layers held under ~90% of the estimate", "audio allocated first, never sacrificed"],
+        numbers: ["re-solved every 100 to 500ms", "sum of chosen layers held under ~90% of the estimate", "audio allocated first at a fixed 50 kbps, never sacrificed"],
         breaks:
           "The degradation ladder has to be ordered and reversible: top layer off the least important tiles, then everyone but the speaker to 180p, then pause non-speakers, then audio only at ~50 kbps with in-band redundancy.",
       },
@@ -508,7 +526,7 @@ export const ZOOM: Diagram = {
       detail: {
         what: "Relay-to-relay forwarding of every stream a participant in the other region has subscribed to, over dedicated backbone capacity.",
         why: "It keeps each participant's first mile local, which is the leg that actually costs latency and that nobody can provision. The inter-relay link is the one hop we own end to end, so it is optimised separately with FEC applied up front.",
-        numbers: ["adds 30 to 50ms transatlantic", "per-hop retransmit budgets to cap NACK amplification"],
+        numbers: ["adds 30 to 50ms transatlantic", "retransmit budget capped per hop at 2 retries, not end to end"],
         breaks:
           "A flapping backbone link makes the cascade root see a flood of NACKs from every downstream bridge at once, which is why retransmit budgets are per hop rather than end to end.",
       },

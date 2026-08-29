@@ -8,14 +8,32 @@ export const INSTAGRAM: Diagram = {
   itemId: 27,
   overview: {
     shape:
-      "Two paths that meet at a URL and nowhere else: 2MB of pixels travel down the left through a pre-signed PUT, a transcode ladder and a CDN, while a kilobyte of metadata travels down the right through the post row, fan-out and the feed, and the API tier never touches a byte in either direction.",
+      "Two paths that meet at a URL and nowhere else: megabytes of pixels move through a pre-signed PUT, a transcode ladder and a CDN, while kilobytes of metadata move through the post row, fan-out and the feed, and the API tier never touches a byte in either direction.",
     beats: [
-      "Upload bypasses the application tier entirely. The client asks the API for a pre-signed PUT, the API mints a post_id and writes a row with status=processing, and the phone uploads straight to object storage. At 1.2k posts/s and 2MB each, proxying instead would push 2.4GB/s of pass-through traffic across a fleet sized for JSON request handling.",
-      "The landed object raises an event onto a durable queue and a worker pool consumes it, decodes the source once (HEIC, JPEG, PNG) and encodes a fixed four-rung ladder in parallel: 100px thumbnail at ~10KB, 480px at ~80KB, 1080px at ~300KB and a re-encoded full size at ~2MB, each in AVIF and WebP with a JPEG fallback.",
-      "Pre-encoding at upload rather than resizing on request is the central efficiency decision, and the total is not what settles it. Pre-encoding is ~2 CPU-seconds per post, about 2,300 cores continuous, spent in a background queue where a 5 second p95 is invisible. On-demand at a 95% hit ratio and 600k peak feed loads is ~4,500 cores sitting between a user and an image.",
-      "Async generation forces the rest of the design. The post row exists before its bytes are servable, so status is load-bearing: the post is hidden from every feed, grid and search result until it flips to ready, fan-out fires on post_ready rather than on insert, and the author gets a synchronously generated thumbnail so a creator never thinks the upload failed.",
-      "On read the feed response is a few kilobytes of JSON carrying CDN URLs and dimensions, never image data, and the client picks the rung that fits its viewport and its network. Fan-out itself is the news feed answer and question 8 is the deep treatment; here it is one component that moves 8-byte post ids and never sees a pixel.",
-      "Delivery is a cache hit in the viewer's city. URLs are content-addressed per rung and immutable with a one year max-age, which is what makes a >95% hit ratio reachable and holds origin egress to ~72Gbps. It is also the direct cause of the deletion problem: an edge purge across hundreds of POPs is best effort by construction.",
+      {
+        text: "Upload bypasses the application tier entirely. The client asks the API for a pre-signed PUT, the API mints a post_id and writes a row with status=processing, and the phone uploads straight to object storage. At 1.2k posts/s and 2MB each, proxying instead would push 2.4GB/s of pass-through traffic across a fleet sized for JSON request handling.",
+        lights: ["client-upload", "api", "raw-store", "posts-db", "e1", "e2", "e3"],
+      },
+      {
+        text: "The landed object raises an event onto a durable queue and a worker pool consumes it, decodes the source once (HEIC, JPEG, PNG) and encodes a fixed four-rung ladder in parallel: 100px thumbnail at ~10KB, 480px at ~80KB, 1080px at ~300KB and a re-encoded full size at ~2MB, each in AVIF and WebP with a JPEG fallback.",
+        lights: ["queue", "workers", "variant-store", "e4", "e5", "e7"],
+      },
+      {
+        text: "Pre-encoding at upload rather than resizing on request is the central efficiency decision, and the total is not what settles it. Pre-encoding is ~2 CPU-seconds per post, about 2,300 cores continuous, spent in a background queue where a 5 second p95 is invisible. On-demand at a 95% hit ratio and 600k peak feed loads is ~4,500 cores sitting between a user and an image.",
+        lights: ["workers"],
+      },
+      {
+        text: "Async generation forces the rest of the design. The post row exists before its bytes are servable, so status is load-bearing: the post is hidden from every feed, grid and search result until it flips to ready, fan-out fires on post_ready rather than on insert, and the author gets a synchronously generated thumbnail so a creator never thinks the upload failed.",
+        lights: ["posts-db", "workers", "fanout", "e8", "e11"],
+      },
+      {
+        text: "On read the feed response is a few kilobytes of JSON carrying CDN URLs and dimensions, never image data, and the client picks the rung that fits its viewport and its network. Fan-out itself is a news feed distribution question in its own right; here it is one component that moves 8-byte post ids and never sees a pixel.",
+        lights: ["fanout", "hydrator", "client-feed", "e12", "e14"],
+      },
+      {
+        text: "Delivery is a cache hit in the viewer's city. URLs are content-addressed per rung and immutable with a one year max-age, which is what makes a >95% hit ratio reachable and holds origin egress to ~72Gbps. It is also the direct cause of the deletion problem: an edge purge across hundreds of POPs is best effort by construction.",
+        lights: ["cdn", "e9", "e10"],
+      },
     ],
     crux:
       "Immutability is what buys the hit ratio and it is what makes deletion impossible to do properly. A one year max-age on an unguessable path is the reason 95% of 600k feed loads per second never reach origin, and it is the reason a deleted post's bytes remain fetchable from an edge for minutes to hours by anyone holding the URL. Every clean fix breaks the thing that pays for the system: short TTLs destroy the ratio, per-viewer signatures destroy shared cacheability, and an edge tombstone check makes media availability depend on metadata availability, which is the exact coupling the two-path split exists to avoid.",
@@ -36,8 +54,8 @@ export const INSTAGRAM: Diagram = {
       row: 0,
       detail: {
         what: "The posting phone. It asks for an upload URL, then PUTs the file itself, and shows an 'uploading' state until the variants exist.",
-        why: "The client is the only party holding the original bytes, and it is sitting on the worst network in the system. Making it talk to object storage directly means a slow mobile upload holds a storage connection open rather than an application thread that also runs auth and database calls.",
-        numbers: ["~2MB average post", "retries aggressively on flaky mobile networks"],
+        why: "The client is the only party holding the original bytes, and it is sitting on the worst network in the system. Making it talk to object storage directly means a slow mobile upload holds a storage connection open rather than an application thread that also runs auth and database calls. It also retries aggressively on flaky mobile networks.",
+        numbers: ["~2MB average post"],
         breaks:
           "Client retries are guaranteed, so every stage downstream has to be idempotent on the post_id the API minted or one upload becomes two posts.",
       },
@@ -189,13 +207,13 @@ export const INSTAGRAM: Diagram = {
       row: 0,
       detail: {
         what: "The post row: caption, location, hashtags, the media URL set per rung, and the status field that gates visibility.",
-        why: "Status is load-bearing because publishing is asynchronous. The row exists before the bytes are servable, so every surface filters on ready, and the transition is a compare-and-set so the second worker to finish is a no-op.",
-        numbers: ["~1KB per row", "100GB/day, ~300GB/day at RF=3", "CAS processing to ready"],
+        why: "Status is load-bearing because publishing is asynchronous. The row exists before the bytes are servable, so every surface filters on ready, and the transition from processing to ready is a compare-and-set so the second worker to finish is a no-op.",
+        numbers: ["~1KB per row", "100GB/day, ~300GB/day at RF=3"],
         breaks:
           "A hot post pulls millions of hydrate reads onto one row, which is why the assembled post card is cached for 60s at the API tier rather than read through.",
         choice: {
           pick: "A wide-column store partitioned by user_id",
-          instead: "A relational store with the media bytes in a BLOB column.",
+          instead: "A relational store with the media bytes in a blob column.",
           decider:
             "Write volume and access shape. 100M rows/day at ~1KB with reads that are single-partition profile scans and point lookups is exactly the wide-column case, and pre-sharding by user lets a hot partition split independently. Bytes never go here at all: 440TB/day belongs in object storage.",
           flips:
@@ -229,13 +247,13 @@ export const INSTAGRAM: Diagram = {
     {
       id: "fanout",
       label: "Fan-out + timelines",
-      sub: "hybrid push/pull, see #8",
+      sub: "hybrid push/pull",
       kind: "service",
       col: 1,
       row: 2,
       detail: {
         what: "The feed half, assumed rather than derived: push post ids into per-follower timeline caches, pull for high-follower accounts, merge at read.",
-        why: "It is here because publishing is not finished until followers can see the post, and it is one box because question 8 owns the push-versus-pull derivation in full. What matters at this scale is that it moves 8-byte ids and never touches a pixel.",
+        why: "It is here because publishing is not finished until followers can see the post, and it is one box because the push-versus-pull threshold is a feed-distribution question in its own right, orthogonal to media. What matters at this scale is that it moves 8-byte ids and never touches a pixel.",
         numbers: ["~500 candidate ids per user, 4KB each", "~2TB of timeline cache, ~4TB replicated"],
         breaks:
           "It must be triggered by post_ready and never by the insert, or followers receive timeline entries pointing at media that does not exist yet.",
@@ -243,7 +261,7 @@ export const INSTAGRAM: Diagram = {
           pick: "Hybrid fan-out on write for ordinary accounts, fan-in on read above the threshold",
           instead: "Pure fan-out on read for everyone, recomputing the timeline per request.",
           decider:
-            "Read amplification against write burst, and question 8 works the threshold properly. Here the relevant number is that a timeline entry is 8 bytes against a 2.4MB post, so distribution is three orders of magnitude cheaper than delivery and belongs on a completely different system.",
+            "Read amplification against write burst, weighed at the account's follower count where the two costs cross. Here the relevant number is that a timeline entry is 8 bytes against a 2.4MB post, so distribution is three orders of magnitude cheaper than delivery and belongs on a completely different system.",
           flips:
             "When the candidate set stops coming from the follow graph. A retrieval model over the whole corpus, as on TikTok, has no per-user timeline to materialise at all.",
         },
@@ -301,8 +319,8 @@ export const INSTAGRAM: Diagram = {
       id: "e1",
       from: "client-upload",
       to: "api",
+      tier: "control",
       label: "ask for a pre-signed URL",
-      dashed: true,
       detail: {
         what: "A metadata request returning a post_id and a scoped, time-limited PUT URL of a few hundred bytes.",
         why: "It is the only call the uploading client makes to the application tier. Everything after it is between the phone and object storage, which is what decouples API fleet size from media volume.",
@@ -315,8 +333,8 @@ export const INSTAGRAM: Diagram = {
       id: "e2",
       from: "api",
       to: "posts-db",
+      tier: "control",
       label: "row, status=processing",
-      dashed: true,
       detail: {
         what: "The post row written before a single byte has been uploaded, holding the minted post_id and a processing status.",
         why: "The id has to exist first because it is the key everything downstream is idempotent on: the object key, the variant keys and the status transition all derive from it.",
@@ -329,8 +347,8 @@ export const INSTAGRAM: Diagram = {
       id: "e3",
       from: "client-upload",
       to: "raw-store",
+      tier: "hot",
       label: "pre-signed PUT, ~2MB",
-      animated: true,
       detail: {
         what: "The phone uploading the original file straight to object storage, never through an application server.",
         why: "At 1.2k posts/s this is 2.4GB/s of traffic that would otherwise cross a fleet provisioned for CPU-bound request handling, while a slow mobile client holds a request thread open for tens of seconds.",
@@ -343,6 +361,7 @@ export const INSTAGRAM: Diagram = {
       id: "e4",
       from: "raw-store",
       to: "queue",
+      tier: "data",
       label: "ObjectCreated event",
       detail: {
         what: "The storage-side notification that a raw upload has landed, carrying the object key.",
@@ -355,12 +374,12 @@ export const INSTAGRAM: Diagram = {
       id: "e5",
       from: "queue",
       to: "workers",
+      tier: "hot",
       label: "one message per upload",
-      animated: true,
       detail: {
         what: "A worker leasing a transcode job off the queue.",
-        why: "The depth of this hop is the scaling signal for the whole pipeline, because per-host CPU on a saturated pool looks healthy while the backlog grows.",
-        numbers: ["autoscale adds capacity within 30s", "priority lane for established creators"],
+        why: "The depth of this hop is the scaling signal for the whole pipeline, because per-host CPU on a saturated pool looks healthy while the backlog grows. A priority lane keeps established creators' uploads moving ahead of a cold-start backlog during a spike.",
+        numbers: ["autoscale adds capacity within 30s"],
         breaks:
           "Under a global upload spike the queue grows faster than the pool drains it, and the fix that users actually feel is the synchronous thumbnail, not the extra capacity.",
       },
@@ -369,6 +388,7 @@ export const INSTAGRAM: Diagram = {
       id: "e6",
       from: "workers",
       to: "raw-store",
+      tier: "data",
       label: "fetch source bytes",
       offset: 60,
       detail: {
@@ -383,8 +403,8 @@ export const INSTAGRAM: Diagram = {
       id: "e7",
       from: "workers",
       to: "variant-store",
+      tier: "hot",
       label: "deterministic variant keys",
-      animated: true,
       detail: {
         what: "The four rungs written back at {post_id}/{rung}.{codec}, in AVIF and WebP with a JPEG fallback.",
         why: "Deterministic keys turn an at-least-once redelivery into an overwrite of identical bytes rather than a second copy, and per-rung keys let one rung be re-encoded or tiered without disturbing the others.",
@@ -397,8 +417,8 @@ export const INSTAGRAM: Diagram = {
       id: "e8",
       from: "workers",
       to: "posts-db",
+      tier: "control",
       label: "CAS to status=ready",
-      dashed: true,
       detail: {
         what: "The compare-and-set that flips the row from processing to ready once every required rung exists.",
         why: "This is the publish gate. It is the only moment the post becomes visible to feeds, grids and search, and making it a CAS is what makes a duplicate worker finish as a no-op.",
@@ -410,11 +430,12 @@ export const INSTAGRAM: Diagram = {
       id: "e9",
       from: "variant-store",
       to: "cdn",
+      tier: "data",
       label: "origin fill on miss",
       detail: {
         what: "The origin fetch a regional cache makes when it does not hold the requested rung, plus the pre-warm push for posts the ranker scores as rising.",
-        why: "Only 5% of requests get this far, and that number is the entire economics of the read path. Pre-warming small and medium to regional caches is what stops the first viewer in a new city paying a cross-ocean fetch.",
-        numbers: ["30k origin fetches/s at peak", "~72Gbps egress", "full resolution is never pre-warmed"],
+        why: "Only 5% of requests get this far, and that number is the entire economics of the read path. Pre-warming small and medium to regional caches is what stops the first viewer in a new city paying a cross-ocean fetch; full resolution is never pre-warmed because it is 85% of the bytes for the rarest request.",
+        numbers: ["30k origin fetches/s at peak", "~72Gbps egress"],
         breaks:
           "The rising signal is lagging by construction, so the first few thousand viewers of any viral post still pay origin latency no matter how good the pre-warm is.",
       },
@@ -423,8 +444,8 @@ export const INSTAGRAM: Diagram = {
       id: "e10",
       from: "cdn",
       to: "client-feed",
+      tier: "hot",
       label: "chosen rung, ~300KB",
-      animated: true,
       detail: {
         what: "The actual image bytes, served from an edge in the viewer's city against an immutable one-year-max-age URL.",
         why: "This is the hop the system spends its money on and the one it optimised everything else for. The marginal viewer costs a cache hit, so a post with ten million views costs no more per view than one with ten.",
@@ -437,6 +458,7 @@ export const INSTAGRAM: Diagram = {
       id: "e11",
       from: "posts-db",
       to: "fanout",
+      tier: "data",
       label: "post_ready, not insert",
       detail: {
         what: "The event that triggers distribution, fired on the status transition rather than on the row insert.",
@@ -449,6 +471,7 @@ export const INSTAGRAM: Diagram = {
       id: "e12",
       from: "fanout",
       to: "hydrator",
+      tier: "data",
       label: "500 candidate post ids",
       detail: {
         what: "The merged candidate set of 8-byte post ids handed to hydration and ranking.",
@@ -462,13 +485,13 @@ export const INSTAGRAM: Diagram = {
       id: "e13",
       from: "hydrator",
       to: "posts-db",
+      tier: "control",
       label: "hydrated card, 60s TTL",
-      dashed: true,
       offset: 80,
       detail: {
         what: "Batch reads of post rows to build the cards, cached assembled for 60 seconds at the API tier.",
-        why: "A celebrity post would otherwise pull millions of reads onto a single row while every feed service hydrates it independently. The card cache collapses that to one read per miss.",
-        numbers: ["60s TTL", "read replicas widen the fan-out further"],
+        why: "A celebrity post would otherwise pull millions of reads onto a single row while every feed service hydrates it independently. The card cache collapses that to one read per miss, and read replicas widen that fan-out further for the reads that do land.",
+        numbers: ["60s TTL"],
         breaks:
           "If metadata slows down, media URLs become unavailable even though the bytes are hot on the CDN, which is the one way the two paths can still take each other down.",
       },
@@ -477,8 +500,8 @@ export const INSTAGRAM: Diagram = {
       id: "e14",
       from: "hydrator",
       to: "client-feed",
+      tier: "hot",
       label: "URLs + dimensions, ~4KB",
-      animated: true,
       detail: {
         what: "The feed response: JSON carrying every rung's URL plus dimensions and counts, and no image data at all.",
         why: "Twenty posts at 300KB inlined is a 6MB response that cannot be cached per post, cannot be range-requested, cannot be progressively rendered, and puts 72Gbps of media through a fleet sized for JSON.",
@@ -491,8 +514,8 @@ export const INSTAGRAM: Diagram = {
       id: "e15",
       from: "api",
       to: "stories",
+      tier: "control",
       label: "story rows, 24h TTL",
-      dashed: true,
       offset: 60,
       detail: {
         what: "A story written into its own collection rather than the posts table, carrying a native 24 hour row TTL.",
@@ -506,8 +529,8 @@ export const INSTAGRAM: Diagram = {
       id: "e16",
       from: "stories",
       to: "variant-store",
+      tier: "control",
       label: "25h object lifecycle",
-      dashed: true,
       detail: {
         what: "The pairing between the 24 hour row TTL and the object store lifecycle rule that deletes the story's media at 25 hours.",
         why: "The hour of grace is deliberate: the row must never outlive its bytes, because a story row pointing at deleted media is a broken render while an orphaned object is merely a cost.",

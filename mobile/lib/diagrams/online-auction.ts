@@ -10,12 +10,30 @@ export const ONLINE_AUCTION: Diagram = {
     shape:
       "One mutable row per item with an ordered stream of events against it: bids route by hash(auction_id) to a single owning writer, the deadline arrives as a CLOSE event in that same stream rather than as a clock reading, and a separate broadcast tier carries the price to fifty watchers per bidder.",
     beats: [
-      "The write path is deliberately narrow. A bid carries max_amount in minor units, an idempotency key and the price the client last rendered. The stateless API validates auth, currency, tick and that the bidder is not the seller in about 2ms, so garbage never reaches the ordered path at all.",
-      "Everything for one item then lands on one writer, keyed by hash(auction_id). That routing is the performance mechanism, not the correctness mechanism: the version-fenced conditional write is already correct with no routing at all, and the routing exists so that write almost never fails. Above a 0.1% zero-rows rate your routing is broken, not your database.",
-      "Proxy resolution happens once, in memory, and commits in a single write. alice's max of 40 against bob's 30 gives a displayed price of 31 with alice still leading and bob outbid in the response to his own bid. Writing the counter-bid as a second transaction would let an observer read an intermediate price nobody authorised.",
-      "The deadline is not a clock comparison and this is the whole design. end_ts is one value in the database and N slightly different values across the fleet, because ordinary NTP skew is 1 to 10ms while bids arrive milliseconds apart. The close scheduler does not close the auction; it enqueues a CLOSE event onto the same partition stream as the bids.",
-      "Auto-extension then flattens the endgame: an accepted bid inside the final 120s pushes end_ts to bid_ts + 120s under the same conditional write as the price, capped at 30 extensions or original_end + 1h. It costs a rewrite of the close-timer entry on every extension, arriving exactly when 485 closes/s are already firing.",
-      "The read path is a different shape entirely. Fifty watchers per bidder hold a WebSocket, receive a coalesced snapshot at most four times a second, and render the countdown client-side from a server-supplied end_ts. The bus delivers once per gateway node rather than per connection, so a 15,000-watcher item costs it 48 deliveries.",
+      {
+        text: "The write path is deliberately narrow. A bid carries max_amount in minor units, an idempotency key and the price the client last rendered. The stateless API validates auth, currency, tick and that the bidder is not the seller in about 2ms, so garbage never reaches the ordered path at all.",
+        lights: ["bidder", "bid-api", "e1", "e2"],
+      },
+      {
+        text: "Everything for one item then lands on one writer, keyed by hash(auction_id). That routing is the performance mechanism, not the correctness mechanism: the version-fenced conditional write is already correct with no routing at all, and the routing exists so that write almost never fails. Above a 0.1% zero-rows rate your routing is broken, not your database.",
+        lights: ["partition", "auctions", "e2", "e4"],
+      },
+      {
+        text: "Proxy resolution happens once, in memory, and commits in a single write. alice's max of 40 against bob's 30 gives a displayed price of 31 with alice still leading and bob outbid in the response to his own bid. Writing the counter-bid as a second transaction would let an observer read an intermediate price nobody authorised.",
+        lights: ["resolver", "auctions", "e4"],
+      },
+      {
+        text: "The deadline is not a clock comparison and this is the whole design. end_ts is one value in the database and N slightly different values across the fleet, because ordinary NTP skew is 1 to 10ms while bids arrive milliseconds apart. The close scheduler does not close the auction; it enqueues a CLOSE event onto the same partition stream as the bids.",
+        lights: ["close-scheduler", "partition", "e6"],
+      },
+      {
+        text: "Auto-extension then flattens the endgame: an accepted bid inside the final 120s pushes end_ts to bid_ts + 120s under the same conditional write as the price, capped at 30 extensions or original_end + 1h. It costs a rewrite of the close-timer entry on every extension, arriving exactly when 485 closes/s are already firing.",
+        lights: ["resolver", "close-timers", "e8"],
+      },
+      {
+        text: "The read path is a different shape entirely. Fifty watchers per bidder hold a WebSocket, receive a coalesced snapshot at most four times a second, and render the countdown client-side from a server-supplied end_ts. The bus delivers once per gateway node rather than per connection, so a 15,000-watcher item costs it 48 deliveries.",
+        lights: ["bus", "ws-gateway", "watchers", "e9", "e10", "e11"],
+      },
     ],
     crux:
       "A published deadline is not an instant. If each API node decides whether a bid was in time by comparing its local clock to end_ts, a node drifted by 40ms accepts what an adjacent node rejects, and one of those two users has a legal claim on the item. Acceptance has to stop being a comparison and become a position: a CLOSE event ordered into the item's own stream, or a fenced conditional write where the store's serialisation order is the order.",
@@ -94,7 +112,7 @@ export const ONLINE_AUCTION: Diagram = {
       parent: "ordered-zone",
       detail: {
         what: "A keyed executor: every event for one item, bids and the CLOSE alike, lands on the one process that owns it and is handled one at a time.",
-        why: "Contention on the price row becomes structural rather than incidental, and the CLOSE gets somewhere to be ordered against bids. The same pattern as the per-instrument matching core in #42, for the opposite reason: there it buys microsecond determinism, here it buys a contended row that almost never actually contends.",
+        why: "Contention on the price row becomes structural rather than incidental, and the CLOSE gets somewhere to be ordered against bids. The same pattern shows up in a matching engine's per-instrument core, for the opposite reason: there it buys microsecond determinism, here it buys a contended row that almost never actually contends.",
         numbers: ["~1ms cross-network route", "~1ms to sequence", "alert if CAS zero-rows > 0.1%"],
         breaks:
           "The owner dies mid-bid and ownership moves while bids are in flight. The new owner has to read the row's version and the tail of the bid log before accepting writes; in-flight bids fail closed and clients retry with the same idempotency key.",
@@ -158,7 +176,7 @@ export const ONLINE_AUCTION: Diagram = {
           decider:
             "Fan-out arithmetic on a hot lot: 4 ticks/s across 48 gateway nodes is ~192 deliveries/s, against 600k msgs/s if you fan out per connection. The cost is that the displayed price can lag by ~250ms, which matters to snipers and to nobody else.",
           flips:
-            "A live streamed auction with seconds-long lots, where a 250ms coalescing window is a large share of the whole lot and the latency regime is closer to #33 than to this design.",
+            "A live streamed auction with seconds-long lots, where a 250ms coalescing window is a large share of the whole lot and the latency regime looks more like a low-latency matching feed than a coalesced broadcast.",
         },
       },
     },
@@ -191,7 +209,7 @@ export const ONLINE_AUCTION: Diagram = {
     },
     {
       id: "settlement",
-      sub: "see #23 and #7",
+      sub: "async: winner, order, notify",
       kind: "service",
       label: "Settlement + notify",
       col: 0,
@@ -253,11 +271,11 @@ export const ONLINE_AUCTION: Diagram = {
       detail: {
         what: "The pending-deadline index: a sorted set sharded by hash(auction_id) with end_ts as the score, rewritten on every auto-extension.",
         why: "10M live deadlines need an O(log n) 'what is due next' answer and an equally cheap reschedule, because auto-extension makes end_ts mutable state rather than a fixed property of the listing.",
-        numbers: ["10M pending deadlines", "O(log n) rewrite per extension", "capped at 30 extensions"],
+        numbers: ["10M pending deadlines", "O(log n) rewrite against 10M entries", "capped at 30 extensions"],
         breaks:
           "Timer-set churn under auto-extension. A 30-extension bidding war across 33k hot lots is a burst of index writes arriving exactly while 485 closes/s are also firing, which is the wrong moment for the index to be busy.",
         choice: {
-          pick: "Sharded Redis sorted set keyed on end_ts (see #36)",
+          pick: "Sharded Redis sorted set keyed on end_ts",
           instead: "A relational table scanned by a polling query, or one timer object per auction.",
           decider:
             "10M rows scanned repeatedly against an O(log n) range read, with a reschedule on every late bid. The cap matters as much as the structure: 30 extensions or original_end + 1h, whichever comes first, or a war has no bound at all.",
@@ -402,7 +420,7 @@ export const ONLINE_AUCTION: Diagram = {
       detail: {
         what: "Two history rows per accepted bid: the challenger's submission and the incumbent's proxy auto-bid, both with provenance.",
         why: "The log is quorum-committed before the client is told LEADING, which is what makes in-region RPO zero. It is also the only thing that lets a shill ring's bids be cancelled and the honest price recomputed a week later.",
-        numbers: ["~130M rows/day", "~120B per record", "kind is MANUAL, PROXY_AUTO or REJECTED"],
+        numbers: ["~130M rows/day", "~120B per record", "3 kinds: MANUAL, PROXY_AUTO, REJECTED"],
         breaks:
           "Acknowledging the bid before the log commit would mean a crash could lose a bid the user was already told they had won with, which is the one failure the design refuses to have.",
       },
@@ -517,7 +535,7 @@ export const ONLINE_AUCTION: Diagram = {
       detail: {
         what: "GET /auctions/{id} serving current_price, bid_count, min_next_bid, end_ts and the masked high bidder from a replica.",
         why: "min_next_bid is derived from the displayed price, so this read is what every client bids against. It is also the degraded path: when the bus is partitioned, watchers poll this at 2s rather than sit on a frozen socket.",
-        numbers: ["poll fallback every 2s", "high_max never appears in any response"],
+        numbers: ["poll fallback every 2s", "0 responses ever include high_max"],
         breaks:
           "It must never leak high_max or an outbid delta. A bidder who can read how far they lost by can binary-search the leader's ceiling within one increment in four bids.",
       },

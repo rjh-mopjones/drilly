@@ -10,19 +10,37 @@ export const SPOTIFY: Diagram = {
     shape:
       "Three businesses behind one front door: a distributor whose objects are so small the popular catalogue fits at the edge, a recommender whose customers mostly want to hear things they have already heard, and an accounting firm that has to prove the count years later.",
     beats: [
-      "Delivery collapses because the objects are tiny. A four-minute track at 160kbps is 4.8MB, so you pick a rung once at track start, fetch the object whole, and prefetch the entire next track 20 seconds before the current one ends. On a 5Mbps link the file has landed inside the first 3% of playback, which leaves mid-track adaptation nothing to adapt.",
-      "Edge residency is a decision rather than a forecast. Two rungs of the top 10M tracks is 144TB, one storage node, covering ~90% of plays, and pre-pushing a new release to every edge is 17MB across the three lossy rungs. The device is then the highest-hit-rate tier of all: 4GB of spare phone storage holds ~830 tracks, which is most of a heavy listener's rotation.",
-      "The recommender is the strange half, because four plays in five are repeats. That inverts the machinery: the exclusion filter becomes the candidate pool. The queue service ranks the listener's own library, playlists and follows, under 10,000 rows for the large majority, with a scan and a scoring function rather than an index, which is what keeps this tier at a few hundred hosts instead of a few thousand.",
-      "The funnel everyone draws decides under a fifth of the plays. It runs weekly and offline: collaborative filtering, an audio encoder that gives the 60k daily uploads a vector on the day they land, and a text model for cultural context, merging into ~500 candidates, a deep ranker, diversification, and 30 tracks written per listener into a key-value cache.",
-      "Labels invert with the product too. A familiar track completes at over 95% and 80% of impressions are familiar, so completion mostly measures familiarity that history already tells you for free. The negative becomes a skip inside 30 seconds, which is the royalty threshold and therefore already computed, and the positive becomes a repeat play within 7 days.",
-      "Money is a third consumer of the same events. Every event carries its own played_at, the archive is columnar and immutable, and the payable ledger is a deterministic batch over it, deduplicated on (user_id, track_id, play_start_ts). The streaming aggregate exists, is at-least-once, feeds artist dashboards, and pays nobody.",
+      {
+        text: "Delivery collapses because the objects are tiny. A four-minute track at 160kbps is 4.8MB, so you pick a rung once at track start, fetch the object whole, and prefetch the entire next track 20 seconds before the current one ends. On a 5Mbps link the file has landed inside the first 3% of playback, which leaves mid-track adaptation nothing to adapt.",
+        lights: ["client", "edge", "e4", "e5"],
+      },
+      {
+        text: "Edge residency is a decision rather than a forecast. Two rungs of the top 10M tracks is 144TB, one storage node, covering ~90% of plays, and pre-pushing a new release to every edge is 17MB across the three lossy rungs. The device is then the highest-hit-rate tier of all: 4GB of spare phone storage holds ~830 tracks, which is most of a heavy listener's rotation.",
+        lights: ["edge", "origin", "e6"],
+      },
+      {
+        text: "The recommender is the strange half, because four plays in five are repeats. That inverts the machinery: the exclusion filter becomes the pool. The queue service ranks the listener's own library, playlists and follows, under 10,000 rows for the large majority, with a scan and a scoring function rather than an index, which is what keeps this tier at a few hundred hosts instead of a few thousand.",
+        lights: ["queue", "library", "e14"],
+      },
+      {
+        text: "The funnel everyone draws decides under a fifth of the plays. It runs weekly and offline: collaborative filtering, an audio encoder that gives the 60k daily uploads a vector on the day they land, and a text model for cultural context, merging into a ~500-track pool, a deep ranker, diversification, and 30 tracks written per listener into a key-value cache.",
+        lights: ["discovery", "e12", "e13"],
+      },
+      {
+        text: "Labels invert with the product too. A familiar track completes at over 95% and 80% of impressions are familiar, so completion mostly measures familiarity that history already tells you for free. The negative becomes a skip inside 30 seconds, which is the royalty threshold and therefore already computed, and the positive becomes a repeat play within 7 days.",
+        lights: ["labels", "e11"],
+      },
+      {
+        text: "Money is a third consumer of the same events. Every event carries its own played_at, the archive is columnar and immutable, and the payable ledger is a deterministic batch over it, deduplicated on (user_id, track_id, play_start_ts). The streaming aggregate exists, is at-least-once, feeds artist dashboards, and pays nobody.",
+        lights: ["events", "archive", "royalty", "e8", "e9"],
+      },
     ],
     crux:
-      "Every measurable signal prefers familiarity. A track the listener already loves completes at over 95%, is almost never skipped, and lifts every metric readable inside a two-week experiment; an unfamiliar one completes at roughly 60% and is skipped inside 30 seconds about a third of the time. The cost of novelty lands inside the experiment window and its benefit lands outside it, so the exploration rate is held as a policy constant of 15 to 20% rather than tuned, which is an honest admission that no experiment anyone can afford will settle it.",
+      "The exploration rate is held as a fixed policy constant of 15 to 20%, not tuned by experiment, because every measurable signal prefers familiarity and no affordable experiment can tell a genuine preference from one the platform trained. A track the listener already loves completes at over 95%, is almost never skipped, and lifts every metric inside a two-week experiment window; an unfamiliar one completes at roughly 60% and is skipped inside 30 seconds about a third of the time. Novelty's cost lands inside that window and its benefit lands outside it, which is why holding the constant is the honest choice and tuning it would not be.",
     numbers: [
       "~8.4B plays/day, ~18B events/day, ~500k/s peak",
       "144TB pinned per edge against ~4.4PB at origin",
-      "~81% of plays are repeats; candidate set under 10,000 tracks",
+      "~81% of plays are repeats; pool under 10,000 tracks",
     ],
   },
   nodes: [
@@ -75,7 +93,7 @@ export const SPOTIFY: Diagram = {
       detail: {
         what: "GET /track/{id}: returns metadata, the entitlement decision for this account, and signed edge URLs for every rung the account may use.",
         why: "Entitlement is per account and changes on billing events while metadata changes on content events, so the decision has to be taken per play rather than baked into a manifest or an edge config that outlives it.",
-        numbers: ["one call per track start", "~8.4B plays/day", "rungs, on-demand vs shuffle, offline, skip budget"],
+        numbers: ["one call per track start", "~8.4B plays/day", "4 entitlement dimensions: rungs, on-demand vs shuffle, offline, skip budget"],
         breaks:
           "This path saturates before the bytes do. Ten million clients calling GET /track inside sixty seconds at a midnight release is an admission-control problem, fixed with a jittered visibility window and an edge-cached catalogue response.",
         choice: {
@@ -180,7 +198,7 @@ export const SPOTIFY: Diagram = {
         what: "A nightly and then monthly deterministic batch that applies the 30-second rule on event time, the per-country rate and the fractional split, emitting one statement row per rights holder per period.",
         why: "Payouts are monthly and events are legitimately weeks late, so the ledger is a recomputation rather than a running total. Anything already paid is credited forward with a statement note rather than restated, because rights holders have booked the number.",
         numbers: [
-          "dedup on (user_id, track_id, play_start_ts)",
+          "dedup on 3 fields: user_id, track_id, play_start_ts",
           "30 contiguous seconds qualifies",
           "streams counted per listener per track per day are capped, typically at one",
           "stream-against-batch gap expected under 0.1%",
@@ -206,10 +224,10 @@ export const SPOTIFY: Diagram = {
       row: 0,
       detail: {
         what: "Builds the next N tracks: scores the listener's own library and playlists, resolves shuffle order server-side, and hydrates precomputed discovery lists.",
-        why: "Four plays in five are repeats, so the surface carrying most listening ranks one person's own universe with a scan over recency, lifetime play count, time of day and what is already queued. Saying that out loud is the sizing decision for the whole tier.",
+        why: "Four plays in five are repeats, so the surface carrying most listening ranks one person's own universe with a scan over recency, lifetime play count, time of day and what is already queued. That fact alone is the sizing decision for the whole tier.",
         numbers: [
           "~81% of plays are repeats, ~19% first hears",
-          "candidate set under 10,000 tracks for most listeners",
+          "pool under 10,000 tracks for most listeners",
           "a few hundred hosts, not a few thousand",
         ],
         breaks:
@@ -218,7 +236,7 @@ export const SPOTIFY: Diagram = {
           pick: "Scan and score the listener's own rows on the request path",
           instead: "Run the retrieval-plus-ranker funnel for every queue request.",
           decider:
-            "Candidate-set size. 10^4 rows the listener already owns against 10^8 in the catalogue: the funnel exists to cut 10^8 down, and it earns nothing for the 81% of plays that are repeats.",
+            "Pool size. 10^4 rows the listener already owns against 10^8 in the catalogue: the funnel exists to cut 10^8 down, and it earns nothing for the 81% of plays that are repeats.",
           flips:
             "A listener under about 50 plays, who has no history to rank and is served from onboarding picks blended with region and age-band popularity priors.",
         },
@@ -236,7 +254,7 @@ export const SPOTIFY: Diagram = {
         why: "It is read on every play and almost entirely cacheable, so a whole replica per region removes a cross-region hop from the play path; and it is the same table the ledger keys on, which is why it is versioned rather than mutable.",
         numbers: [
           "100M tracks x ~1.5KB = ~150GB; RF=3 gives ~450GB",
-          "ISRC is the identifier the royalty path keys on",
+          "1 identifier (ISRC) is what the royalty path keys on",
           "~60k new tracks/day",
         ],
         breaks:
@@ -287,7 +305,7 @@ export const SPOTIFY: Diagram = {
       row: 1,
       detail: {
         what: "Per-listener saved tracks, albums and follows, playlists with fractional position keys, and (track_id, play_count, last_played_at) per listener.",
-        why: "This is simultaneously the candidate pool for most plays and the only place the feature that separates 'exhausted' from 'due for revival' lives, because no embedding encodes time-since-last-play crossed with lifetime count.",
+        why: "This is simultaneously the pool for most plays and the only place the feature that separates 'exhausted' from 'due for revival' lives, because no embedding encodes time-since-last-play crossed with lifetime count.",
         numbers: [
           "under 10,000 tracks for the large majority",
           "a few hundred kilobytes of rows per listener",
@@ -342,7 +360,7 @@ export const SPOTIFY: Diagram = {
         what: "A weekly batch: collaborative-filtering, audio-encoder and text retrieval merge into a ~500-track pool, a deep ranker scores it, diversification spreads genre and freshness, and 30 tracks are written per listener.",
         why: "Three sources because no single one covers every data regime: CF is strongest where a track already has plays, the audio encoder gives a track uploaded four minutes ago a vector at all, and text carries the cultural context neither can see.",
         numbers: [
-          "~200 CF + ~150 audio + ~100 text candidates, ~500 after dedup",
+          "~200 CF + ~150 audio + ~100 text entries, ~500 after dedup",
           "top 30 per listener per surface",
           "novelty held at 15-20% of impressions as policy",
           "this funnel decides ~19% of plays; the weekly mix about 3%",
@@ -365,8 +383,8 @@ export const SPOTIFY: Diagram = {
       id: "e1",
       from: "client",
       to: "play-api",
+      tier: "control",
       label: "GET /track/{id}",
-      dashed: true,
       detail: {
         what: "The control call at track start, asking what this track is and what this account may do with it.",
         why: "Entitlement and metadata are decided per play because they change on different clocks: billing events for one, content events for the other. Neither can be baked into anything the edge caches for a day.",
@@ -379,12 +397,12 @@ export const SPOTIFY: Diagram = {
       id: "e2",
       from: "play-api",
       to: "catalogue",
+      tier: "control",
       label: "metadata + rung keys",
-      dashed: true,
       detail: {
         what: "Reading the track row: title, artists, duration, ISRC and the object key for each rung.",
         why: "The catalogue is 450GB replicated whole into every region precisely so this read never leaves the region, which is what keeps a play start inside its latency budget.",
-        numbers: ["~1.5KB per row", "regional replica, no cross-region hop"],
+        numbers: ["~1.5KB per row", "regional replica, 0 cross-region hops"],
         breaks:
           "If the lookup is unavailable a play cannot start at all, so the client caches metadata for everything already in its queue for 24 hours and degrades to tracks resident on the device.",
       },
@@ -393,8 +411,8 @@ export const SPOTIFY: Diagram = {
       id: "e3",
       from: "play-api",
       to: "client",
+      tier: "control",
       label: "entitlement + signed URLs",
-      dashed: true,
       offset: 40,
       detail: {
         what: "The response: which rungs this account may use, and a signed edge URL for each of them.",
@@ -408,8 +426,8 @@ export const SPOTIFY: Diagram = {
       id: "e4",
       from: "client",
       to: "edge",
+      tier: "hot",
       label: "GET whole object",
-      animated: true,
       detail: {
         what: "One HTTP GET for the entire track object, plus a second one 20 seconds before the end for the whole next track in the queue.",
         why: "This single arrow carries the whole delivery argument. Fetching the next track outright means the gap between tracks is zero and the next start does not depend on the network at all.",
@@ -422,8 +440,8 @@ export const SPOTIFY: Diagram = {
       id: "e5",
       from: "edge",
       to: "client",
+      tier: "hot",
       label: "4.8MB, first audio ~120ms",
-      animated: true,
       offset: 70,
       detail: {
         what: "The object bytes streaming back, with playback starting from the first bytes rather than waiting for the file.",
@@ -437,6 +455,7 @@ export const SPOTIFY: Diagram = {
       id: "e6",
       from: "origin",
       to: "edge",
+      tier: "data",
       label: "miss fill + release pre-push",
       detail: {
         what: "Origin fetches on a cold miss, and scheduled pre-pushes of new releases before they go live.",
@@ -450,8 +469,8 @@ export const SPOTIFY: Diagram = {
       id: "e7",
       from: "client",
       to: "events",
+      tier: "hot",
       label: "start / qualified / stop",
-      animated: true,
       offset: 150,
       detail: {
         what: "Three events per play: start at t=0, qualified at 30 seconds, and a terminal event carrying the stop position, batched by POST /events.",
@@ -465,6 +484,7 @@ export const SPOTIFY: Diagram = {
       id: "e8",
       from: "events",
       to: "archive",
+      tier: "data",
       label: "columnar, by event time",
       detail: {
         what: "The log's 7-day hot window rolling into immutable columnar files partitioned on event time.",
@@ -478,11 +498,12 @@ export const SPOTIFY: Diagram = {
       id: "e9",
       from: "archive",
       to: "royalty",
+      tier: "data",
       label: "recompute the whole period",
       detail: {
         what: "The batch reading every archived event whose event time falls in the period, after a cutoff long enough to collect offline stragglers.",
         why: "Recomputing a month is cheaper than holding streaming state open for the 30 days an offline licence can legitimately delay an event, and a recomputation can be re-run and diffed while a checkpoint cannot.",
-        numbers: ["dedup on (user_id, track_id, play_start_ts)", "30 contiguous seconds qualifies"],
+        numbers: ["dedup on 3 fields: user_id, track_id, play_start_ts", "30 contiguous seconds qualifies"],
         breaks:
           "A rerun that disagrees with the paid run is an incident, not a correction, and any nonzero diff blocks payout.",
       },
@@ -491,13 +512,13 @@ export const SPOTIFY: Diagram = {
       id: "e10",
       from: "royalty",
       to: "catalogue",
+      tier: "control",
       label: "effective-dated rates",
-      dashed: true,
       offset: 200,
       detail: {
         what: "The batch reading the rights map and per-country rate table as of the period being computed, passed in as an explicit version.",
         why: "Determinism lives or dies here. If the tables are read as 'current' rather than 'as of March', rerunning March produces a different answer every time a publisher files a correction.",
-        numbers: ["one statement row per rights holder per period", "shares split across recording owner, publisher and writers"],
+        numbers: ["one statement row per rights holder per period", "shares split 3 ways: recording owner, publisher, writers"],
         breaks:
           "Composition ownership is revised retroactively, sometimes years later, so a reserve is held against unmatched compositions and trued up as claims resolve.",
       },
@@ -506,12 +527,12 @@ export const SPOTIFY: Diagram = {
       id: "e11",
       from: "events",
       to: "labels",
+      tier: "control",
       label: "same log, ranker labels",
-      dashed: true,
       detail: {
         what: "The second consumer of the log, reading the same events the ledger reads and turning them into training labels.",
         why: "One log, two consumers, opposite tolerances: this one may drop thousands of events without anyone noticing, which is exactly why it must not share a pipeline with the one that may drop none.",
-        numbers: ["~18B events/day", "windowed on event time, never arrival time"],
+        numbers: ["~18B events/day", "windowed on event time, 0 reliance on arrival time"],
         breaks:
           "Because it shares the schema with the ledger, a field added here for ranking becomes a field an auditor may ask the royalty batch about.",
       },
@@ -520,10 +541,10 @@ export const SPOTIFY: Diagram = {
       id: "e12",
       from: "labels",
       to: "discovery",
+      tier: "control",
       label: "skip-30s / repeat-7d",
-      dashed: true,
       detail: {
-        what: "Labelled examples feeding the ranker that scores the candidate pool.",
+        what: "Labelled examples feeding the ranker that scores the pool.",
         why: "The label choice is the model choice here. Feeding completion instead would train the ranker to predict familiarity, which the listener's own history already provides at zero cost.",
         numbers: ["~15% skip-before-30s base rate", "familiar ~95% vs first hear ~60% completion"],
         breaks:
@@ -534,8 +555,8 @@ export const SPOTIFY: Diagram = {
       id: "e13",
       from: "library",
       to: "discovery",
+      tier: "control",
       label: "history, playlists, follows",
-      dashed: true,
       detail: {
         what: "The listener's own rows feeding both the collaborative-filtering matrix and the exclusion and diversification stages of the weekly batch.",
         why: "This is also where the ranker gets time-since-last-play crossed with lifetime play count, the feature that distinguishes a track the listener is bored of from one they would love to hear again after three years.",
@@ -548,12 +569,13 @@ export const SPOTIFY: Diagram = {
       id: "e14",
       from: "queue",
       to: "library",
+      tier: "data",
       label: "scan <10,000 own tracks",
       offset: 60,
       detail: {
         what: "The hot path for the majority of plays: read the listener's saved tracks and playlists and score them on recency, play count, time of day and current queue.",
-        why: "Four plays in five are repeats, so the exclusion filter of a video recommender becomes the candidate pool here, and the pool is small enough that a scan beats any index.",
-        numbers: ["under 10,000 rows", "no vector index on this path"],
+        why: "Four plays in five are repeats, so the exclusion filter of a video recommender becomes the pool here, and the pool is small enough that a scan beats any index.",
+        numbers: ["under 10,000 rows", "0 vector index on this path"],
         breaks:
           "A new listener has nothing to scan, which is why onboarding picks plus region and age-band priors carry the first ~50 plays.",
       },
@@ -561,9 +583,9 @@ export const SPOTIFY: Diagram = {
     {
       id: "e16",
       to: "queue",
+      tier: "control",
       from: "discovery",
       label: "Monday key read",
-      dashed: true,
       offset: 140,
       detail: {
         what: "One key read when a discovery surface opens, hydrated with metadata and edge URLs from the catalogue.",
@@ -577,12 +599,12 @@ export const SPOTIFY: Diagram = {
       id: "e17",
       from: "client",
       to: "queue",
+      tier: "control",
       label: "GET /queue/next",
-      dashed: true,
       detail: {
         what: "The client asking what plays after the current track, given the context it is playing from.",
         why: "The answer has to come far enough ahead that the client can prefetch the whole next object 20 seconds before the current one ends, so this call leads playback rather than following it.",
-        numbers: ["next N tracks per call", "prefetch window 20s"],
+        numbers: ["next ~5-10 tracks per call", "prefetch window 20s"],
         breaks:
           "If it is late or unavailable, autoplay stalls at a track boundary, which is why the last served queue stays on the device as the fallback.",
       },
@@ -591,13 +613,13 @@ export const SPOTIFY: Diagram = {
       id: "e18",
       from: "queue",
       to: "client",
+      tier: "control",
       label: "next N + shuffle order",
-      dashed: true,
       offset: 40,
       detail: {
         what: "The resolved queue, including the shuffle permutation for the next N tracks rather than a promise to randomise later.",
         why: "Shuffle resolved server-side is what lets the device cache keep working under shuffle, which is otherwise the single behaviour that collapses the highest-hit-rate tier in the system.",
-        numbers: ["seeded permutation shipped ahead", "rebuffer rate is measured segmented by shuffle on/off"],
+        numbers: ["1 seeded permutation shipped ahead, not drawn live", "rebuffer rate measured across 2 segments: shuffle on/off"],
         breaks:
           "A listener who reorders or skips ahead invalidates the prefetch, so the client has to re-request rather than trust a queue it has already diverged from.",
       },

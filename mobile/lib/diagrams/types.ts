@@ -145,11 +145,26 @@ export interface DiagramEdge {
   toSide?: "top" | "right" | "bottom" | "left";
 }
 
+/**
+ * One step of the overview walk. `lights` names the nodes and edges the step is
+ * about: the panel lights them and dims the rest, so the reader learns the
+ * picture one mechanism at a time. A bare string is a beat that lights nothing.
+ */
+export type Beat = string | { text: string; lights: string[] };
+
+export function beatText(b: Beat): string {
+  return typeof b === "string" ? b : b.text;
+}
+
+export function beatLights(b: Beat): string[] {
+  return typeof b === "string" ? [] : b.lights;
+}
+
 export interface DiagramOverview {
   /** The one-sentence shape of the system. */
   shape: string;
   /** Ordered walk through the design, one beat per paragraph. */
-  beats: string[];
+  beats: Beat[];
   /** The single hardest thing, stated plainly. */
   crux: string;
   numbers?: string[];

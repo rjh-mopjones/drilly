@@ -10,12 +10,30 @@ export const URL_SHORTENER: Diagram = {
     shape:
       "Two paths of wildly different size sharing one immutable row: a rare write that mints an alias and inserts it once, and a read 100 times heavier that the whole design tries to answer before it ever reaches the database.",
     beats: [
-      "Start from the property, not the components. The mapping from alias to long URL never changes and is byte-identical for every reader on earth, so the redirect response itself is fully cacheable end to end. Every decision below is only about how far out you push it and what that costs you.",
-      "Creation is the cheap half. Take an id from a generator that needs no coordination on the request path, Snowflake or a block of 1000 leased from a counter, encode it in base62, insert one row and return. Seven characters covers 62^7, about 3.5 trillion aliases, so there is no collision check and no read before the write.",
-      "Reads are three layers, each one there to stop the request. The CDN answers about 95% of 120k reads/s at roughly 10ms, leaving 6k/s at origin. An in-memory cache holding three days of creations, about 75 GB, absorbs 99% of that, leaving roughly 60 reads/s at the alias store. That last number is the whole point of the architecture.",
-      "The redirect status is a real fork, not a detail. A 302 with Cache-Control max-age=60 keeps the edge involved so clicks can be counted from CDN logs and a link can still be retracted. A 301 is cheaper still because the browser never asks again, and it destroys both of those properties permanently for anyone who already has the link.",
-      "Analytics hang off the redirect on a dashed line. One click event of about 200B goes fire-and-forget onto a durable log, 24 MB/s steady and 200 MB/s at peak, and a consumer batches it into a columnar warehouse. The redirect never waits for it, and the pipeline is explicitly allowed to be down.",
-      "What is left is the failure surface: a viral link that no edge has yet, which single-flight coalescing collapses from 100k identical reads to one per server; an enumeration scan of distinct 404s that coalescing cannot help and a 30-second negative cache can; and a takedown that origin can do instantly but the edge only honours after a purge.",
+      {
+        text: "Start from the property, not the components. The mapping from alias to long URL never changes and is byte-identical for every reader on earth, so the redirect response itself is fully cacheable end to end. Every decision below is only about how far out you push it and what that costs you.",
+        lights: ["alias-store", "cdn"],
+      },
+      {
+        text: "Creation is the cheap half. Take an id from a generator that needs no coordination on the request path, Snowflake or a block of 1000 leased from a counter, encode it in base62, insert one row and return. Seven characters covers 62^7, about 3.5 trillion aliases, so there is no collision check and no read before the write.",
+        lights: ["creator", "write-api", "alias-store", "e1", "e4"],
+      },
+      {
+        text: "Reads are three layers, each one there to stop the request. The CDN answers about 95% of 120k reads/s at roughly 10ms, leaving 6k/s at origin. An in-memory cache holding three days of creations, about 75 GB, absorbs 99% of that, leaving roughly 60 reads/s at the alias store. That last number is the whole point of the architecture.",
+        lights: ["cdn", "cache", "alias-store", "e7", "e8", "e10", "e11"],
+      },
+      {
+        text: "The redirect status is a real fork, not a detail. A 302 with Cache-Control max-age=60 keeps the edge involved so clicks can be counted from CDN logs and a link can still be retracted. A 301 is cheaper still because the browser never asks again, and it destroys both of those properties permanently for anyone who already has the link.",
+        lights: ["cdn", "e7"],
+      },
+      {
+        text: "Analytics hang off the redirect asynchronously. One click event of about 200B goes fire-and-forget onto a durable log, 24 MB/s steady and 200 MB/s at peak, and a consumer batches it into a columnar warehouse. The redirect never waits for it, and the pipeline is explicitly allowed to be down.",
+        lights: ["emit", "kafka", "warehouse", "e14", "e15", "e18"],
+      },
+      {
+        text: "What is left is the failure surface: a viral link that no edge has yet, which single-flight coalescing collapses from 100k identical reads to one per server; an enumeration scan of distinct 404s that coalescing cannot help and a 30-second negative cache can; and a takedown that origin can do instantly but the edge only honours after a purge.",
+        lights: ["coalesce", "cache", "takedown", "e9", "e19", "e20"],
+      },
     ],
     crux:
       "Everything you do to make reads cheap makes them invisible. Pushing the redirect to the edge is what removes 95% of the load, and it is the same act that hides those clicks from your servers and puts a cached copy of a link you may need to retract on machines you no longer control.",
@@ -55,7 +73,7 @@ export const URL_SHORTENER: Diagram = {
       sub: "base62 id lease; safety check",
       detail: {
         what: "Takes the long URL, checks the destination's reputation, asks for an id, encodes it in base62 and performs a single insert with no collision check.",
-        why: "Uniqueness comes from the generator rather than from the database, so there is no read before the write and creation is one round trip. It stays one box rather than a group of stages because the prose treats the whole write path as a rounding error next to the read path: ninety seconds of the interview, one service, one insert. Base62 is chosen over base64 because it needs neither percent-encoding for + and / nor = padding, and it double-click-selects as one token.",
+        why: "Uniqueness comes from the generator rather than from the database, so there is no read before the write and creation is one round trip. It stays one box rather than a group of stages because the write path genuinely is a rounding error next to the read path: one service, one insert, nothing here runs hot enough to be worth splitting. Base62 is chosen over base64 because it needs neither percent-encoding for + and / nor = padding, and it double-click-selects as one token.",
         numbers: [
           "7 base62 chars = 62^7 = 3.5 x 10^12 aliases",
           "10% saturation after ten years of 100M/day",
@@ -86,7 +104,7 @@ export const URL_SHORTENER: Diagram = {
         what: "Sets deleted_at at origin, drops the memory cache entry on the same write, and issues an explicit purge to the CDN for safety cases.",
         why: "Deletion propagates at the speed of the slowest cache holding a copy. Origin is instant and the edge would otherwise serve the old answer for the rest of its 60-second TTL, which for a live phishing link is an exploit rather than a stale cache. Afterwards the alias returns 410 Gone, not 404, so crawlers can tell removed from never-existed.",
         numbers: [
-          "purge propagates across PoPs in seconds",
+          "purge propagates across PoPs in under 5 seconds",
           "TTL bounds ordinary deletion at 60s",
           "takedown propagation alert above 30s",
         ],
@@ -138,7 +156,7 @@ export const URL_SHORTENER: Diagram = {
       row: 1,
       detail: {
         what: "The durable alias to long_url table with created_by, expires_at and deleted_at, hash-partitioned and replicated three ways.",
-        why: "It is ground truth for everything cached above it, and it is deliberately the quietest box in the diagram at about 60 reads/s in steady state. The entire cache hierarchy exists to keep that number where it is, which is why a step change in it is a pageable alert.",
+        why: "It is ground truth for everything cached above it, and it is deliberately the quietest tier in the whole system at about 60 reads/s in steady state. The entire cache hierarchy exists to keep that number where it is, which is why a step change in it is a pageable alert.",
         numbers: [
           "~60 reads/s steady, 1.2k writes/s",
           "365B rows at ten years, ~500B per row",
@@ -169,7 +187,7 @@ export const URL_SHORTENER: Diagram = {
         numbers: [
           "60M rows/day archived, ~30 GB/day logical",
           "~4x columnar compression, so ~8 GB/day stored",
-          "read only on the rare old-link lookup",
+          "well under 1% of lookups ever reach this tier",
         ],
         breaks:
           "An archived alias is still a live link, so the rare lookup that lands here pays object-storage latency well outside the 100ms budget. It is survivable only because it is rare; if archived links start getting clicked in volume, the tiering policy is wrong and the rows have to come back.",
@@ -272,7 +290,7 @@ export const URL_SHORTENER: Diagram = {
         numbers: [
           "100k identical misses collapse to ~200 reads",
           "early refresh inside the last 10% of the TTL",
-          "per-server state, nothing shared, nothing to coordinate",
+          "0 cross-server coordination, 0 shared state",
         ],
         breaks:
           "Coalescing only helps when the answer exists. An enumeration scan produces distinct keys, so nothing merges and every request goes straight through this gate to the tier behind it; that failure is the negative cache's to own, not this one's.",
@@ -319,7 +337,7 @@ export const URL_SHORTENER: Diagram = {
         why: "The response is already on its way back to the client when this runs, which is what makes a 99.99% redirect SLO independent of a 99.9% analytics pipeline. It is a stage of the redirect rather than a separate service precisely because it must share the request's process and none of its guarantees.",
         numbers: [
           "~6k events/s from origin, ~200B each",
-          "alias, ts, country, referrer, ua and ip hashes",
+          "6 fields per event: alias, ts, country, referrer, ua, ip hash",
           "delivery target 99.9%, against 99.99% on redirects",
         ],
         breaks:
@@ -342,7 +360,7 @@ export const URL_SHORTENER: Diagram = {
       label: "Async analytics, off the redirect path",
       detail: {
         what: "The click pipeline: edge-served clicks recovered from CDN logs, origin-served clicks fired onto a durable log, both landing in a columnar warehouse.",
-        why: "It is drawn as a zone rather than a service because nothing in it deploys with anything else in it, and nothing in it is allowed to sit on a redirect. Redirects carry a 99.99% availability target and a p99 under 100ms; the whole of this box is best effort at a 99.9% delivery target and may be down.",
+        why: "This is a boundary rather than a service because nothing inside it deploys with anything outside it, and nothing in it is allowed to sit on a redirect. Redirects carry a 99.99% availability target and a p99 under 100ms; everything inside this boundary is best effort at a 99.9% delivery target and may be down.",
         numbers: [
           "1.04 x 10^10 click events/day",
           "24 MB/s steady, 200 MB/s at 1M clicks/s peak",
@@ -390,10 +408,10 @@ export const URL_SHORTENER: Diagram = {
       parent: "async-group",
       detail: {
         what: "The CDN's own delivery logs, shipped on the vendor's schedule and parsed into click events for every redirect that was answered at the edge.",
-        why: "Caching the redirect at the edge is precisely what makes those clicks invisible to your servers, so counting has to move to where the request was actually answered. This is why the 60-second TTL is a click-counting granularity as well as a takedown SLA. It is drawn as external because neither the sampling nor the delivery schedule is yours.",
+        why: "Caching the redirect at the edge is precisely what makes those clicks invisible to your servers, so counting has to move to where the request was actually answered. This is why the 60-second TTL is a click-counting granularity as well as a takedown SLA. It is external because neither the sampling nor the delivery schedule is yours.",
         numbers: [
           "covers about 95% of all clicks",
-          "delivered on a lag of minutes",
+          "delivered on a lag of 5 to 15 minutes",
           "repeat clicks inside the 60s window are invisible to origin",
         ],
         breaks:
@@ -442,6 +460,7 @@ export const URL_SHORTENER: Diagram = {
       id: "e1",
       from: "creator",
       to: "write-api",
+      tier: "data",
       label: "POST /shorten",
       detail: {
         what: "The create request: a long URL, optionally a custom alias and a TTL.",
@@ -455,10 +474,11 @@ export const URL_SHORTENER: Diagram = {
       id: "e4",
       from: "write-api",
       to: "alias-store",
+      tier: "data",
       label: "single insert",
       detail: {
         what: "The row itself: alias, long_url, owner, created_at and any expiry, written once and never updated.",
-        why: "Immutability is what makes every cache downstream safe. If this row could change under readers, none of the edge or memory caching in the diagram would be sound without invalidation on every write.",
+        why: "Immutability is what makes every cache downstream safe. If this row could change under readers, none of the edge or memory caching upstream of it would be sound without invalidation on every write.",
         numbers: ["1.2k inserts/s", "~500B per row"],
         breaks:
           "The partition key is decided here for good. Time-ordered aliases under range partitioning would put all 1.2k inserts/s onto one partition.",
@@ -468,6 +488,7 @@ export const URL_SHORTENER: Diagram = {
       id: "e5",
       from: "write-api",
       to: "cache",
+      tier: "data",
       label: "warm on create",
       detail: {
         what: "Populating the memory cache with the mapping at creation time rather than waiting for the first reader to miss.",
@@ -481,8 +502,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e6",
       from: "clicker",
       to: "cdn",
+      tier: "hot",
       label: "GET /{alias}",
-      animated: true,
       detail: {
         what: "Every click in the system, arriving at the nearest PoP rather than at your infrastructure.",
         why: "This is the hot path and the reason the architecture exists. Terminating it as far from the database as possible is the single lever that makes 120k reads/s cheap.",
@@ -495,8 +516,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e7",
       from: "cdn",
       to: "clicker",
+      tier: "hot",
       label: "302, ~95% of clicks, ~10ms",
-      animated: true,
       offset: 70,
       detail: {
         what: "The cached redirect response returned straight from the PoP, with Location and a 60-second freshness header.",
@@ -510,8 +531,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e8",
       from: "cdn",
       to: "coalesce",
+      tier: "hot",
       label: "miss, ~6k/s",
-      animated: true,
       detail: {
         what: "The 5% of requests the edge cannot answer: cold aliases and entries whose 60-second TTL has just lapsed. The response that comes back is what the PoP then caches for the next minute.",
         why: "The miss rate, not the miss latency, is the number to watch. A p99 of 100ms is met only because this path is rare, so a hit-rate regression is a latency incident rather than a cost one.",
@@ -524,8 +545,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e9",
       from: "coalesce",
       to: "resolve",
+      tier: "hot",
       label: "one read per key",
-      animated: true,
       detail: {
         what: "The single request per alias per server that is allowed past the gate; every other request for that alias waits on its result.",
         why: "This is where a herd becomes a lookup. Everything downstream of this arrow is sized for 6k/s of distinct work, which only holds because duplicates were collapsed before it.",
@@ -538,8 +559,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e10",
       from: "resolve",
       to: "cache",
+      tier: "hot",
       label: "cache lookup",
-      animated: true,
       detail: {
         what: "The memory lookup for alias to long_url, including tombstones for known-missing aliases.",
         why: "It answers about 99% of what gets past the edge, at roughly 30ms end to end, which is the difference between meeting the p99 target and depending on the database for it.",
@@ -552,11 +573,12 @@ export const URL_SHORTENER: Diagram = {
       id: "e11",
       from: "resolve",
       to: "alias-store",
+      tier: "data",
       label: "miss, ~60/s",
       detail: {
         what: "The point read of last resort, one primary-key lookup on the hash-partitioned table.",
         why: "It is drawn thin on purpose: about 60 reads/s in steady state, and keeping it there is the justification for every layer above. This is also the path that costs about 80ms, so it is the only place the latency budget is at risk.",
-        numbers: ["~60 reads/s", "~80ms end to end", "step-change alert on this rate"],
+        numbers: ["~60 reads/s", "~80ms end to end", "alert on any 2x step-change in this rate"],
         breaks:
           "Distinct 404s bypass every protection above: they always miss and coalescing cannot merge them, so an enumeration scan lands here at full rate unless the misses are negatively cached.",
       },
@@ -565,8 +587,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e12",
       from: "alias-store",
       to: "cache",
+      tier: "control",
       label: "back-fill on the way out",
-      dashed: true,
       detail: {
         what: "The row written into the memory cache as the response passes back through the resolver, and pushed to the edge with the redirect.",
         why: "It makes a cold alias a one-time cost. The second request for the same alias is already warm, which is what stops a slowly-warming viral link from paying the 80ms store path repeatedly.",
@@ -579,8 +601,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e13",
       from: "alias-store",
       to: "cold-archive",
+      tier: "control",
       label: "no click in 12 months",
-      dashed: true,
       detail: {
         what: "Dormant rows aged out of the hot partitioned store into columnar files on object storage, leaving an index entry behind so the alias still resolves.",
         why: "The hot tier is sized and priced for 60 reads/s against a working set of days, not for a decade of rows that will never be read again. Tiering is what keeps 365B rows from all living on the storage the redirect path depends on.",
@@ -593,11 +615,11 @@ export const URL_SHORTENER: Diagram = {
       id: "e14",
       from: "resolve",
       to: "emit",
+      tier: "control",
       label: "click event",
-      dashed: true,
       detail: {
         what: "The resolved redirect handed to the emitter as an event of about 200B, after the response is already on its way.",
-        why: "It is dashed because nothing on the redirect depends on it. The ordering is the point: respond, then record, so a broker outage costs analytics accuracy and never availability.",
+        why: "Nothing on the redirect depends on it. The ordering is the point: respond, then record, so a broker outage costs analytics accuracy and never availability.",
         numbers: ["~6k events/s from origin", "~200B each"],
         breaks:
           "Only origin-served clicks pass down this arrow. The other 95% were answered at the edge and have to be recovered from the CDN's logs instead.",
@@ -607,8 +629,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e15",
       from: "emit",
       to: "kafka",
+      tier: "control",
       label: "~6k/s, no ack",
-      dashed: true,
       detail: {
         what: "The event pushed onto the durable log without waiting for an acknowledgement.",
         why: "Waiting here would put broker latency inside a p99 budget of 100ms and make a 99.99% redirect SLO depend on a 99.9% pipeline, so the producer deliberately does not learn whether the write landed.",
@@ -621,13 +643,13 @@ export const URL_SHORTENER: Diagram = {
       id: "e16",
       from: "cdn",
       to: "cdn-logs",
+      tier: "control",
       label: "delivery logs",
-      dashed: true,
       offset: 90,
       detail: {
         what: "The CDN's request logs for redirects it served itself, shipped out on the vendor's own schedule.",
         why: "It is the only record of about 95% of clicks, because those requests never touched your infrastructure. Edge caching buys the load reduction and hands you this as the bill.",
-        numbers: ["~114k clicks/s of the 120k total", "lag of minutes"],
+        numbers: ["~114k clicks/s of the 120k total", "lag of 5 to 15 minutes"],
         breaks:
           "You do not control the sampling or the delivery schedule, so this arrow is the reason click totals are approximate rather than merely delayed.",
       },
@@ -636,8 +658,8 @@ export const URL_SHORTENER: Diagram = {
       id: "e17",
       from: "cdn-logs",
       to: "kafka",
+      tier: "control",
       label: "edge clicks, batched",
-      dashed: true,
       detail: {
         what: "Parsed log lines joined onto the same event stream the origin-served clicks use.",
         why: "Two sources have to converge before the warehouse, or stats would need to union a real-time stream against a lagging log dump on every query. Merging here keeps the read side simple.",
@@ -650,6 +672,7 @@ export const URL_SHORTENER: Diagram = {
       id: "e18",
       from: "kafka",
       to: "warehouse",
+      tier: "data",
       label: "batched consumer",
       detail: {
         what: "The consumer draining the log in batches and writing columnar files.",
@@ -663,12 +686,12 @@ export const URL_SHORTENER: Diagram = {
       id: "e19",
       from: "takedown",
       to: "cdn",
+      tier: "control",
       label: "purge",
-      dashed: true,
       detail: {
         what: "An explicit purge call for the alias, invalidating it across PoPs rather than waiting out the TTL.",
         why: "Without it, a link flagged as phishing keeps redirecting from the edge for up to 60 more seconds, which is a live exploit rather than a stale cache. Purges are billed per call, so this is reserved for safety cases.",
-        numbers: ["propagates in seconds", "alert above 30s propagation"],
+        numbers: ["propagates across PoPs in under 5 seconds", "alert above 30s propagation"],
         breaks:
           "It reaches the edge and nothing beyond it. A browser that cached a 301 is unreachable, and archives and link previewers already copied the destination.",
       },
@@ -677,13 +700,13 @@ export const URL_SHORTENER: Diagram = {
       id: "e20",
       from: "takedown",
       to: "alias-store",
+      tier: "control",
       label: "deleted_at, then 410",
-      dashed: true,
       offset: 130,
       detail: {
         what: "Setting deleted_at on the row and clearing the cache entry in the same write, after which the alias answers 410 Gone.",
         why: "Origin has to become correct first, or a purge just refills the edge with the same bad redirect. 410 rather than 404 tells crawlers and clients the difference between deliberately removed and never existed.",
-        numbers: ["origin correct immediately", "edge correct within 60s, or seconds with a purge"],
+        numbers: ["origin correct with 0 propagation delay", "edge correct within 60s, or under 5s with a purge"],
         breaks:
           "The row is retained rather than deleted, because a hard delete would let the alias be reissued to somebody else and inherit its traffic.",
       },

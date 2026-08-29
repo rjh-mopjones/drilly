@@ -10,12 +10,30 @@ export const WEB_SEARCH: Diagram = {
     shape:
       "One index split a thousand ways by document, built offline into immutable segments, and queried by asking every shard at once and merging their twenty best answers inside a hard deadline.",
     beats: [
-      "Acquisition is not this system's problem. A durable stream of fetched pages arrives from the crawler (question 6), roughly 29k documents a second, and everything upstream of that stream, politeness, dedup, traps, belongs to a different design with different constraints.",
-      "Index building is an offline batch job, never a write against a serving node. Tokenise, emit (term, doc_id, positions, field), shuffle by term, sort by doc id, delta and varbyte encode, and write an immutable generation-tagged segment. Publishing is a pointer swap and a bad build rolls back in seconds.",
-      "The index is split by document, not by term. Each of ~1000 leaves owns ~50M documents and the complete index for them, so a query is answered locally and only ~800 bytes crosses the network. Term partitioning would have to move the smallest posting list, ~180MB, per query: ~9TB/s at 50k uncached QPS, a number that ends the design rather than one you engineer around.",
-      "The query path is a cache, a fan-out and a merge. The result cache absorbs ~50% of traffic because query popularity is Zipf. What misses goes through a root and ~30 mid-tier mergers to all 1000 leaves under a 40ms hard deadline, and the root returns once 99% of shards have answered.",
-      "Retrieval and ranking then split by cost profile. A cheap bounded scorer at the leaf prunes a ~750k union to ~5k scored documents and emits 20; an expensive cross-encoder reorders only the top 500 centrally on a GPU. Retrieval is cheap per document over billions so it is pushed down, ranking is expensive per document over hundreds so it is pulled up.",
-      "The budget is the thing to put on the board: cache lookup ~2ms, fan-out and leaf retrieval ~40ms behind the deadline with hedging at ~12ms, merge tree ~10ms, feature fetch ~20ms, cross-encoder ~50ms, snippets ~40ms, egress ~15ms. About 180ms against a 300ms SLO, and the remaining 120ms absorbs the tail rather than funding growth.",
+      {
+        text: "Acquisition is not this system's problem. A durable stream of fetched pages arrives from a web crawler, roughly 29k documents a second, and everything upstream of that stream, politeness, dedup, traps, belongs to a different design with different constraints.",
+        lights: ["crawl-stream", "indexer", "e11"],
+      },
+      {
+        text: "Index building is an offline batch job, never a write against a serving node. Tokenise, emit (term, doc_id, positions, field), shuffle by term, sort by doc id, delta and varbyte encode, and write an immutable generation-tagged segment. Publishing is a pointer swap and a bad build rolls back in seconds.",
+        lights: ["indexer", "segments", "e12"],
+      },
+      {
+        text: "The index is split by document, not by term. Each of ~1000 leaves owns ~50M documents and the complete index for them, so a query is answered locally and only ~800 bytes crosses the network. Term partitioning would have to move the smallest posting list, ~180MB, per query: ~9TB/s at 50k uncached QPS, a number that ends the design rather than one you engineer around.",
+        lights: ["leaf-group", "leaf", "segments", "e4", "e5"],
+      },
+      {
+        text: "The query path is a cache, a fan-out and a merge. The result cache absorbs ~50% of traffic because query popularity is Zipf. What misses goes through a root and ~30 mid-tier mergers to all 1000 leaves under a 40ms hard deadline, and the root returns once 99% of shards have answered.",
+        lights: ["query-service", "query-cache", "fanout", "leaf", "e1", "e2", "e3"],
+      },
+      {
+        text: "Retrieval and ranking then split by cost profile. A cheap bounded scorer at the leaf prunes a ~750k union to ~5k scored documents and emits 20; an expensive cross-encoder reorders only the top 500 centrally on a GPU. Retrieval is cheap per document over billions so it is pushed down, ranking is expensive per document over hundreds so it is pulled up.",
+        lights: ["retrieval", "merge", "reranker", "e7", "e8"],
+      },
+      {
+        text: "The budget is what has to add up: cache lookup ~2ms, fan-out and leaf retrieval ~40ms behind the deadline with hedging at ~12ms, merge tree ~10ms, feature fetch ~20ms, cross-encoder ~50ms, snippets ~40ms, egress ~15ms. About 180ms against a 300ms SLO, and the remaining 120ms absorbs the tail rather than funding growth.",
+        lights: ["snippets", "e9"],
+      },
     ],
     crux:
       "You have to bound the work of one query twice, and the second bound is fragile. Partitioning caps how much index a machine looks at; early termination caps how many matches it actually scores. But early termination is only rank-safe while the score is a sum of per-term contributions with known ceilings, which is precisely why the expensive model has to sit above retrieval and score a candidate set someone else produced.",
@@ -165,13 +183,13 @@ export const WEB_SEARCH: Diagram = {
     },
     {
       id: "crawl-stream",
-      label: "Crawl stream (#6)",
+      label: "Crawl stream",
       sub: "fetched pages, Kafka",
       kind: "external",
       col: 2,
       row: 0,
       detail: {
-        what: "The input contract: a durable stream of fetched pages produced by the crawler. Acquisition, politeness, traps and URL dedup all live in question 6, not here.",
+        what: "The input contract: a durable stream of fetched pages produced by a web crawler. Acquisition, politeness, traps and URL dedup all live in that separate system, not here.",
         why: "It is one box on purpose. This design owns indexing and serving; drawing the crawler would import a completely different set of constraints (per-host rate limits, robots, frontier scheduling) that change none of the decisions below it.",
         numbers: ["~5% of the corpus changes per day", "2.5B docs/day, ~29k docs/s", "~50KB HTML in, ~5KB text out"],
         breaks:
@@ -397,7 +415,7 @@ export const WEB_SEARCH: Diagram = {
       detail: {
         what: "The documents indexed since the last hourly publish, unioned with the base cursors before the leaf's local top-20 is taken.",
         why: "Freshness is additive rather than a separate query path, so a failure of this tier degrades freshness only and never correctness. A watermark drops the tier when the segment covering it lands.",
-        numbers: ["~234MB per leaf", "dropped by watermark on publish"],
+        numbers: ["~234MB per leaf", "dropped within 1 publish cycle of catching up"],
         breaks:
           "These documents carry no PageRank or click signal, so mixing them into one ranked list means two scoring regimes in the same top 10, which is why real-time results are capped unless the query is news-intent.",
       },
@@ -482,7 +500,7 @@ export const WEB_SEARCH: Diagram = {
       detail: {
         what: "A finished segment published to the leaf owning hash(doc_id) % 1000, which mmaps it and starts serving on a generation pointer swap.",
         why: "Publish is atomic and reversible because the unit is a whole immutable file with a generation tag. That is what makes a bad tokeniser build a seconds-long rollback rather than an incident.",
-        numbers: ["hourly incremental publish per shard", "canary on 1% of shards first"],
+        numbers: ["1 publish per shard per hour", "canary on 1% of shards first"],
         breaks:
           "A corrupt or mis-tokenised segment passes checksum but changes the result-count and score distribution, which is why the canary compares those against the previous generation rather than trusting the checksum.",
       },

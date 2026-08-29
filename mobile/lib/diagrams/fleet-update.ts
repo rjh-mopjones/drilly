@@ -10,12 +10,30 @@ export const FLEET_UPDATE: Diagram = {
     shape:
       "Two planes that meet only on the device: a control plane of tiny check-in requests that decides who gets the update and when, and a data plane of enormous immutable bytes that has no opinion about anything.",
     beats: [
-      "Do the arithmetic before drawing a box. About 460M reachable devices at a ~25MB delta is ~11.5PB of egress per release, which is ~76Gbps spread over 14 days, ~1.1Tbps compressed into 24 hours and ~4.3Tbps into 6. Nothing about the artifact changed, so duration is the capacity knob and every other decision is downstream of where you set it.",
-      "The release pipeline turns one build into a small matrix: one delta per source version per variant, capped at the versions covering ~90% of the fleet, with a full artifact for the tail. That is ~144 objects and ~17GB, small enough that every PoP holds the entire release. Cache hit rate is a rounding error from 100%, so this is an egress problem rather than a caching problem.",
-      "The control plane is where a naive design dies. Devices poll on a server-assigned, fully jittered schedule and 95% of calls answer 'nothing for you' in ~200 bytes with no write, which is ~5,800 req/s. The same fleet checking in during one synchronised minute is ~8.3M req/s, three orders of magnitude worse, so jitter is not a nicety, it is the load design.",
-      "The rollout controller decides and the device obeys. A stable cohort assigned at first contact, bands admitting cohorts progressively, and a not_before timestamp that smears arrivals inside a band so admitting 1% is not a 5M-device spike. Then the device gates on unmetered, charging and idle, and those conditions are the real schedule: they are why a rollout takes days when the bytes would take hours.",
-      "The loop closes through a permanent 1% holdback that never receives anything. Crash rate moves for reasons that have nothing to do with your build, so the analyser compares an admitted cohort against a concurrent never-updated one and halts on effect size and significance together. Without the holdback an automatic halt is superstition, and a halt that fires on noise gets muted within a month.",
-      "Deliberately not built: no push channel, because polling reaches more devices than push and delivering a notification is not delivering an update. No peer assist, on the arithmetic. No per-device progress table, because 500M rows of mutable state buys a compliance feature nobody asked for when cohort-level accounting answers every real question.",
+      {
+        text: "Do the arithmetic before drawing a box. About 460M reachable devices at a ~25MB delta is ~11.5PB of egress per release, which is ~76Gbps spread over 14 days, ~1.1Tbps compressed into 24 hours and ~4.3Tbps into 6. Nothing about the artifact changed, so duration is the capacity knob and every other decision is downstream of where you set it.",
+        lights: ["device-fleet", "cdn", "e3"],
+      },
+      {
+        text: "The release pipeline turns one build into a small matrix: one delta per source version per variant, capped at the versions covering ~90% of the fleet, with a full artifact for the tail. That is ~144 objects and ~17GB, small enough that every PoP holds the entire release. Cache hit rate is a rounding error from 100%, so this is an egress problem rather than a caching problem.",
+        lights: ["release-pipeline", "artifact-store", "cdn", "e1", "e2"],
+      },
+      {
+        text: "The control plane is where a naive design dies. Devices poll on a server-assigned, fully jittered schedule and 95% of calls answer 'nothing for you' in ~200 bytes with no write, which is ~5,800 req/s. The same fleet checking in during one synchronised minute is ~8.3M req/s, three orders of magnitude worse, so jitter is not a nicety, it is the load design.",
+        lights: ["checkin", "e6", "e7"],
+      },
+      {
+        text: "The rollout controller decides and the device obeys. A stable cohort assigned at first contact, bands admitting cohorts progressively, and a not_before timestamp that smears arrivals inside a band so admitting 1% is not a 5M-device spike. Then the device gates on unmetered, charging and idle, and those conditions are the real schedule: they are why a rollout takes days when the bytes would take hours.",
+        lights: ["rollout-controller", "band-ladder", "device-fleet", "e5", "e7", "e9"],
+      },
+      {
+        text: "The loop closes through a permanent 1% holdback that never receives anything. Crash rate moves for reasons that have nothing to do with your build, so the analyser compares an admitted cohort against a concurrent never-updated one and halts on effect size and significance together. Without the holdback an automatic halt is superstition, and a halt that fires on noise gets muted within a month.",
+        lights: ["holdback", "health-analyser", "e13", "e14"],
+      },
+      {
+        text: "Deliberately not built: no push channel, because polling reaches more devices than push and delivering a notification is not delivering an update. No peer assist, on the arithmetic. No per-device progress table, because 500M rows of mutable state buys a compliance feature nobody asked for when cohort-level accounting answers every real question.",
+        lights: ["checkin", "cdn", "rollout-state"],
+      },
     ],
     crux:
       "You cannot recall a device. Halting stops new devices receiving the build and does precisely nothing for the ones that already took it, so the only blast-radius control you own is how few devices you had admitted at the moment you noticed.",
@@ -126,7 +144,7 @@ export const FLEET_UPDATE: Diagram = {
       detail: {
         what: "Your code on someone else's device: it checks in, evaluates conditions, fetches, verifies the digest and signature, applies the delta and stages the result.",
         why: "It is the last remaining channel to the device and the only component in this design whose failure is unrecoverable. Everything else can be fixed by shipping something new, but a device that cannot ask for an update cannot be given one.",
-        numbers: ["stage then commit, with an on-device fallback", "max 3 attempts, exponential backoff with full jitter"],
+        numbers: ["max 3 attempts, exponential backoff with full jitter"],
         breaks:
           "Partial application leaving an inconsistent state. A post-apply self-check reported on the next check-in is the detection, and staging before committing is the reason the device can fall back on its own.",
         choice: {
@@ -157,17 +175,17 @@ export const FLEET_UPDATE: Diagram = {
     {
       id: "checkin",
       label: "Check-in service",
-      sub: "anycast, 95% answer NONE",
+      sub: "anycast, 95% answer empty",
       kind: "service",
       col: 2,
       row: 2,
       parent: "control-plane",
       detail: {
-        what: "The stateless endpoint devices poll: it reads rollout state for the device's cohort and answers either NONE or an artifact URL with a not_before timestamp.",
+        what: "The stateless endpoint devices poll: it reads rollout state for the device's cohort and answers either empty or an artifact URL with a not_before timestamp.",
         why: "It must be the most boring and most available service you operate, because it is the only channel to a device once that device is broken. It never writes on the negative path and never depends on the release pipeline being healthy.",
         numbers: ["~5,800 req/s average, ~17k/s at peak", "~200 byte negative, ~3ms cohort read"],
         breaks:
-          "Fleet resynchronisation after a correlated event. A carrier outage returning 40M devices at once produces a spike orders of magnitude above baseline, and the fix is to shed load with a cheap NONE rather than an error, because an error triggers a retry.",
+          "Fleet resynchronisation after a correlated event. A carrier outage returning 40M devices at once produces a spike orders of magnitude above baseline, and the fix is to shed load with a cheap empty answer rather than an error, because an error triggers a retry.",
         choice: {
           pick: "Jittered polling with a server-assigned next check-in interval",
           instead: "A push channel that tells devices an update is waiting, or a client-chosen fixed interval.",
@@ -205,7 +223,7 @@ export const FLEET_UPDATE: Diagram = {
     {
       id: "band-ladder",
       label: "Band ladder",
-      sub: "0.1 -> 1 -> 5 -> 20 -> 100%",
+      sub: "0.1 -> 1 -> 5 -> 20 -> 50 -> 100%",
       kind: "database",
       col: 1,
       row: 2,
@@ -283,7 +301,7 @@ export const FLEET_UPDATE: Diagram = {
       detail: {
         what: "A stream job computing crash rate, battery and engagement per admitted cohort bucket against the holdback, with confidence intervals, and driving widen or halt.",
         why: "A halt has to be a statement rather than a vibe. Comparing an admitted cohort against last week compares against a different world, so the analyser only ever works on a difference against a concurrent population.",
-        numbers: ["time to halt SLO under 30 minutes", "per-variant, not fleet aggregate"],
+        numbers: ["time to halt SLO under 30 minutes", "1 of 12 variants can regress invisibly in a fleet average"],
         breaks:
           "Halting on noise. An analyser that fires weekly gets muted within a month, and a muted halt is worse than no halt because everyone believes it is protecting them.",
         choice: {
@@ -306,7 +324,7 @@ export const FLEET_UPDATE: Diagram = {
       detail: {
         what: "A permanent cohort, roughly 1% of the fleet, that receives no release at all and exists purely as a concurrent baseline.",
         why: "Crash rate, battery drain and engagement all move for reasons that have nothing to do with your build. A concurrent holdback controls for the day, the weather, the football and the third-party outage in a way that last week's numbers cannot.",
-        numbers: ["~1% of 500M = ~5M devices", "membership rotated between releases"],
+        numbers: ["~1% of 500M = ~5M devices", "membership rotates once per release"],
         breaks:
           "A static holdback strands the same devices on an old version forever, which is why membership rotates: the cohort is permanent, the members are not.",
         choice: {
@@ -370,9 +388,9 @@ export const FLEET_UPDATE: Diagram = {
       tier: "hot",
       label: "verify, stage, commit",
       detail: {
-        what: "Digest and signature verification, then applying the delta and staging the result before committing it.",
+        what: "Digest and signature verification, then applying the delta and staging the result before committing it, ending in one of four outcomes: applied, failed to verify, failed to apply, or rolled back.",
         why: "Stage-then-commit is the only rollback that exists anywhere in this design, and it is local to the device. Once the commit lands there is no remote mechanism to undo it, which is the fact the entire band ladder is built around.",
-        numbers: ["result in {APPLIED, FAILED_VERIFY, FAILED_APPLY, ROLLED_BACK}"],
+        numbers: ["4 possible outcomes per attempt"],
         breaks:
           "A partial apply that leaves an inconsistent state and is only visible on the next check-in, which is why the device keeps the ability to fall back to its prior state without asking anyone.",
       },
@@ -386,8 +404,8 @@ export const FLEET_UPDATE: Diagram = {
       offset: 70,
       detail: {
         what: "The device's own state, evaluated after the server has said yes but before a single byte is requested.",
-        why: "Conditions are what stop you spending someone else's data allowance, and they are also the real pacing mechanism. The bytes would take hours; the conditions are why it takes a fortnight.",
-        numbers: ["conditions: [UNMETERED, CHARGING, IDLE]"],
+        why: "Conditions are what stop you spending someone else's data allowance, and they are also the real pacing mechanism: unmetered network, charging, and idle, all three at once. The bytes would take hours; the conditions are why it takes a fortnight.",
+        numbers: ["3 conditions must hold at once"],
         breaks:
           "Devices that never satisfy them never update, and they are concentrated in particular regions and price tiers, so the admitted-to-eligible step is where a plateaued rollout is almost always diagnosed.",
       },
@@ -411,12 +429,12 @@ export const FLEET_UPDATE: Diagram = {
       from: "checkin",
       to: "update-client",
       tier: "hot",
-      label: "NONE, or url + not_before",
+      label: "none, or url + not_before",
       offset: 60,
       detail: {
-        what: "The answer: usually NONE, and when it is not, an artifact URL, digest, signature, conditions and a not_before timestamp minutes to hours out.",
+        what: "The answer: usually empty, and when it is not, an artifact URL, digest, signature, conditions and a not_before timestamp minutes to hours out. Every response, empty or not, also carries the next check-in interval.",
         why: "It carries a time rather than a yes, and that is the whole trick. Admitting a 1% band is admitting 5M devices, and if they all acted on their next check-in you would have a 5M-device spike against the CDN and the telemetry pipeline at once.",
-        numbers: ["~95% of responses are NONE at ~200 bytes", "every response carries next_checkin_after_s"],
+        numbers: ["~95% of responses are empty, at ~200 bytes"],
         breaks:
           "A client with a hardcoded interval is a client you cannot slow down, so the interval always comes from the server even when there is nothing to say.",
       },
@@ -500,7 +518,7 @@ export const FLEET_UPDATE: Diagram = {
       detail: {
         what: "The comparison that makes a halt decision defensible: admitted cohort metrics against the concurrent never-updated population.",
         why: "It controls for everything that is not your build. The same day, the same third-party outage, the same weather, so the difference is attributable and comes with a confidence interval instead of a hunch.",
-        numbers: ["halt requires effect size and significance together"],
+        numbers: ["2 conditions: effect size past a threshold and 95% confidence"],
         breaks:
           "The most important comparison here is not crash rate but check-in rate: admitted cohorts checking in less than the holdback is the signature of the release having broken the update client, and a silent device reports nothing else.",
       },

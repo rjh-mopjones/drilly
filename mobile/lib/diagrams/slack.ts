@@ -10,12 +10,30 @@ export const SLACK: Diagram = {
     shape:
       "This is a tenancy problem with a chat front end: the workspace, not the user and not the channel, is the unit of placement, and every box below the edge belongs to exactly one tenant's shard.",
     beats: [
-      "Resolution happens before anything else. The edge terminates TLS, takes the workspace from the hostname or the token, and looks it up in a 150MB directory it holds entirely in memory. A request that does not resolve to a tenant is rejected there, because a default tenant and a fallback shard are how cross-tenant bugs get in.",
-      "A shard is a named bundle of five things: a gateway pool, a database keyspace, a search index home, an object-store prefix and a key alias. They stay together because every enterprise obligation, delete and retain and hold and re-key and prove residency, is one operation across all five at once rather than a scan of everybody's data.",
-      "Delivery is the standard chat shape and gets one line: the gateway writes to the keyspace, acknowledges only after the write commits, then publishes once to the channel's topic. Every gateway holding a subscriber consumes once and pushes down the sockets it owns, so a 100,000-member #general costs 300 consumes rather than 100,000 pushes.",
-      "Read state is the write load nobody budgets for. In a workplace tool people read roughly ten times more than they write, so unread is tracked as a high-water cursor per user per channel plus a server-side mute flag, which also lets the gateway decline to push at all to people who muted the channel.",
-      "Search is the cost centre and it is where tenancy stops being physical. Five years of history is around 380TB of index, comparable to the message store in bytes and far worse per byte, so the long tail shares indices behind a workspace routing key and only the top two percent get their own.",
-      "Placement is a forecast and forecasts go stale, so moving a live workspace between shards has to be routine maintenance: snapshot the keyspace, tail the change stream, flip the directory row when tail lag is under a second, let clients reconnect from their cursors.",
+      {
+        text: "Resolution happens before anything else. The edge terminates TLS, takes the workspace from the hostname or the token, and looks it up in a 150MB directory it holds entirely in memory. A request that does not resolve to a tenant is rejected there, because a default tenant and a fallback shard are how cross-tenant bugs get in.",
+        lights: ["edge", "directory", "e1", "e2"],
+      },
+      {
+        text: "A shard is a named bundle of five things: a gateway pool, a database keyspace, a search index home, an object-store prefix and a key alias. They stay together because every enterprise obligation, delete and retain and hold and re-key and prove residency, is one operation across all five at once rather than a scan of everybody's data.",
+        lights: ["shard"],
+      },
+      {
+        text: "Delivery is the standard chat shape and gets one line: the gateway writes to the keyspace, acknowledges only after the write commits, then publishes once to the channel's topic. Every gateway holding a subscriber consumes once and pushes down the sockets it owns, so a 100,000-member #general costs 300 consumes rather than 100,000 pushes.",
+        lights: ["gateway", "messages", "topics", "e5", "e6", "e7"],
+      },
+      {
+        text: "Read state is the write load nobody budgets for. In a workplace tool people read roughly ten times more than they write, so unread is tracked as a high-water cursor per user per channel plus a server-side mute flag, which also lets the gateway decline to push at all to people who muted the channel.",
+        lights: ["readstate", "e8", "e9"],
+      },
+      {
+        text: "Search is the cost centre and it is where tenancy stops being physical. Five years of history is around 380TB of index, comparable to the message store in bytes and far worse per byte, so the long tail shares indices behind a workspace routing key and only the top two percent get their own.",
+        lights: ["indexer", "search", "e10", "e11"],
+      },
+      {
+        text: "Placement is a forecast and forecasts go stale, so moving a live workspace between shards has to be routine maintenance: snapshot the keyspace, tail the change stream, flip the directory row when tail lag is under a second, let clients reconnect from their cursors.",
+        lights: ["placement", "directory", "e17", "e18"],
+      },
     ],
     crux:
       "The customers are not the same size. The median workspace has 10 daily actives and the largest has 150,000, a 15,000x spread running the same code, and no single placement strategy is right at both ends. Hash tenants across a pool and one tenant swamps its bucket; give every tenant its own bundle and 735,000 small workspaces cost more to run than they pay. So the answer is bimodal on purpose, and the price is a placement problem plus live migration machinery you have to keep exercising.",
@@ -67,7 +85,7 @@ export const SLACK: Diagram = {
       detail: {
         what: "Terminates TLS, reads the workspace from the hostname or the token, resolves it to a shard from the in-memory directory, and routes. Nothing downstream can reach another tenant.",
         why: "This is where tenant correctness stops being a predicate a feature team can forget and becomes a routing decision made once. On a pooled fleet a missing WHERE workspace_id returns another company's messages, and the only defences are review and testing, both probabilistic.",
-        numbers: ["resolution is a memory lookup, not a hop", "no default tenant, no fallback shard"],
+        numbers: ["resolution: 0 network hops, a memory lookup", "0 default tenant, 0 fallback shard"],
         breaks:
           "An unresolvable tenant must fail closed. A rise in the resolve error rate usually means directory staleness, and the tempting fix, a fallback shard, is the exact bug the layer exists to prevent.",
         choice: {
@@ -90,7 +108,7 @@ export const SLACK: Diagram = {
       detail: {
         what: "One strongly consistent table mapping workspace_id to (shard_id, region, plan, key_alias, state). The only globally scoped store in the system.",
         why: "Keeping the global list at exactly one entry is the discipline every other guarantee rests on. Residency becomes a row you can read to an auditor, and migration becomes a row you flip, because placement is data rather than configuration spread across services.",
-        numbers: ["750k rows x ~200B = 150MB", "a few thousand writes a day", "fits in memory on every edge node"],
+        numbers: ["750k rows x ~200B = 150MB", "a few thousand writes a day", "150MB fits in memory on every edge node"],
         breaks:
           "Version skew across edge nodes after a migration flip: some edges route to the old shard and their writes fail retryably until the refresh lands.",
         choice: {
@@ -304,7 +322,7 @@ export const SLACK: Diagram = {
       detail: {
         what: "Places a new workspace on the least loaded shard in its region by weighted score, and moves live tenants between shards by snapshot, change-stream tail and a directory flip.",
         why: "Homing a tenant turns compliance from a query problem into a routing problem, and the bill for that is paid here. The score is a forecast, tenants grow, so placement is continuously slightly wrong and rebalancing has to be maintenance rather than an incident.",
-        numbers: ["score = sockets, msgs/s, index bytes, plan", "write unavailability 500ms to 2s", "flip gated on tail lag under 1s"],
+        numbers: ["score: 4 inputs — sockets, msgs/s, index bytes, plan", "write unavailability 500ms to 2s", "flip gated on tail lag under 1s"],
         breaks:
           "Flipping the directory before the tail drains. Gate on tail lag, keep the flip reversible for the length of the window, and make source writes fail retryably rather than be lost.",
         choice: {
@@ -341,7 +359,7 @@ export const SLACK: Diagram = {
       label: "workspace to shard",
       detail: {
         what: "The tenant resolution lookup: workspace_id to (shard_id, region, plan, key_alias, state).",
-        why: "It runs before authentication does any real work, because everything downstream is scoped by the answer. It is drawn as a control path because it carries no message data and it is a memory read rather than a hop.",
+        why: "It runs before authentication does any real work, because everything downstream is scoped by the answer. It is a control path because it carries no message data and it is a memory read rather than a hop.",
         numbers: ["150MB held in full on every edge node"],
         breaks:
           "An unknown tenant must fail closed and a stale directory must serve its last known version, because the alternative defaults are a fallback shard and a cross-tenant read.",

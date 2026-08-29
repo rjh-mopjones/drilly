@@ -10,12 +10,30 @@ export const MATCHING_ENGINE: Diagram = {
     shape:
       "This is the inside of the box the exchange design draws as one component: not gateways, risk and market data, but the memory layout of a single book, where a price is an array subscript, a level is a cache line, and every hot operation is O(1).",
     beats: [
-      "Start by placing the boundary. The venue question already gives you sequenced events arriving at one single-threaded worker per instrument, so everything above this diagram is settled. What is left is the question that actually gets asked: what is the book made of, and what does one event touch.",
-      "Three facts about the traffic decide the layout before any structure is chosen. Nearly every event lands at the best price or one level in from it, cancels outnumber fills by 10 to 20 to one, and an order's whole life is arrival, some partial fills, departure. Nothing in that asks for search.",
-      "So the cancel path gets the structure, because it carries roughly 90% of a 2M msg/s peak. The gateway assigns a dense internal id, a flat slot table turns that id into a node with one array load, and an intrusive doubly linked list lets the node unlink itself from the middle of a queue without the container being consulted.",
-      "The matching loop itself is a while loop with a min() in it. Read the best-price pointer, subscript the level array, take the FIFO head because that is time priority, fill min(incoming, resting), and stop when the incoming price no longer crosses. A sweep across two levels touches about four cache lines, and on an active symbol they are already in L1.",
-      "The order types bend that loop rather than replace it. A limit remainder rests at the tail of its level and becomes new liquidity, market and IOC remainders are cancelled, and FOK is the only genuinely two-pass case because it must confirm the whole quantity is there before printing anything.",
-      "The costs are honest and structural. The dense tick array is 486KB per book, which is fine for 500 hot symbols and 4.9GB for all 10,000, so the long tail stays on a tree. And a book cannot be threaded: splitting it reorders fills and destroys time priority, which is a correctness bug rather than a scaling lever.",
+      {
+        text: "Start by placing the boundary. The venue question already gives you sequenced events arriving at one single-threaded worker per instrument, so everything above this line is settled. What is left is the question that actually gets asked: what is the book made of, and what does one event touch.",
+        lights: ["inbound", "e1"],
+      },
+      {
+        text: "Three facts about the traffic decide the layout before any structure is chosen. Nearly every event lands at the best price or one level in from it, cancels outnumber fills by 10 to 20 to one, and an order's whole life is arrival, some partial fills, departure. Nothing in that asks for search.",
+        lights: ["best-ptr", "slot-table"],
+      },
+      {
+        text: "So the cancel path gets the structure, because it carries roughly 90% of a 2M msg/s peak. The gateway assigns a dense internal id, a flat slot table turns that id into a node with one array load, and an intrusive doubly linked list lets the node unlink itself from the middle of a queue without the container being consulted.",
+        lights: ["dispatch", "slot-table", "fifo", "e2", "e3"],
+      },
+      {
+        text: "The matching loop itself is a while loop with a min() in it. Read the best-price pointer, subscript the level array, take the FIFO head because that is time priority, fill min(incoming, resting), and stop when the incoming price no longer crosses. A sweep across two levels touches about four cache lines, and on an active symbol they are already in L1.",
+        lights: ["match-loop", "best-ptr", "level-array", "fifo", "e5", "e6", "e7"],
+      },
+      {
+        text: "The order types bend that loop rather than replace it. A limit remainder rests at the tail of its level and becomes new liquidity, market and IOC remainders are cancelled, and FOK is the only genuinely two-pass case because it must confirm the whole quantity is there before printing anything.",
+        lights: ["remainder", "e10", "e11", "e12"],
+      },
+      {
+        text: "The costs are honest and structural. The dense tick array is 486KB per book, which is fine for 500 hot symbols and 4.9GB for all 10,000, so the long tail stays on a tree. And a book cannot be threaded: splitting it reorders fills and destroys time priority, which is a correctness bug rather than a scaling lever.",
+        lights: ["level-array", "tree-tail", "e13"],
+      },
     ],
     crux:
       "Every instinct you have about making this faster is wrong in a specific way. You optimise the fill path when cancels are 90% of the traffic, and you reach for threads when a second writer inside one book silently reorders fills and breaks byte-identical replay.",
@@ -30,6 +48,13 @@ export const MATCHING_ENGINE: Diagram = {
       id: "book-group",
       label: "The book in memory",
       kind: "zone",
+      detail: {
+        what: "The four structures that together are one instrument's order book: the id-to-node slot table, the best-price pointer, the tick-indexed level array, and the intrusive FIFO threaded through the order records themselves.",
+        why: "None of these is useful alone; together they turn every hot operation into an array index or a pointer follow rather than a search. Grouping them is a claim about ownership: exactly one thread mutates all four, and nothing outside this boundary may touch them directly.",
+        numbers: ["4 structures, 1 writer thread", "~12.8MB resident per hot book"],
+        breaks:
+          "Any structure here that drifts out of sync with the others, a level total that disagrees with its FIFO's members for instance, is a silent correctness bug rather than a crash, which is why the invariant checker exists just outside this boundary.",
+      },
     },
     {
       id: "inbound",
@@ -40,10 +65,10 @@ export const MATCHING_ENGINE: Diagram = {
       row: 0,
       detail: {
         what: "The bounded inbound queue for one matching core, holding new orders, cancels and replaces already stamped with a gap-free sequence number.",
-        why: "Everything upstream of this box is the venue's problem and is already decided: events arrive totally ordered and routed by hash(instrumentId), so this book has exactly one writer for the life of the process. That single fact is what lets every structure below it be mutated with no synchronisation at all.",
-        numbers: ["~2M msg/s venue peak", "200 msg/s per instrument on average", "bounded depth, explicit rejection"],
+        why: "Everything upstream of this box is the venue's problem and is already decided: events arrive totally ordered and routed by hash(instrumentId), so this order book has exactly one writer for the life of the process. That single fact is what lets every structure below it be mutated with no synchronisation at all.",
+        numbers: ["~2M msg/s venue peak", "200 msg/s per instrument on average"],
         breaks:
-          "Under burst the queue is the thing that grows without bound if producers outrun the matcher, so it must reject with a busy code rather than silently drop or grow.",
+          "Under burst the queue is the thing that grows without bound if producers outrun the matcher, so it must reject with a busy code and bounded depth rather than silently drop or grow.",
         choice: {
           pick: "A pre-allocated Disruptor-style ring, one per shard, bounded with an explicit rejection policy",
           instead: "An ArrayBlockingQueue or any allocating unbounded queue per worker.",
@@ -62,8 +87,8 @@ export const MATCHING_ENGINE: Diagram = {
       row: 0,
       detail: {
         what: "The fork at the top of the worker loop: convert the price to an integer tick, then send a new order to the matching loop and a cancel straight to the slot table.",
-        why: "The two paths have almost nothing in common. A new order arrives carrying its price so it knows exactly which level it belongs to; a cancel arrives carrying only an id and has to find a node that could be anywhere in any level. Separating them here is what lets the cancel path be one load rather than a search.",
-        numbers: ["replace = cancel then insert, loses time priority", "integer ticks, never floats"],
+        why: "The two paths have almost nothing in common. A new order arrives carrying its price so it knows exactly which level it belongs to; a cancel arrives carrying only an id and has to find a node that could be anywhere in any level. Separating them here is what lets the cancel path be one load rather than a search. Prices are integer ticks, never floats, and a replace is a cancel followed by an insert, which loses the order's time priority.",
+        numbers: [],
         breaks:
           "A floating-point price is the single most common correctness bug in a first implementation: it makes replay diverge on a different CPU or compiler, and divergence in a matching engine is a regulatory incident.",
         choice: {
@@ -106,8 +131,8 @@ export const MATCHING_ENGINE: Diagram = {
       row: 2,
       detail: {
         what: "A participant comparison between the incoming order and the specific resting order about to trade, applying cancel-newest, cancel-resting or decrement-both.",
-        why: "It has to sit inside the inner loop because it compares two concrete orders, not two accounts in the abstract. Structurally the interesting part is what the policy does: it removes a resting order from the middle of a price level, which is exactly the operation the intrusive list already makes free.",
-        numbers: ["one participant-id comparison per candidate fill", "STP groups, not just accounts"],
+        why: "It has to sit inside the inner loop because it compares two concrete orders, not two accounts in the abstract, and the comparison groups by STP group rather than just by account. Structurally the interesting part is what the policy does: it removes a resting order from the middle of a price level, which is exactly the operation the intrusive list already makes free.",
+        numbers: ["one participant-id comparison per candidate fill"],
         breaks:
           "A spike in trigger rate usually means a misconfigured participant or a probing strategy rather than a bug, so the metric needs a baseline or it pages for the wrong reason.",
         choice: {
@@ -122,16 +147,16 @@ export const MATCHING_ENGINE: Diagram = {
     {
       id: "remainder",
       label: "Remainder handling",
-      sub: "LIMIT rests; MARKET/IOC/FOK cancel",
+      sub: "limit rests; others cancel",
       kind: "service",
       col: 1,
       row: 2,
       detail: {
-        what: "What happens to unfilled quantity when the loop stops: a limit DAY remainder rests and becomes new liquidity, everything else is cancelled.",
+        what: "What happens to unfilled quantity when the loop stops: a limit day-order remainder rests and becomes new liquidity, everything else is cancelled.",
         why: "This is where the order types live, and they bend the loop rather than replace it. Resting is the step that closes the cycle, because today's remainder is the resting liquidity tomorrow's aggressive order fills against, which is also why the book is self-bounding rather than an unbounded queue.",
-        numbers: ["FOK is the only two-pass case", "market orders need a collar of N ticks"],
+        numbers: ["FOK is the only two-pass case"],
         breaks:
-          "A market order with no price collar sweeps a thin book to an absurd print, and the resulting trade is real money that somebody has to unwind.",
+          "A market order with no price collar sweeps a thin book to an absurd print, and the resulting trade is real money that somebody has to unwind. Every market order therefore carries a collar of a few ticks past which it will not fill.",
         choice: {
           pick: "One matching loop with per-TIF remainder handling, plus a read-only pre-pass for FOK",
           instead: "A separate matcher implementation per order type.",
@@ -150,7 +175,7 @@ export const MATCHING_ENGINE: Diagram = {
       row: 2,
       detail: {
         what: "The two output streams: sequenced execution reports to both parties, and top-of-book plus incremental updates to market data subscribers.",
-        why: "They are drawn as one box leaving the book but they have opposite consistency needs. An execution report is money and must be gap-detectable and exactly ordered; a market-data tick is a display artefact where only the newest snapshot matters and an intermediate one can be dropped with no loss.",
+        why: "They are one box leaving the book but they have opposite consistency needs. An execution report is money and must be gap-detectable and exactly ordered; a market-data tick is a display artefact where only the newest snapshot matters and an intermediate one can be dropped with no loss.",
         numbers: ["125k fills/s at a 15:1 cancel ratio", "thousands of market-data subscribers"],
         breaks:
           "A slow market-data subscriber must never backpressure the matcher. If the publisher cannot conflate, a single lagging consumer starts adding microseconds to every fill in the venue.",
@@ -176,7 +201,7 @@ export const MATCHING_ENGINE: Diagram = {
         why: "This exists solely because cancels are the hot path, not the fill path. A cancel arrives with an id and nothing else, so without this table it is a search; with it, the lookup is one predictable array load and the removal is one unlink.",
         numbers: ["~1.875M cancels/s at peak", "~4ns array load vs ~100ns per cache miss", "order record 64-128B"],
         breaks:
-          "The dense id space has to be assigned and recycled at the gateway. Externally assigned or sparse ids, such as multi-day GTC orders surviving a restart, need their own map to populate the table and you have paid the hash anyway.",
+          "The dense id space has to be assigned and recycled at the gateway. Externally assigned or sparse ids, such as multi-day good-til-cancelled (GTC) orders surviving a restart, need their own map to populate the table and you have paid the hash anyway.",
         choice: {
           pick: "A dense flat slot table keyed by an internal id assigned at the gateway",
           instead: "A hash map from client order id to node, which is what you write first.",
@@ -197,9 +222,9 @@ export const MATCHING_ENGINE: Diagram = {
       detail: {
         what: "A single index per side holding the current best bid and best ask, advanced by one tick at a time when a level empties.",
         why: "Every event starts here, because nearly all of them land at the touch or one level in from it. Making the best price a pointer read rather than a search is what removes the last comparison from the hot path, and the walk when a level empties reads adjacent memory the prefetcher already has.",
-        numbers: ["walk typically crosses 1-2 empty ticks", "best bid < best ask asserted after every apply"],
+        numbers: ["walk typically crosses 1-2 empty ticks"],
         breaks:
-          "A crossed book left resting, best bid at or above best ask, is a correctness incident rather than a bug: it means a fill was skipped, and the instrument has to be halted and replayed against a reference model.",
+          "A crossed book left resting, best bid at or above best ask, is a correctness incident rather than a bug: it means a fill was skipped, and the instrument has to be halted and replayed against a reference model. best bid under best ask is asserted after every apply for exactly this reason.",
         choice: {
           pick: "A moving pointer that nudges inward tick by tick",
           instead: "Re-deriving the best price with a scan, a binary search, or a separate heap of non-empty levels.",
@@ -264,8 +289,8 @@ export const MATCHING_ENGINE: Diagram = {
       row: 3,
       detail: {
         what: "The other implementation of the same interface: a sorted map keyed by price allocating only levels that actually hold orders, chosen per instrument at listing time.",
-        why: "It is drawn outside the dense book because it is not a fallback you hope never fires, it is what most of the venue's 10,000 instruments actually run. The array buys the last few microseconds for symbols where microseconds are worth paying for; everything else gets correctness by construction and costs nothing when nobody trades it.",
-        numbers: ["O(log P) is ~8 comparisons over a few hundred levels", "dense-banding all 10k books = 4.9GB", "structure chosen per instrument at listing"],
+        why: "It sits outside the dense book because it is not a fallback you hope never fires, it is what most of the venue's 10,000 instruments actually run. The structure is chosen per instrument at listing time. The array buys the last few microseconds for symbols where microseconds are worth paying for; everything else gets correctness by construction and costs nothing when nobody trades it.",
+        numbers: ["O(log P) is ~8 comparisons over a few hundred levels", "dense-banding all 10k books = 4.9GB"],
         breaks:
           "Two code paths and a structure choice made at listing time. Get the classification wrong and a symbol that becomes hot is stuck on the slow path until it is relisted.",
         choice: {
@@ -286,8 +311,8 @@ export const MATCHING_ENGINE: Diagram = {
       row: 3,
       detail: {
         what: "Two assertions run inline after each applied event, that the book is not crossed and that quantity is conserved across the fill, plus a slow reference matcher run in shadow on the same input.",
-        why: "The failures this design can produce are not crashes, they are quietly wrong trades, and a wrong trade surfaces weeks later as a regulatory incident rather than an alert. The assertions are a handful of comparisons against a 5 to 20 microsecond budget, which makes them cheap enough to leave on in production.",
-        numbers: ["a handful of comparisons per apply", "replay must be bit-identical", "zero tolerated sequence gaps"],
+        why: "The failures this design can produce are not crashes, they are quietly wrong trades, and a wrong trade surfaces weeks later as a regulatory incident rather than an alert. The assertions are a handful of comparisons against a 5 to 20 microsecond budget, which makes them cheap enough to leave on in production, and replay against the shadow model must be bit-identical.",
+        numbers: ["zero tolerated sequence gaps"],
         breaks:
           "Neither catches a wrong but self-consistent fill ordering. Only deterministic replay of a captured production log, asserting bit-identical output, closes that gap.",
         choice: {
@@ -305,12 +330,12 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e1",
       from: "inbound",
       to: "dispatch",
+      tier: "hot",
       label: "sequenced, one writer",
-      animated: true,
       detail: {
         what: "Ordered events being taken off the ring one at a time by the single thread that owns this instrument's book.",
-        why: "This arrow carries the whole safety argument. Nothing below it synchronises on anything, and that is only sound because events are stamped with a gap-free sequence number and routed by hash(instrumentId) to a fixed worker, so a book has exactly one writer for the life of the process.",
-        numbers: ["gap-free sequence numbers", "same symbol always the same thread"],
+        why: "This arrow carries the whole safety argument. Nothing below it synchronises on anything, and that is only sound because events are stamped with a gap-free sequence number and routed by hash(instrumentId) to the same fixed worker every time, so a book has exactly one writer for the life of the process.",
+        numbers: [],
         breaks:
           "A sequence gap or duplicate means the total order is broken, and matching past it would produce output nobody can reproduce. The correct response is to halt ingest, not to skip the gap.",
       },
@@ -319,8 +344,8 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e2",
       from: "dispatch",
       to: "slot-table",
+      tier: "hot",
       label: "cancel: ~90% of events",
-      animated: true,
       detail: {
         what: "A cancel or replace carrying only an order id, resolved to its node by a single array subscript.",
         why: "This is the hot path, and drawing it as the wide arrow is the point of the whole diagram. Cancels outnumber fills 10 to 20 to one, so the design spends its structure here rather than on the matching loop everybody focuses on.",
@@ -338,8 +363,8 @@ export const MATCHING_ENGINE: Diagram = {
       offset: 70,
       detail: {
         what: "The node removing itself from its price level's queue using the prev and next pointers it carries.",
-        why: "The order is somewhere in the middle of a queue that may hold thousands of entries, and the level header must not have to walk to find it. Because the pointers are on the order record, the removal is two stores and a decrement of the level's total, with the container never consulted.",
-        numbers: ["two pointer stores per unlink", "level totals decremented in place"],
+        why: "The order is somewhere in the middle of a queue that may hold thousands of entries, and the level header must not have to walk to find it. Because the pointers are on the order record, the removal is two stores and a decrement of the level's total, applied in place, with the container never consulted.",
+        numbers: ["two pointer stores per unlink"],
         breaks:
           "Forgetting to decrement the level's total_qty or count leaves a phantom size in published market data long after the order has gone, which is invisible until somebody trades against depth that does not exist.",
       },
@@ -348,8 +373,8 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e4",
       from: "dispatch",
       to: "match-loop",
+      tier: "hot",
       label: "new order: match",
-      animated: true,
       detail: {
         what: "A new order entering the matching loop, already converted to an integer tick and knowing which side it will walk.",
         why: "A new order is the easy direction: it arrives carrying its price, so it goes straight to a known level with no lookup at all. The loop's only job is to decide how much of it trades before it either rests or is cancelled.",
@@ -362,8 +387,8 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e5",
       from: "match-loop",
       to: "best-ptr",
+      tier: "hot",
       label: "best opposite price",
-      animated: true,
       detail: {
         what: "The loop reading where the opposite side currently starts, to test whether the incoming order crosses at all.",
         why: "This is the first read of every match and the reason the pointer exists. crosses(buy, ask) is buy.price >= ask_price, one comparison against a value already in a register, so an order that does not cross costs almost nothing before it goes off to rest.",
@@ -376,12 +401,12 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e6",
       from: "best-ptr",
       to: "level-array",
+      tier: "hot",
       label: "tick subscript, no search",
-      animated: true,
       detail: {
         what: "Turning the best price into a level header with one subtraction and one array index.",
         why: "This is the arrow the whole layout exists to make cheap. In a tree this hop is a walk of eight or more comparisons across pointer-chased nodes; here it is arithmetic, and the header it lands on is a single cache line that is already resident on an active symbol.",
-        numbers: ["levels[(price - band_low) / tick_size]", "one 64B cache line per level"],
+        numbers: ["one 64B cache line per level"],
         breaks:
           "The subscript is unchecked on the hot path by design, so a price outside the band is memory corruption rather than an exception. The band check belongs upstream at validation.",
       },
@@ -390,12 +415,12 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e7",
       from: "level-array",
       to: "fifo",
+      tier: "hot",
       label: "head = oldest resting",
-      animated: true,
       detail: {
         what: "Following the level header's head pointer to the oldest resting order at that price, which is the next one to fill.",
-        why: "Time priority is not enforced by any comparator, it is just which end of the list you read from. Filling from the head and appending at the tail is the entire implementation of price-time priority, which is why the tie-break is unambiguous on replay.",
-        numbers: ["FIFO head is always the next fill", "~4 cache lines for a two-level sweep"],
+        why: "Time priority is not enforced by any comparator, it is just which end of the list you read from: the head is always the next order to fill. Filling from the head and appending at the tail is the entire implementation of price-time priority, which is why the tie-break is unambiguous on replay.",
+        numbers: ["~4 cache lines for a two-level sweep"],
         breaks:
           "Pro-rata allocation replaces this single dereference with a walk of every order at the level, so a level of 2,000 orders costs 2,000 chases per fill instead of one.",
       },
@@ -404,6 +429,7 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e8",
       from: "fifo",
       to: "stp",
+      tier: "data",
       label: "incoming vs resting head",
       detail: {
         what: "The two concrete orders about to trade being handed to the self-trade check.",
@@ -417,8 +443,8 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e9",
       from: "stp",
       to: "outputs",
+      tier: "hot",
       label: "fill at the resting price",
-      animated: true,
       detail: {
         what: "An execution report per fill to both parties, plus the resulting change to the published top of book.",
         why: "The trade prints at the resting order's price and never the incoming one, which is what makes an aggressive limit a price ceiling rather than a bid. Both sides get a report because a fill is two obligations, and the maker and taker flags are what the clearing side downstream bills from.",
@@ -431,6 +457,7 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e10",
       from: "match-loop",
       to: "remainder",
+      tier: "data",
       label: "no longer crosses",
       detail: {
         what: "The exit from the loop, taken when the incoming order is exhausted or the next opposite level is no longer crossable.",
@@ -444,10 +471,10 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e11",
       from: "remainder",
       to: "fifo",
+      tier: "hot",
       label: "rest: append at tail",
-      animated: true,
       detail: {
-        what: "A limit DAY remainder being appended to the tail of its own side's level, and registered in the slot table so it can later be cancelled.",
+        what: "A limit day-order remainder being appended to the tail of its own side's level, and registered in the slot table so it can later be cancelled.",
         why: "This arrow is what makes the system a book rather than a filter: the remainder becomes the liquidity the next aggressive order fills against. Appending at the tail rather than anywhere else is the whole of time priority for that order's life.",
         numbers: ["1e4-1e5 resting orders on a liquid symbol", "64-128B per order record"],
         breaks:
@@ -458,6 +485,7 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e12",
       from: "remainder",
       to: "outputs",
+      tier: "data",
       label: "IOC / FOK / market: cancel",
       detail: {
         what: "The cancel-remainder path: an acknowledgement that the unfilled quantity is gone rather than resting.",
@@ -471,11 +499,11 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e13",
       from: "level-array",
       to: "tree-tail",
+      tier: "control",
       label: "sparse or wide tick bands",
-      dashed: true,
       detail: {
         what: "The structure choice, made per instrument at listing time from its tick size and price band rather than at runtime.",
-        why: "It is drawn as a control path because nothing flows along it during trading. It is the decision that says which implementation this instrument's book is, and real venues run both: dense bands for a hot list of a few hundred symbols, trees for the long tail.",
+        why: "It is a control path because nothing flows along it during trading. It is the decision that says which implementation this instrument's book is, and real venues run both: dense bands for a hot list of a few hundred symbols, trees for the long tail.",
         numbers: ["dense under ~100k ticks per book", "10,000 dense books would cost 4.9GB"],
         breaks:
           "The decision is static. A symbol that becomes hot after listing keeps the slower structure, and a price move outside a dense band forces a halt to reband rather than a live switch.",
@@ -485,9 +513,10 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e14",
       from: "fifo",
       to: "outputs",
+      tier: "data",
       label: "ack or TOO_LATE",
       detail: {
-        what: "The cancel path's own output: CANCELLED if the order was still resting, TOO_LATE if it had already filled, UNKNOWN if the id was never live.",
+        what: "The cancel path's own output: cancelled if the order was still resting, too late if it had already filled, unknown if the id was never live.",
         why: "Nine events in ten end here rather than in a fill, so this is the reply the venue actually spends its time producing. The three-way answer matters to participants because TOO_LATE means they now hold a position they were trying to avoid.",
         numbers: ["~1.875M cancel replies/s at peak"],
         breaks:
@@ -498,12 +527,12 @@ export const MATCHING_ENGINE: Diagram = {
       id: "e15",
       from: "outputs",
       to: "invariants",
+      tier: "control",
       label: "after each apply",
-      dashed: true,
       detail: {
         what: "The post-apply check: assert the book is not crossed and quantity is conserved, and feed the same event to a shadow reference matcher.",
-        why: "This class of bug does not crash anything. It leaves a slightly wrong book that keeps trading, so the only way to catch it in time is to check the invariants on the same event that broke them rather than in a nightly job.",
-        numbers: ["a handful of comparisons per apply", "shadow model runs on identical input"],
+        why: "This class of bug does not crash anything. It leaves a slightly wrong book that keeps trading, so the only way to catch it in time is to check the invariants on the same event that broke them rather than in a nightly job. The shadow model runs on the identical input so its answer is directly comparable.",
+        numbers: [],
         breaks:
           "A failed invariant is a correctness incident, not a retryable error. The response is to halt the instrument, snapshot, and replay against the reference model, which is deliberately more disruptive than continuing.",
       },

@@ -10,12 +10,30 @@ export const TICKETMASTER: Diagram = {
     shape:
       "A funnel with a dam at the top: 1.5M people arrive in ten seconds, get a cheap lottery token, then wait outside on shared CDN objects while a gate releases about 100 buyers a second, so the seat-hold path never meets the crowd.",
     beats: [
-      "Arrival is a lottery draw, not a queue. Every user gets a token carrying a random 64-bit sort key written to a sharded in-memory set: 150k writes/s across 16 shards with no counter and therefore no hotspot. A monotonic sequencer for strict first-come-first-served would be a single writer at exactly peak, with no headroom, and it would sell the show to whoever sits 3ms from the edge.",
-      "Waiting is free because nothing about it is per-user. The client polls two objects that are identical bytes for everyone: a 20-byte now_serving watermark on a 2s TTL and a 2-bit-per-seat bitmap, 5KB gzipped, republished once a second. Position is subtraction on the client. A per-user position endpoint would be 300k QPS of pure overhead; one shared object makes the origin see about 50 requests a second regardless of how many people showed up.",
-      "Admission is sized from inventory rather than guessed. Cap in-flow buyers at C = 25,000, because 25,000 orders of 2.4 seats is 60,000 seats, exactly one venue held and no more. Little's law over a 240s mean session gives about 100 admissions/s. Refill the bucket from completions, never from a clock, or a slow payment provider drifts in-flow past the cap and admitted users arrive at a fully grey map.",
-      "The write race is the easy part and it happens behind the gate. A hold is a lease: SET NX EX 600 per seat, acquired in ascending seat id so overlapping multi-seat orders cannot deadlock, released with a compare-and-delete so a late rollback cannot free somebody else's seat. About 600 CAS/s per event. The loser gets a 409 carrying the seat's current status inline, so the client greys it without waiting for the next bitmap tick.",
-      "Checkout is where money and inventory have to agree. Extend the seat key TTL to cover the payment timeout and mark the hold committing, authorise rather than capture, and only flip held to sold in a synchronous Postgres transaction. Holds themselves are write-behind through Kafka, which is what makes a Redis failover a 30 to 60s freeze-rebuild-reopen rather than a double-sold seat.",
-      "The terminal state is a first-class feature. 60k seats need roughly 42k admissions and go in about seven minutes, but draining 1.5M at 100/s would take 4.2 hours, so about 97% of the queue must be told sold out inside 90 seconds. Keep 2x the projected exhaustion rank rather than 1x, because around 40% of holds never convert and those seats come back needing buyers who are still present.",
+      {
+        text: "Arrival is a lottery draw, not a queue. Every user gets a token carrying a random 64-bit sort key written to a sharded in-memory set: 150k writes/s across 16 shards with no counter and therefore no hotspot. A monotonic sequencer for strict first-come-first-served would be a single writer at exactly peak, with no headroom, and it would sell the show to whoever sits 3ms from the edge.",
+        lights: ["clients", "token-svc", "queue-tokens", "e2", "e3"],
+      },
+      {
+        text: "Waiting is free because nothing about it is per-user. The client polls two objects that are identical bytes for everyone: a 20-byte now_serving watermark on a 2s TTL and a 2-bit-per-seat bitmap, 5KB gzipped, republished once a second. Position is subtraction on the client. A per-user position endpoint would be 300k QPS of pure overhead; one shared object makes the origin see about 50 requests a second regardless of how many people showed up.",
+        lights: ["cdn", "edge-publisher", "e1", "e13"],
+      },
+      {
+        text: "Admission is sized from inventory rather than guessed. Cap in-flow buyers at C = 25,000, because 25,000 orders of 2.4 seats is 60,000 seats, exactly one venue held and no more. Little's law over a 240s mean session gives about 100 admissions/s. Refill the bucket from completions, never from a clock, or a slow payment provider drifts in-flow past the cap and admitted users arrive at a fully grey map.",
+        lights: ["admission", "e5", "e7", "e17"],
+      },
+      {
+        text: "The write race is the easy part and it happens behind the gate. A hold is a lease: SET NX EX 600 per seat, acquired in ascending seat id so overlapping multi-seat orders cannot deadlock, released with a compare-and-delete so a late rollback cannot free somebody else's seat. About 600 CAS/s per event. The loser gets a 409 carrying the seat's current status inline, so the client greys it without waiting for the next bitmap tick.",
+        lights: ["purchase-api", "seat-state", "e8"],
+      },
+      {
+        text: "Checkout is where money and inventory have to agree. Extend the seat key TTL to cover the payment timeout and mark the hold committing, authorise rather than capture, and only flip held to sold in a synchronous Postgres transaction. Holds themselves are write-behind through Kafka, which is what makes a Redis failover a 30 to 60s freeze-rebuild-reopen rather than a double-sold seat.",
+        lights: ["checkout", "payments", "orders-db", "e14", "e15", "e16"],
+      },
+      {
+        text: "The terminal state is a first-class feature. 60k seats need roughly 42k admissions and go in about seven minutes, but draining 1.5M at 100/s would take 4.2 hours, so about 97% of the queue must be told sold out inside 90 seconds. Keep 2x the projected exhaustion rank rather than 1x, because around 40% of holds never convert and those seats come back needing buyers who are still present.",
+        lights: ["exhaustion", "e11", "e12"],
+      },
     ],
     crux:
       "You win by keeping people out, not by making the write faster. The seat race is one conditional set and it is over in microseconds; the load is 1.5M browsers wanting a live picture of 60,000 seats. Unlike an auction, whose deadline is the close and whose contention you cannot throttle, this deadline is the start of the sale, so metering arrivals is available and it is the whole design.",
@@ -132,7 +150,7 @@ export const TICKETMASTER: Diagram = {
     {
       id: "checkout",
       label: "Checkout",
-      sub: "payment saga, see #23",
+      sub: "payment saga",
       kind: "service",
       col: 1,
       row: 4,
@@ -162,7 +180,7 @@ export const TICKETMASTER: Diagram = {
       detail: {
         what: "The third-party processor, outside the trust boundary and the slowest hop in the funnel.",
         why: "It is drawn because it controls the admission rate without knowing it. Mean session time is mostly this call, and Little's law turns its p99 straight into the rate at which the gate can release people.",
-        numbers: ["2 to 6s per checkout", "the tail that sets mean session time"],
+        numbers: ["2 to 6s per checkout", "its p99 tail sets the ~240s mean session time Little's law runs on"],
         breaks:
           "A provider slowdown inflates session time, collapses admission throughput and lengthens the queue. Circuit-break it, extend hold TTLs and lower the admission rate rather than raising the concurrency cap.",
       },
@@ -316,7 +334,7 @@ export const TICKETMASTER: Diagram = {
       label: "poll two shared objects",
       detail: {
         what: "Every waiting client polling the now_serving watermark every 5s and the seat bitmap every 1s.",
-        why: "It is drawn as the hot path because this is where the traffic actually is. Both objects are identical bytes for all 1.5M viewers, so the volume terminates at the edge and the origin never learns how big the crowd was.",
+        why: "This is where the traffic actually is. Both objects are identical bytes for all 1.5M viewers, so the volume terminates at the edge and the origin never learns how big the crowd was.",
         numbers: ["~300k req/s for the watermark", "~50 origin req/s after collapse"],
         breaks:
           "The bill, not an outage: ~7.5GB/s of edge egress, about 4.5TB over a ten-minute on-sale, and one extra kilobyte on the bitmap is ~1.5GB per on-sale second.",

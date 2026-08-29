@@ -10,12 +10,30 @@ export const CICD: Diagram = {
     shape:
       "Two systems joined by one immutable object: a build farm that turns a commit into a signed artifact pinned by digest, and a deploy controller that walks that exact digest onto the fleet slowly enough to take it back out.",
     beats: [
-      "The build side starts as a compilation of intent. A webhook lands, the controller reads the pipeline spec at the head SHA rather than from a UI, and expands it into a DAG of around 140 jobs with fan-out shards and fan-in gates. Reading the spec at the SHA is what makes what ran reconstructible months later.",
-      "Then almost nothing runs. Every action is keyed by SHA-256 of its complete declared inputs, argv plus sorted env plus input file digests plus toolchain digest, and around 87% of those keys are answered from a content-addressed store in ~40ms. That turns 24 worker-minutes per run into 5.5, and a 14,300-worker fleet into 3,250. The cache is the entire economics.",
-      "The precondition is hermeticity, not hit rate. An action that reads something it did not declare lets two runs with the same key produce different outputs, and the cache serves one of them silently behind a green build. A slow build is visible; a wrong cache hit is not, and it ships. That is why the sandbox and toolchain pinning land before the cache does.",
-      "Workers are one Firecracker microVM per job, resumed from snapshot in ~800ms and destroyed after. CI executes code written by whoever opened the pull request while holding the keys to production, so a shared host kernel is the wrong trust boundary and nothing long-lived is stored on a worker: the job exchanges an OIDC token for a 15-minute scoped credential.",
-      "The artifact is the hinge. One signed, digest-addressed object crosses from the build plane to the deploy plane, and it is never rebuilt. Everything the deploy side claims about rollback speed rests on the fact that the previous artifact still exists and pushing it is the same mechanism that pushed the new one.",
-      "The deploy side is a risk problem solved by going slowly and measuring. 1% of tasks take the new digest against a freshly restarted baseline on the old one, the analyser needs ~23k requests per arm to call an error-rate doubling, so the rung bakes for 10 minutes and the ladder climbs 5%, 25%, one cell, region by region to global at ~3h50m. A REGRESS verdict restores the pinned previous digest in ~45 seconds.",
+      {
+        text: "The build side starts as a compilation of intent. A webhook lands, the controller reads the pipeline spec at the head SHA rather than from a UI, and expands it into a DAG of around 140 jobs with fan-out shards and fan-in gates. Reading the spec at the SHA is what makes what ran reconstructible months later.",
+        lights: ["source-host", "pipeline-controller", "e1", "e3"],
+      },
+      {
+        text: "Then almost nothing runs. Every action is keyed by SHA-256 of its complete declared inputs, argv plus sorted env plus input file digests plus toolchain digest, and around 87% of those keys are answered from a content-addressed store in ~40ms. That turns 24 worker-minutes per run into 5.5, and a 14,300-worker fleet into 3,250. The cache is the entire economics.",
+        lights: ["build-scheduler", "worker-pool", "action-cache", "e4", "e6"],
+      },
+      {
+        text: "The precondition is hermeticity, not hit rate. An action that reads something it did not declare lets two runs with the same key produce different outputs, and the cache serves one of them silently behind a green build. A slow build is visible; a wrong cache hit is not, and it ships. That is why the sandbox and toolchain pinning land before the cache does.",
+        lights: ["action-cache", "e6"],
+      },
+      {
+        text: "Workers are one Firecracker microVM per job, resumed from snapshot in ~800ms and destroyed after. CI executes code written by whoever opened the pull request while holding the keys to production, so a shared host kernel is the wrong trust boundary and nothing long-lived is stored on a worker: the job exchanges an OIDC token for a 15-minute scoped credential.",
+        lights: ["worker-pool", "e4"],
+      },
+      {
+        text: "The artifact is the hinge. One signed, digest-addressed object crosses from the build plane to the deploy plane, and it is never rebuilt. Everything the deploy side claims about rollback speed rests on the fact that the previous artifact still exists and pushing it is the same mechanism that pushed the new one.",
+        lights: ["artifact-store", "deploy-controller", "e7", "e8"],
+      },
+      {
+        text: "The deploy side is a risk problem solved by going slowly and measuring. 1% of tasks take the new digest against a freshly restarted baseline on the old one, the analyser needs ~23k requests per arm to call an error-rate doubling, so the rung bakes for 10 minutes and the ladder climbs 5%, 25%, one cell, region by region to global at ~3h50m. A REGRESS verdict restores the pinned previous digest in ~45 seconds.",
+        lights: ["rollout-ladder", "canary-analyser", "fleet", "deploy-controller", "e9", "e10", "e11", "e12"],
+      },
     ],
     crux:
       "Rolling back code is trivial because you still hold the artifact, pinned by digest. Rolling back state is not: a migration that dropped a column makes redeploying the previous binary a worse outage than the one you are recovering from. So schema changes expand before they contract, N and N-1 always coexist, and the behaviour change ships dark behind a flag.",
@@ -40,7 +58,7 @@ export const CICD: Diagram = {
     },
     {
       id: "source-host",
-      label: "Source host (#39)",
+      label: "Source host",
       sub: "push / PR webhook",
       kind: "external",
       col: 0,
@@ -86,9 +104,9 @@ export const CICD: Diagram = {
       row: 0,
       parent: "build-plane",
       detail: {
-        what: "A CI check that rejects DROP COLUMN, DROP TABLE or a narrowing type change unless the matching expand phase is already recorded as globally deployed.",
+        what: "A CI check that rejects a dropped column, a dropped table or a narrowing type change unless the matching expand phase is already recorded as globally deployed.",
         why: "This is where the rollback promise is actually enforced, weeks before anyone needs it. Expand/contract as a convention is a convention people forget under deadline; as a gate in the build path it is a property of the system.",
-        numbers: ["4 deploys over ~2 weeks for a column rename", "checks the deploys table for the expand digest"],
+        numbers: ["4 deploys over ~2 weeks for a column rename", "1 expand digest checked against the deploys table"],
         breaks:
           "It only sees DDL that goes through the migration tooling. A destructive statement run by hand against production leaves the gate green and the rollback path already gone.",
         choice: {
@@ -103,7 +121,7 @@ export const CICD: Diagram = {
     },
     {
       id: "build-scheduler",
-      label: "Build Scheduler (#36)",
+      label: "Build Scheduler",
       kind: "service",
       sub: "constraint match, fair queue",
       col: 1,
@@ -180,7 +198,7 @@ export const CICD: Diagram = {
     },
     {
       id: "artifact-store",
-      label: "Artifact store (#21)",
+      label: "Artifact store",
       kind: "database",
       sub: "signed, immutable, by digest",
       col: 1,
@@ -213,7 +231,7 @@ export const CICD: Diagram = {
         why: "One place that answers what is running where and how far it got. Rollout state is a durable object rather than controller memory, so a crash mid-ladder is resumed by the new leader at the last recorded phase instead of restarting the exposure.",
         numbers: ["~2k deploy records/day", "~1,500 services, one lease each", "rollback SLO p95 < 5 min"],
         breaks:
-          "Two concurrent rollouts for one service, say an automated main-branch deploy and a manual hotfix, put three versions in the fleet and make every canary comparison meaningless, which is why a per-service lease (#35) excludes them.",
+          "Two concurrent rollouts for one service, say an automated main-branch deploy and a manual hotfix, put three versions in the fleet and make every canary comparison meaningless, which is why a per-service lease excludes them.",
         choice: {
           pick: "One control plane owning the path from artifact to fleet",
           instead: "A reconciler per environment that continuously drives running version toward a declared version.",
@@ -233,7 +251,7 @@ export const CICD: Diagram = {
       row: 3,
       detail: {
         what: "The staged exposure schedule: 1% for 10 minutes, 5% and 25% for 15 each, the first full cell for 30, remaining cells and regions at 60, reaching global in ~3h50m.",
-        why: "Each rung widens the failure domain by an amount you can name out loud, and the first rung caps unrecoverable effects at 1% of traffic for 10 minutes. The region ladder takes the lowest-traffic region first so the largest population is last and has the most evidence behind it.",
+        why: "Each rung widens the failure domain by a stated, bounded amount, and the first rung caps unrecoverable effects at 1% of traffic for 10 minutes. The region ladder takes the lowest-traffic region first so the largest population is last and has the most evidence behind it.",
         numbers: ["1% = 100 of 10,000 tasks", "first cell gets 30 min, 1 of 12", "merge to global ~3h50m"],
         breaks:
           "The 1% canary must run against an equal-sized baseline population freshly restarted on the old digest, or you measure JIT warm-up and heap age instead of the change and read 15% worse on p99 for no reason.",
@@ -249,7 +267,7 @@ export const CICD: Diagram = {
     },
     {
       id: "canary-analyser",
-      label: "Canary analyser (#17)",
+      label: "Canary analyser",
       sub: "canary vs restarted baseline",
       kind: "service",
       col: 2,
@@ -279,7 +297,7 @@ export const CICD: Diagram = {
       row: 3,
       detail: {
         what: "The tasks actually serving traffic, each pinned to an artifact digest, spread across cells and regions that form the failure domains the ladder walks.",
-        why: "It is drawn as one node because from the controller's point of view it is one number: how many tasks are on which digest. The reconciliation loop compares desired against actual digest distribution per cell, which is how a crashed controller's mess is found.",
+        why: "From the controller's point of view it is one number: how many tasks are on which digest. The reconciliation loop compares desired against actual digest distribution per cell, which is how a crashed controller's mess is found.",
         numbers: ["10,000 tasks, 10k req/s", "~6 min of mixed versions per rolling deploy", "~5TB egress to push a 500MB artifact fleet-wide"],
         breaks:
           "N and N-1 serve simultaneously for several minutes during any rolling deploy, so a change that is not backward-compatible is already broken before anyone thinks about undoing it.",
@@ -424,7 +442,7 @@ export const CICD: Diagram = {
       detail: {
         what: "Phase 1: 100 of 10,000 tasks take the new digest while an equal-sized population is freshly restarted on the old one.",
         why: "Comparability comes before statistics. Measured against long-running incumbents the canary shows JIT warm-up, heap age and cold connection pools, and the classic result is a canary reading 15% worse on p99 that is completely fine.",
-        numbers: ["100 canary tasks, 100 baseline", "spread across AZs and instance types"],
+        numbers: ["100 canary tasks, 100 baseline", "spread across at least 2 AZs and instance types"],
         breaks:
           "If canary tasks land on one host or one AZ, a single degraded machine can impersonate a bad build and roll back a healthy deploy.",
       },
@@ -438,7 +456,7 @@ export const CICD: Diagram = {
       detail: {
         what: "Each passed rung widens the population running the new digest, task by task, until the whole fleet is converged.",
         why: "The ramp is the only bound on unrecoverable effects. Rollback undoes the binary but never the emails sent or payments captured, so the product of a 1% first rung is not the statistics, it is capping those effects at 1% of traffic for 10 minutes.",
-        numbers: ["10 min, 15, 15, 30, then 60 per region", "freeze checked at every rung"],
+        numbers: ["10 min, 15, 15, 30, then 60 per region", "freeze window checked at each of 5 rungs"],
         breaks:
           "Pushing a 500MB artifact to 10,000 tasks at once is ~5TB of egress in minutes and saturates the object store, so regional mirrors and in-cell peer distribution carry it.",
       },
@@ -448,7 +466,7 @@ export const CICD: Diagram = {
       from: "fleet",
       to: "canary-analyser",
       tier: "control",
-      label: "error rate + p99 (#17)",
+      label: "error rate + p99",
       detail: {
         what: "The analyser polls the metrics system every 30s for the two arms' error rate, p99 latency and declared business counters.",
         why: "It reads the existing metrics pipeline rather than owning its own, because the numbers a rollout is judged on must be the same numbers the on-call sees. Freshness is checked per interval so a lagging pipeline is distinguishable from a healthy service.",
@@ -465,7 +483,7 @@ export const CICD: Diagram = {
       label: "PASS / REGRESS",
       detail: {
         what: "The verdict that either advances the ladder one rung or replaces the canary tasks with the pinned previous digest and pages.",
-        why: "This is the only loop in the picture and it is the loop that matters: it is what makes the rollout automatic rather than a human watching a dashboard, and it closes in ~45 seconds because the previous artifact never went anywhere.",
+        why: "This is the only loop in the system and it is the loop that matters: it is what makes the rollout automatic rather than a human watching a dashboard, and it closes in ~45 seconds because the previous artifact never went anywhere.",
         numbers: ["restore in ~45s", "two consecutive bad intervals to fire"],
         breaks:
           "The verdict only covers the compute tier. It cannot undo a migration, an email or a published event, so a green rollback here can still leave the incident open.",
@@ -496,7 +514,7 @@ export const CICD: Diagram = {
       detail: {
         what: "The gate queries deploy records for that service and refuses the change unless the matching expand digest has finished its ladder globally.",
         why: "It is the one place the build plane depends on deploy-plane state, and it has to: whether a contract phase is safe is a question about what is actually running everywhere, not about what has been merged.",
-        numbers: ["expand must be globally deployed", "rename = 4 deploys over ~2 weeks"],
+        numbers: ["0 contract migrations allowed before expand is global", "rename = 4 deploys over ~2 weeks"],
         breaks:
           "If the deploy records are wrong or partially replicated the gate either blocks a safe change or, worse, waves through a contract phase while some region still runs the old reader.",
       },
@@ -523,7 +541,7 @@ export const CICD: Diagram = {
       detail: {
         what: "Tasks read the flag with a long client TTL and change behaviour when the percentage moves, with no restart and no scheduling operation.",
         why: "This is the fastest undo in the system by three orders of magnitude, which is why deploy and release are deliberately different words. Externally visible effects go behind the same flag so their blast radius is bounded by the ramp.",
-        numbers: ["~5s global propagation", "no task is touched"],
+        numbers: ["~5s global propagation", "0 tasks touched, 0 restarts"],
         breaks:
           "Clients must cache last-known values and default to off when the flag service is unreachable, or an outage in a read-mostly config store becomes a behaviour change everywhere at once.",
       },

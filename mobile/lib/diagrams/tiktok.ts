@@ -10,12 +10,30 @@ export const TIKTOK: Diagram = {
     shape:
       "No fan-out anywhere: every swipe is a retrieval query over a 10 billion video corpus, narrowed cheaply to a few hundred, scored expensively down to fifty, and handed to a client that has already downloaded the next two videos.",
     beats: [
-      "The Feed Service is a dispatcher rather than a ranker. It assembles context features from the session, time, device and region, looks up the user's precomputed 256-dimensional vector, and fires five retrieval channels concurrently: ANN, trending in region, fresh from follows, sound affinity and exploration.",
-      "Retrieval is geometric and almost free per candidate. IVF-PQ takes 10 billion video vectors to a top-1000 in roughly 5ms against 160GB of quantised codes, and over-retrieval buys back the recall the compression cost by re-ranking to top-200 against full vectors.",
-      "Ranking is the expensive half and the cost dominator. A multi-task network scores the roughly 300 survivors on completion, like, share and follow, collapses them into a single number, then re-ranks for variety so one creator cannot own three of your next six swipes.",
-      "The response is 50 ids carrying manifest and signed first-chunk URLs, because a sub-100ms swipe-to-play target sits below any network round trip. The client plays number one and pulls the first segment of two and three on background bandwidth, so the next swipe resolves locally.",
-      "Nothing enters this system on engagement. A new video's embedding is computed from its pixels, audio, sound and creator at the end of transcode and inserted into the index before it is marked feed-eligible, after which it competes for one reserved feed slot in ten.",
-      "The loop closes at two speeds deliberately. Interaction events stream back at about a trillion a day, the ranker checkpoints from them every five minutes so an hour-scale trend is caught, and retrieval embeddings rebuild hourly over 30 days so the model cannot chase its own output.",
+      {
+        text: "The Feed Service is a dispatcher rather than a ranker. It assembles context features from the session, time, device and region, looks up the user's precomputed 256-dimensional vector, and fires five retrieval channels concurrently: ANN, trending in region, fresh from follows, sound affinity and exploration.",
+        lights: ["feed-service", "embedding-store", "e1", "e2"],
+      },
+      {
+        text: "Retrieval is geometric and almost free per candidate. IVF-PQ takes 10 billion video vectors to a top-1000 in roughly 5ms against 160GB of quantised codes, and over-retrieval buys back the recall the compression cost by re-ranking to top-200 against full vectors.",
+        lights: ["ann-index", "trending", "e3", "e4", "e6"],
+      },
+      {
+        text: "Ranking is the expensive half and the cost dominator. A multi-task network scores the roughly 300 survivors on completion, like, share and follow, collapses them into a single number, then re-ranks for variety so one creator cannot own three of your next six swipes.",
+        lights: ["union", "ranker", "rerank", "e9", "e10"],
+      },
+      {
+        text: "The response is 50 ids carrying manifest and signed first-chunk URLs, because a sub-100ms swipe-to-play target sits below any network round trip. The client plays number one and pulls the first segment of two and three on background bandwidth, so the next swipe resolves locally.",
+        lights: ["rerank", "client", "cdn", "e11", "e12"],
+      },
+      {
+        text: "Nothing enters this system on engagement. A new video's embedding is computed from its pixels, audio, sound and creator at the end of transcode and inserted into the index before it is marked feed-eligible, after which it competes for one reserved feed slot in ten: the union stage forces one candidate in ten to be a low-impression video regardless of predicted score, because a video ranking has never seen has no observations to rank it on.",
+        lights: ["ann-index", "union"],
+      },
+      {
+        text: "The loop closes at two speeds deliberately. Interaction events stream back at about a trillion a day, the ranker checkpoints from them every five minutes so an hour-scale trend is caught, and retrieval embeddings rebuild hourly over 30 days so the model cannot chase its own output.",
+        lights: ["events", "trainer", "ranker", "e14", "e15", "e16", "e17"],
+      },
     ],
     crux:
       "Every stage of the funnel ranks on observed engagement, and a video with no impressions has no observations, so without a reserved exploration budget the corpus freezes at whatever was popular yesterday. Exploration is the only door in, and at 100M uploads a day it is oversubscribed four to one permanently.",
@@ -31,6 +49,13 @@ export const TIKTOK: Diagram = {
       id: "retrieval-group",
       kind: "zone",
       label: "Retrieval: 10B to ~300 candidates",
+      detail: {
+        what: "The three parallel channels that narrow the full video corpus before the ranker ever runs: the learned ANN index, and the non-learned trending/follows/sound channels.",
+        why: "Scoring 10 billion videos per swipe is more compute than exists, so this boundary is where cost drops from a function of catalogue size to a function of a fixed few hundred. Everything inside it is cheap per video; everything outside it is expensive per video.",
+        numbers: ["10B videos narrowed to ~300 per call", "~5ms ANN plus lookups, under the 10ms retrieval budget"],
+        breaks:
+          "A channel going quiet inside this boundary is invisible from outside it: the union stage still produces ~300 candidates from the remaining channels, so a dead trending feed or a stale index shows up as a worse feed, never as an error.",
+      },
     },
     {
       id: "client",
@@ -97,7 +122,7 @@ export const TIKTOK: Diagram = {
       detail: {
         what: "A key-value store holding one 256-dimensional float vector per user, rebuilt hourly in batch from a 30-day interaction window.",
         why: "The two-tower model is deliberately asymmetric so the expensive half runs offline. Serving needs only a lookup, which keeps a 200k-calls-per-second tier off training hardware and makes the user vector a stable anchor rather than something that lurches mid-session.",
-        numbers: ["1B users x 256 dims x 4B = ~1TB", "refreshed hourly", "one read per feed call"],
+        numbers: ["1B users x 256 dims x 4B = ~1TB", "refreshed once an hour", "one read per feed call"],
         breaks:
           "Embedding age is invisible in engagement metrics until watch rate regresses, so it needs its own freshness alarm, separate from the ranker's.",
         choice: {
@@ -171,9 +196,9 @@ export const TIKTOK: Diagram = {
       sub: "~300 survive; 1 slot in 10 explores",
       label: "Union + safety + explore",
       detail: {
-        what: "Merges the five channels, drops duplicates, and applies moderation, region and block-list filters before anything is scored.",
-        why: "The channels overlap heavily and the filters here are set lookups, while the stage immediately after is the most expensive tier in the system. Filtering first guarantees no accelerator time is ever spent on a candidate that could not have been served.",
-        numbers: ["5 channels merged", "~300 candidates out", "filter cost is one set lookup per candidate"],
+        what: "Merges the five channels, drops duplicates, applies moderation, region and block-list filters before anything is scored, and reserves 1 of every 10 surviving slots for low-impression videos regardless of predicted score.",
+        why: "The channels overlap heavily and the filters here are set lookups, while the stage immediately after is the most expensive tier in the system. Filtering first guarantees no accelerator time is ever spent on a candidate that could not have been served. The reserved explore slot is what stops the corpus freezing on yesterday's winners: every other stage in the funnel ranks on observed engagement, so a video nobody has seen yet has no observations for any of them to rank it on, and the only way it ever gets impressions to learn from is a slot that is not competing on score. At roughly 100M uploads a day against 10B daily impressions available to explore with, demand for that slot runs about four to one oversubscribed, so which low-impression videos fill it is itself a ranking problem, just over a different objective.",
+        numbers: ["5 channels merged", "~300 candidates out", "1 explore slot in every 10", "~40B exploration impressions demanded vs ~10B supplied"],
         breaks:
           "A takedown landing between ranking and playback still slips through, which is why hydration repeats a tombstone check for ids already handed to a client.",
         choice: {
@@ -223,7 +248,7 @@ export const TIKTOK: Diagram = {
       detail: {
         what: "Collapses the four predictions into one score with A/B-tuned weights, penalises repeated creators and topics, then hydrates the top 50 with manifest and signed first-chunk URLs.",
         why: "A pure score ordering puts the same creator in three of six swipes, which reads as a broken feed even when every individual prediction was correct. Hydration lives here so the response carries everything playback needs without a second round trip.",
-        numbers: ["top 50 returned", "prefetch hints for the next 2 to 3", "weights tuned by A/B, not learned end to end"],
+        numbers: ["top 50 returned", "prefetch hints for the next 2 to 3", "4 head scores blended by A/B-tuned weights"],
         breaks:
           "The blend weights are where product policy hides, and a weight change that reshapes the corpus passes every A/B because the test metric is the same quantity the weights optimise.",
         choice: {
@@ -372,7 +397,7 @@ export const TIKTOK: Diagram = {
       detail: {
         what: "The 200 best candidates by exact distance, after over-retrieving 1000 from the quantised codes and re-scoring them against full vectors.",
         why: "Product quantisation costs 5 to 10 points of recall, and over-retrieval is how that is bought back: pull wider than needed from the cheap index, then pay exact distance on a set small enough to afford it.",
-        numbers: ["1000 in, 200 out", "full vectors fetched from a separate store"],
+        numbers: ["1000 in, 200 out", "200 full vectors fetched from a separate store"],
         breaks:
           "If the full-vector store is unavailable the re-rank is skipped and quality degrades quietly, because a slightly worse ordering looks identical to a healthy one from outside.",
       },
@@ -443,7 +468,7 @@ export const TIKTOK: Diagram = {
       detail: {
         what: "Background range requests for the first segment of the next two or three videos while the current one plays.",
         why: "This edge is the product. Every millisecond of swipe-to-play is spent before the user swipes, on bandwidth they are not using, which is the only way to beat a round trip that is itself longer than the whole latency budget.",
-        numbers: ["4-second segments", "first segment only", "depth by network class"],
+        numbers: ["4-second segments", "1 segment fetched, not the whole file", "1 to 3 ahead depending on network class"],
         breaks:
           "It competes with the currently playing video for bandwidth, so on a weak link aggressive preloading degrades the video the user is actually watching.",
       },
@@ -458,7 +483,7 @@ export const TIKTOK: Diagram = {
       detail: {
         what: "A push of first segments to edge POPs in a region as soon as a video starts scoring into the rising bucket.",
         why: "The recommender knows a video is about to be popular before the traffic arrives, which is a signal a purely reactive cache cannot have. Pre-warming turns the first thousand viewers in a region from origin misses into edge hits.",
-        numbers: ["one fill per POP", "triggered on score, not on requests"],
+        numbers: ["one fill per POP", "triggered once score crosses the rising threshold"],
         breaks:
           "Pre-warming on a score that later proves wrong fills edges with content nobody watches, so the trigger threshold trades storage at the edge against origin egress spikes.",
       },
@@ -471,8 +496,8 @@ export const TIKTOK: Diagram = {
       label: "watch, skip, like, slot",
       detail: {
         what: "Roughly ten fine-grained events per impression: impression, start, quartiles, complete, skip, like, share, each carrying the slot index.",
-        why: "This is the only measurement the system has of whether any decision upstream was correct. It is drawn as a control path because it carries no user-visible state, and yet it is what the next five minutes of ranking is built from.",
-        numbers: ["~1T events/day", "~150TB/day", "slot_index on every row"],
+        why: "This is the only measurement the system has of whether any decision upstream was correct. It is a control path because it carries no user-visible state, and yet it is what the next five minutes of ranking is built from.",
+        numbers: ["~1T events/day", "~150TB/day", "slot_index stamped once per row"],
         breaks:
           "Events are training input rather than user-visible state, so a small replay window is tolerable, but losing slot index makes the whole exploration measurement uncorrectable.",
       },
@@ -500,7 +525,7 @@ export const TIKTOK: Diagram = {
       detail: {
         what: "A fresh ranker checkpoint promoted into the serving fleet roughly every five minutes, A/B routed rather than deployed in place.",
         why: "A sound goes from unknown to top-of-region in two to six hours, so the scoring layer needs sub-hour freshness or it misses the event entirely. Routing by traffic share means a bad checkpoint rolls back by moving traffic, not by redeploying.",
-        numbers: ["5 minute cadence", "rollback by traffic shift"],
+        numbers: ["5 minute cadence", "rollback is a single traffic-routing change, not a redeploy"],
         breaks:
           "Fast updates on data the ranker itself generated is the feedback loop, and it is only safe because the ranker cannot change which candidates are eligible.",
       },

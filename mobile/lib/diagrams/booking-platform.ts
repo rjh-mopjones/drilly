@@ -10,12 +10,34 @@ export const BOOKING_PLATFORM: Diagram = {
     shape:
       "A discovery side that ranks 10M host-owned listings out of a deliberately stale index, and a supply side where three different writers, the guest's booking, the host's own edits and a rival channel's poll, all mutate the same per-night calendar row.",
     beats: [
-      "The traffic is discovery, not booking. 100M searches a day against 1M bookings is a 100:1 look-to-book ratio, so ~12k QPS at peak sits against ~120 commits/s. The two paths share nothing but the listing id, which is what lets search run on an index that is allowed to be 60 seconds wrong.",
-      "A search is a geo bounding box plus facets plus dates, answered in one query: city or viewport, guests >= 2, price under EUR 200 a night, and those specific nights free. The last clause is the awkward one, because it is a per-listing calendar question, so the document carries a precomputed availability summary rather than the calendar itself.",
-      "Ranking is where the marketplace shows through. The document also carries ranking features, and the signals are host-behaviour signals: review scores weighted by reviewer reputation and verified stay, a host's channel-conflict rate, and last-minute releases suppressed because a night that goes free at short notice is genuinely lower quality inventory.",
-      "Price is per host and per night, not a rate card. A pricing service resolves host rules into a price_override on each calendar row, the listing page quotes the exact nights, and the number is snapshotted onto the booking so a host rule change between quote and commit cannot move what the guest agreed to pay.",
-      "The calendar is the supply record and it has three writers. The guest's booking takes the nights under a short transactional hold, which is the same class of problem as the hotel question (#19) and is not what makes this one hard. The host edits ranges directly to block nights and set minimum stays. Channel-sync ingestion writes what a rival site already sold, and may only ever block, never release.",
-      "CDC closes the loop back to discovery: Debezium to Kafka to an indexer, ~120 calendar mutations a second average and ~1,200 at peak, refreshing the availability summary within 60 seconds. That lag is the entire availability-lost budget, and at 0.1 bookings per listing per day it costs almost nothing.",
+      {
+        text: "The traffic is discovery, not booking. 100M searches a day against 1M bookings is a 100:1 look-to-book ratio, so ~12k QPS at peak sits against ~120 commits/s. The two paths share nothing but the listing id, which is what lets search run on an index that is allowed to be 60 seconds wrong.",
+        lights: ["guest", "search-svc", "booking-orch", "e1", "e7"],
+      },
+      {
+        text: "A search is a geo bounding box plus facets plus dates, answered in one query: city or viewport, guests >= 2, price under €200 a night, and those specific nights free. The last clause is the awkward one, because it is a per-listing calendar question, so the document carries a precomputed availability summary rather than the calendar itself.",
+        lights: ["search-svc", "search-index", "e2"],
+      },
+      {
+        text: "Ranking is where the marketplace shows through. The document also carries ranking features, and the signals are host-behaviour signals: review scores weighted by reviewer reputation and verified stay, a host's channel-conflict rate, and last-minute releases suppressed because a night that goes free at short notice is genuinely lower quality inventory.",
+        lights: ["search-index", "reviews", "e17"],
+      },
+      {
+        text: "Price is per host and per night, not a rate card. Host rules resolve into a price_override on each calendar row, the listing page quotes the exact nights, and the number is snapshotted onto the booking so a host rule change between quote and commit cannot move what the guest agreed to pay.",
+        lights: ["host-app", "listing-svc", "calendar", "e12", "e4"],
+      },
+      {
+        text: "The commit itself spends almost all of its latency budget on one call it does not control. The 2ms transactional hold takes the nights; card authorisation against the payment processor runs outside that hold and costs ~1-2s p99, the term that actually decides whether the whole saga lands inside the p99 2s SLO; confirm follows once both have succeeded.",
+        lights: ["booking-orch", "e7", "e8"],
+      },
+      {
+        text: "The calendar is the supply record and it has three writers. The guest's booking takes the nights under the short transactional hold above, which is the same class of problem as a fungible-inventory hotel reservation and is not what makes this one hard. The host edits ranges directly to block nights and set minimum stays. Channel-sync ingestion writes what a rival site already sold, and may only ever block, never release.",
+        lights: ["calendar", "host-app", "channel-sync", "e8", "e11", "e14"],
+      },
+      {
+        text: "CDC closes the loop back to discovery: Debezium to Kafka to an indexer, ~120 calendar mutations a second average and ~1,200 at peak, refreshing the availability summary within 60 seconds. That lag is the entire availability-lost budget, and at 0.1 bookings per listing per day it costs almost nothing.",
+        lights: ["cdc", "search-index", "e9", "e10"],
+      },
     ],
     crux:
       "The inventory is not ours. Search has to filter and rank over 10M calendars owned by third parties who change them out of band, so an exact index would mean reading calendar rows for millions of listings per query and a fresher one buys nothing measurable. Discovery is therefore a suggestion, the commit is the only truth, and for 5 to 60 minutes at a time even the commit is wrong because a host sold the night somewhere else.",
@@ -33,7 +55,7 @@ export const BOOKING_PLATFORM: Diagram = {
       kind: "zone",
       detail: {
         what: "The two boxes that write availability on somebody else's behalf: the host's own tools, and the channel-sync ingester polling rival sites.",
-        why: "Every other part of this diagram is a system we control end to end. Here the authority is a human or a partner API, and the design question is not how to lock a row but what to believe and how late we are allowed to find out.",
+        why: "Every other part of the system is one we control end to end. Here the authority is a human or a partner API, and the design question is not how to lock a row but what to believe and how late we are allowed to find out.",
         numbers: ["~2M listings also sold elsewhere", "5 to 60 min exposure window"],
         breaks:
           "A host sells a night on a rival site and we confirm a booking for it before the next poll. Nothing in the commit path can see that, and to the guest it looks exactly like our bug.",
@@ -71,7 +93,7 @@ export const BOOKING_PLATFORM: Diagram = {
           pick: "Rank from the index, cache popular (city, date range) pairs for 5 minutes",
           instead: "Join against the calendar rows at query time so results are exact.",
           decider:
-            "The fan-out. An exact answer means reading per-night calendar rows for every candidate listing in a city, at ~12k QPS against a 250 GB calendar whose whole point is a single writer per shard. The stale answer costs one AVAILABILITY_LOST per bad hit, and at 0.1 bookings per listing per day that is a rounding error.",
+            "The fan-out. An exact answer means reading per-night calendar rows for every matching listing in a city, at ~12k QPS against a 250 GB calendar whose whole point is a single writer per shard. The stale answer costs one AVAILABILITY_LOST per bad hit, and at 0.1 bookings per listing per day that is a rounding error.",
           flips:
             "A catalogue small enough that availability fits in memory, say a few thousand properties, where the join is cheap and telling a guest 'gone' after checkout is the more expensive failure.",
         },
@@ -86,7 +108,7 @@ export const BOOKING_PLATFORM: Diagram = {
       row: 1,
       detail: {
         what: "Serves the listing page: ~10 KB of metadata, photos from the CDN, and the real per-night calendar for the months the guest is looking at.",
-        why: "This is the handover from approximate to specific. Search returned 47 candidates from a summary; the detail page shows one listing's actual nights and its actual price, which is the last chance to correct a stale search hit before the guest commits to a checkout.",
+        why: "This is the handover from approximate to specific. Search returned 47 matches from a summary; the detail page shows one listing's actual nights and its actual price, which is the last chance to correct a stale search hit before the guest commits to a checkout.",
         numbers: ["10M x 10 KB = ~100 GB metadata", "~30 photos, ~6 MB/listing, ~60 TB total", "CDN hit rate ~95%"],
         breaks:
           "Its calendar read is a replica read and is allowed to be stale, so the page can still show a night that has just gone. Making this read authoritative would put listing-page traffic on the home-region primary that the booking path depends on.",
@@ -108,9 +130,9 @@ export const BOOKING_PLATFORM: Diagram = {
       col: 2,
       row: 2,
       detail: {
-        what: "The saga that turns an approximate search result into an exact commit: idempotency record, a 2ms transactional hold on the nights, card authorisation outside it, then confirm.",
-        why: "It is the boundary where the system stops being allowed to be wrong. The lock discipline itself is the same class of problem as the hotel reservation question (#19), so the interesting part here is not the transaction but that this is the only component that ever tells a guest the index was lying.",
-        numbers: ["~12 commits/s average, ~120 peak", "~2ms hold transaction", "15 min hold expiry"],
+        what: "The saga that turns an approximate search result into an exact commit: idempotency record, a 2ms transactional hold on the nights, card authorisation outside that hold, then confirm.",
+        why: "It is the boundary where the system stops being allowed to be wrong. The lock discipline itself is the same class of problem as a fungible-inventory hotel reservation, so the interesting part here is not the transaction but that this is the only component that ever tells a guest the index was lying. The hold is cheap; the card authorisation call to the payment processor is the term that actually spends the latency budget, so it runs after the hold succeeds rather than holding the row open while a third party responds.",
+        numbers: ["~12 commits/s average, ~120 peak", "~2ms hold transaction", "card authorisation ~1-2s p99, the largest term in the commit"],
         breaks:
           "It owns AVAILABILITY_LOST. The re-check rejects a stale search hit correctly, but the guest has already chosen dates, entered a card and read a cancellation policy before finding out.",
         choice: {
@@ -133,7 +155,7 @@ export const BOOKING_PLATFORM: Diagram = {
       detail: {
         what: "Threaded conversation between guest and host, plus the transactional fan-out: confirmations, request-to-book approvals, and the host alert raised when channel sync finds a conflict.",
         why: "A two-sided marketplace needs a channel to the counterparty because half the decisions are not automatable. Request-to-book is a host saying yes within 24 hours, and a channel conflict resolves in favour of the existing guest but still needs a human host told about it.",
-        numbers: ["24h request-to-book approval window", "notification fan-out is outside the commit"],
+        numbers: ["24h request-to-book approval window", "fan-out fires after the p99 2s commit, never inside it"],
         breaks:
           "Nothing here is on the commit path, so a stalled queue is invisible to the booking success rate while a host silently never learns their calendar conflicted or their approval is pending.",
         choice: {
@@ -156,7 +178,7 @@ export const BOOKING_PLATFORM: Diagram = {
       detail: {
         what: "Two-way reviews tied to a completed booking, held unpublished until both sides submit or the 14 day deadline passes, then released together.",
         why: "The host is being rated too, which no hotel system models. Reviews are the only durable quality signal the platform has about supply it does not own, and they feed ranking, so their integrity is a search problem rather than a product nicety.",
-        numbers: ["14 day submission deadline", "released on second submit or deadline", "reviews keyed to booking_id"],
+        numbers: ["14 day submission deadline", "released on 2nd submission or at 14 days", "1 review pair per booking_id"],
         breaks:
           "Dual-blind stops naive retaliation and nothing else. Post-release flooding of a guest's profile and coordinated rings still work, and every counter to those is detection after the fact.",
         choice: {
@@ -186,7 +208,7 @@ export const BOOKING_PLATFORM: Diagram = {
           pick: "Elasticsearch with a per-listing availability bitmap in the document",
           instead: "Query the transactional calendar, or keep availability out of the index entirely and filter after retrieval.",
           decider:
-            "Filtering after retrieval means fetching far more candidates than you show. A city query returns ~47 results but would have to pull every listing matching geo and price first, then check calendars for each. The bitmap makes flexible-date search a bit operation and keeps the whole thing inside one query.",
+            "Filtering after retrieval means fetching far more listings than you show. A city query returns ~47 results but would have to pull every listing matching geo and price first, then check calendars for each. The bitmap makes flexible-date search a bit operation and keeps the whole thing inside one query.",
           flips:
             "When staleness is unacceptable to the business, for example inventory published to a regulator, where being approximately right is not a category the system is allowed to have.",
         },
@@ -249,7 +271,7 @@ export const BOOKING_PLATFORM: Diagram = {
       detail: {
         what: "Where a host edits their own calendar: blocking date ranges, setting minimum stays and instant-book on or off, changing pricing rules and answering guests.",
         why: "Supply is user-generated and irregular. A host blocks a fortnight because their family is visiting, and that is not a booking, which is why blocked is a distinct status rather than a fake reservation. Every host edit is also a calendar mutation that has to reach the index.",
-        numbers: ["a host edit touches a whole range", "instant book vs request-to-book is a per-listing flag"],
+        numbers: ["1 edit can span the full 500-day materialised window", "1 boolean flag per listing: instant book vs request-to-book"],
         breaks:
           "A host cannot block a night that already carries a confirmed booking, and no amount of tooling makes a confirmed booking binding on the host. They can simply cancel, and from the guest's side that is indistinguishable from a double booking.",
         choice: {
@@ -273,7 +295,7 @@ export const BOOKING_PLATFORM: Diagram = {
       detail: {
         what: "Polls rival booking sites and the channel managers hosts use to sit on several of them at once, over iCal (15 to 60 min cycles) or REST (500ms to 5s p99, no availability SLA), and writes the nights they report as blocked.",
         why: "Roughly a fifth of listings are also on a rival site, so a host can sell a night we still show as free. This path exists to shrink that window, not to close it, and it is asymmetric on purpose: it may block a night, never release one that carries our confirmed booking.",
-        numbers: ["~2M listings polled, ~2,000 integrations", "uniform 15 min poll = ~2,200 req/s", "partners rate-limit in the tens/s"],
+        numbers: ["~2M listings polled, ~2,000 integrations", "uniform 15 min poll = ~2,200 req/s", "partners rate-limit to roughly 10-50 req/s"],
         breaks:
           "A night sold on a rival site is invisible to us for 5 to 60 minutes depending on the adaptive interval, and a partner returning a stale or empty calendar would release nights we have sold, so the guard is the ratio of released to blocked nights per poll and a quarantine when the diff exceeds a threshold.",
         choice: {
@@ -310,7 +332,7 @@ export const BOOKING_PLATFORM: Diagram = {
       label: "geo + facets + availability",
       detail: {
         what: "One Elasticsearch query combining a geo bounding box, the facet filters and the precomputed availability summary for the requested nights.",
-        why: "Every clause has to be answerable from the document, because the alternative is fanning out to calendar rows for every candidate listing in a city at 12k QPS.",
+        why: "Every clause has to be answerable from the document, because the alternative is fanning out to calendar rows for every matching listing in a city at 12k QPS.",
         numbers: ["~47 results for a typical city query", "5 min cache on popular (city, date range)"],
         breaks:
           "The availability clause is the stale one. Geo and price are as fresh as the last index write; the nights may have been sold up to 60 seconds ago.",
@@ -423,7 +445,7 @@ export const BOOKING_PLATFORM: Diagram = {
       detail: {
         what: "Host-set pricing rules: base nightly rate, weekend and seasonal multipliers, length-of-stay discounts, or an opt-in to platform-suggested pricing.",
         why: "Ten million independent owners set their own prices, so pricing is configuration supplied by users rather than a rate card we control, and the service exists to turn that configuration into one number per night.",
-        numbers: ["rules resolve to price_override per night"],
+        numbers: ["1 price_override resolved per (listing, night)"],
         breaks:
           "A rule change repriced across 500 days of pre-materialised rows is a large write for a small edit, so it has to be applied incrementally rather than as one sweep per host.",
       },
@@ -437,7 +459,7 @@ export const BOOKING_PLATFORM: Diagram = {
       detail: {
         what: "Writing partner-reported nights as blocked, and explicitly refusing to release any night carrying one of our confirmed bookings.",
         why: "The asymmetry is the entire safety property of this path. Trusting a partner to say a night is free means a stale feed can resell a night we have already sold; trusting them to say it is taken costs at most some lost inventory.",
-        numbers: ["conflict resolves in favour of the existing booking"],
+        numbers: ["0 booked nights ever released"],
         breaks:
           "The conflict still happened, so the resolution has to raise a host-facing alert, and a host's channel-conflict rate becomes a ranking signal rather than something only the support desk sees.",
       },

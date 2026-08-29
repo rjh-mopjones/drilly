@@ -10,12 +10,30 @@ export const GAMING_LEADERBOARD: Diagram = {
     shape:
       "A durable log of server-computed scores feeding one ordered in-memory index per board, where the index is chosen entirely because it can answer an arbitrary player's position without counting everyone above them.",
     beats: [
-      "Ingestion never trusts the client. The client sends match facts, the leaderboard service computes the score, and the result is appended to a partitioned durable log before anything touches a board. That log is the system of record, which is what makes an in-memory board acceptable: it is a derived index, not a database.",
-      "The board is one Redis sorted set per logical board key. A sorted set is a skip list plus a hash table, and every forward pointer in the skip list carries a span, the number of nodes it jumps. Rank therefore accumulates during the descent the lookup was doing anyway, so ZREVRANK is O(log N) and lands in roughly 50 microseconds.",
-      "Writes are batched into 50ms windows because span maintenance is the expensive half. Every rank-changing ZADD rewrites spans up the whole tower, and at the 60k/s contest burst that is a real share of one event loop. One round trip carrying 500 ZADDs pays the syscall once and still meets the 5s visibility budget.",
-      "The read path is the burst that defines the system. 600k concurrent players polling every 2s is around 300k rank reads per second, and unlike top-N those cannot be shared between users, so no cache collapses them. They go to 6 to 8 read replicas at roughly 100k ops/s each, which is a different scaling axis from write sharding.",
-      "Below the head, exactness stops being worth anything. Exact rank for player 50,000,000 costs the same as rank 1 and no player can tell 4,812,004 from 4,812,051, so the top 10,000 get an exact ZREVRANK and everyone below gets a percentile bucket from quantile snapshots refreshed every 60s.",
-      "Lifecycle is naming rather than migration. Daily, weekly, all-time and regional boards are separate keys with TTLs, so a reset is a key expiring, and tomorrow's key is pre-created five minutes before midnight so the first write after the boundary does not race every other service instance into existence.",
+      {
+        text: "Ingestion never trusts the client. The client sends match facts, the leaderboard service computes the score, and the result is appended to a partitioned durable log before anything touches a board. That log is the system of record, which is what makes an in-memory board acceptable: it is a derived index, not a database.",
+        lights: ["clients", "leaderboard-svc", "event-log", "e1", "e2"],
+      },
+      {
+        text: "The board is one Redis sorted set per logical board key. A sorted set is a skip list plus a hash table, and every forward pointer in the skip list carries a span, the number of nodes it jumps. Rank therefore accumulates during the descent the lookup was doing anyway, so ZREVRANK is O(log N) and lands in roughly 50 microseconds.",
+        lights: ["zset-primary"],
+      },
+      {
+        text: "Writes are batched into 50ms windows because span maintenance is the expensive half. Every rank-changing ZADD rewrites spans up the whole tower, and at the 60k/s contest burst that is a real share of one event loop. One round trip carrying 500 ZADDs pays the syscall once and still meets the 5s visibility budget.",
+        lights: ["board-writer", "zset-primary", "e3", "e4"],
+      },
+      {
+        text: "The read path is the burst that defines the system. 600k concurrent players polling every 2s is around 300k rank reads per second, and unlike top-N those cannot be shared between users, so no cache collapses them. They go to 6 to 8 read replicas at roughly 100k ops/s each, which is a different scaling axis from write sharding.",
+        lights: ["clients", "read-replicas", "e6"],
+      },
+      {
+        text: "Below the head, exactness stops being worth anything. Exact rank for player 50,000,000 costs the same as rank 1 and no player can tell 4,812,004 from 4,812,051, so the top 10,000 get an exact ZREVRANK and everyone below gets a percentile bucket from quantile snapshots refreshed every 60s.",
+        lights: ["leaderboard-svc", "quantile-snapshots", "e7", "e8"],
+      },
+      {
+        text: "Lifecycle is naming rather than migration. Daily, weekly, all-time and regional boards are separate keys with TTLs, so a reset is a key expiring, and tomorrow's key is pre-created five minutes before midnight so the first write after the boundary does not race every other service instance into existence.",
+        lights: ["board-keys", "e9"],
+      },
     ],
     crux:
       "An arbitrary player's rank is a counting question, not a lookup. Top-N falls out of any index on score; position 4,812,004 does not, and that single requirement picks the data structure, decides whether you can shard, and decides whether approximation is allowed.",
@@ -152,19 +170,20 @@ export const GAMING_LEADERBOARD: Diagram = {
       parent: "redis-group",
       detail: {
         what: "One Redis sorted set per board: a skip list ordered by score, paired with a hash table from member to score.",
-        why: "Every forward pointer in the skip list carries a span, the count of nodes it jumps, so rank is accumulated during the descent rather than by counting entries above the player. That one field is the entire reason this structure is chosen over any other sorted container.",
+        why: "Every forward pointer in the skip list carries a span, the count of nodes it jumps, so rank is accumulated during the descent rather than by counting entries above the player. That one field is the entire reason this structure is chosen over any other sorted container. This design deliberately does not shard a board: at 60k ZADD/s on the busiest key one primary sits at roughly 60% of its ~100k ops/s ceiling, so splitting into score-range bands across several primaries, with a coarse counter layer to keep rank at two operations instead of a fan-out, stays an escape hatch for sustained write rates above ~200k/s rather than something built now.",
         numbers: [
           "ZREVRANK ~50 microseconds",
           "~90B per entry, 9GB for 100M players",
           "packed = points * 2^31 + (2^31 - 1 - t)",
+          "one primary ceiling ~100k ZADD/s, shard above ~200k/s sustained",
         ],
         breaks:
           "Ties are undefined unless you define them: equal scores order by member bytes, which is arbitrary and permanently stable, so the same player wins every tie forever until the tiebreaker is packed into the score itself.",
         choice: {
           pick: "Redis sorted set: ZADD to write, ZREVRANK for position, ZREVRANGE for top-N",
-          instead: "Postgres with a B-tree on (board_id, score DESC), top-N via ORDER BY LIMIT and rank via COUNT(*) WHERE score > mine, or a rank column recomputed by a periodic ROW_NUMBER() pass.",
+          instead: "Postgres with a B-tree on (board_id, score) descending, top-N via an indexed range scan and rank via counting rows that outscore the player, or a rank column recomputed by a periodic windowed pass.",
           decider:
-            "Arbitrary rank, not top-N. The B-tree matches Redis on top-100 and loses badly on rank: the index stores no rank, so COUNT(*) walks every entry above the player, 50M index tuples for a median player on a 100M board, hundreds of milliseconds against a 100ms budget. The batch alternative replaces that with an O(100M) pass per refresh, and at 60k writes/s the order moves faster than a 60s job can republish it.",
+            "Arbitrary rank, not top-N. The B-tree matches Redis on top-100 and loses badly on rank: the index stores no rank, so counting walks every entry above the player, 50M index tuples for a median player on a 100M board, hundreds of milliseconds against a 100ms budget. The batch alternative replaces that with an O(100M) pass per refresh, and at 60k writes/s the order moves faster than a 60s job can republish it.",
           flips:
             "Rank is only ever served for the top few hundred, or the board moves on a human cadence: a 200k-row company board recomputed hourly is a materialised view and a cron job. It also flips when standings must be transactionally consistent with a prize ledger, because the sorted set gives you no transaction with the money.",
         },
@@ -209,8 +228,8 @@ export const GAMING_LEADERBOARD: Diagram = {
         what: "Maps a logical board plus date and region to a concrete key, sets its TTL, and pre-creates the next period's key before the boundary.",
         why: "Making the period part of the key turns a daily reset into a key expiring rather than a migration or a mass delete, and makes rollover a naming event. The pre-creation exists because lazy creation races every service instance at exactly midnight.",
         numbers: [
-          "lb:daily:{YYYY-MM-DD} TTL 7d",
-          "lb:weekly:{YYYY-WW} TTL 30d",
+          "lb:daily:{yyyy-mm-dd} TTL 7d",
+          "lb:weekly:{yyyy-ww} TTL 30d",
           "next key created 5 minutes early",
         ],
         breaks:
@@ -235,11 +254,7 @@ export const GAMING_LEADERBOARD: Diagram = {
       detail: {
         what: "The durable relational record of players and their score history, written from the same log that feeds the boards.",
         why: "The board holds a current value per player and nothing else: no history, no joins, no transactions. Anything that pays out, audits a result or reverses a cheater needs a store that can answer those questions, and it is deliberately off the hot path.",
-        numbers: [
-          "100M registered players",
-          "AOF alone is ~25GB/day, ~190GB for 30 days cold",
-          "payouts computed at a log sequence boundary",
-        ],
+        numbers: ["100M registered players", "AOF alone is ~25GB/day, ~190GB for 30 days cold"],
         breaks:
           "Rebuilding the all-time board from here means replaying roughly 250M writes at maybe 100k/s, which is tens of minutes with no reads served, and it needs retention covering the board's whole life rather than 24 hours.",
         choice: {
@@ -264,7 +279,7 @@ export const GAMING_LEADERBOARD: Diagram = {
         why: "Neither is the durability story, the event log is. These exist to bound the two recovery numbers: AOF everysec bounds the recovery point to about a second, and the snapshot bounds cold-start time so a rebuild does not have to replay the board's whole lifetime.",
         numbers: [
           "AOF everysec, ~1s recovery point",
-          "hourly snapshots",
+          "1 snapshot per hour",
           "~30s replica promotion vs tens of minutes for a full rebuild",
         ],
         breaks:
@@ -306,33 +321,6 @@ export const GAMING_LEADERBOARD: Diagram = {
         },
       },
     },
-    {
-      id: "score-shards",
-      label: "Score-band shards",
-      sub: "quantile-cut bands + Fenwick",
-      kind: "database",
-      col: 2,
-      row: 3,
-      detail: {
-        what: "The scale-out path, not the starting point: each board split into score bands on separate primaries, with a coarse bucket histogram so rank stays two operations instead of one per shard.",
-        why: "Sharding is what you do when one board's sustained write rate passes the single-thread ceiling, and the shard key must be the score. Hashing by player id scatters sorted order across every shard and turns top-100 into a fan-out to all of them.",
-        numbers: [
-          "needed above ~200k writes/s sustained",
-          "4,096 buckets, 12 Fenwick steps",
-          "rank becomes 1 rank call + S-1 counts without the counter layer",
-        ],
-        breaks:
-          "A score increase can cross a band boundary, which is a ZREM on one shard plus a ZADD on another with no transaction across them. Add first and remove second so a crash double-counts a player rather than making them vanish, and let a reconciler sweep the duplicates.",
-        choice: {
-          pick: "Score-range bands cut on observed quantiles, with a Fenwick counter layer over 4,096 buckets",
-          instead: "Hashing by player id, or equal-width score bands, or no sharding at all.",
-          decider:
-            "Peak write rate on the busiest single board against roughly 100k ZADD/s per primary. The 60k/s contest burst is 60% of one primary and batching lifts the ceiling further, so at this size sharding buys nothing but merge logic. Memory is explicitly not the decider: 9GB fits on any box. Equal-width bands fail separately, because a power-law score distribution puts 90% of players in the bottom band.",
-          flips:
-            "Sustained writes on one board above roughly 200k/s even batched, or recovery time rather than throughput: a 9GB board reloads from AOF in tens of minutes single-threaded, where eight 1.1GB shards reload in parallel and only an eighth is unavailable at once.",
-        },
-      },
-    },
   ],
   edges: [
     {
@@ -343,7 +331,7 @@ export const GAMING_LEADERBOARD: Diagram = {
       label: "match facts / rank read",
       detail: {
         what: "Two request shapes on one connection: POST /score carrying event facts, and GET /rank asking where this player sits.",
-        why: "They are drawn as one arrow because the client cannot tell them apart, but they load completely different halves of the system: one is 2.9k/s of writes, the other is the 300k/s burst that sizes the read tier.",
+        why: "They travel on the same connection because the client cannot tell them apart, but they load completely different halves of the system: one is 2.9k/s of writes, the other is the 300k/s burst that sizes the read tier.",
         numbers: ["~300k rank reads/s at contest close", "POST /score returns 202"],
         breaks:
           "Polling is the failure. A client asking every 2s sends the same request whether or not its rank moved, and the fix is pushing rank changes over the WebSocket that already exists rather than serving the polls.",
@@ -400,7 +388,7 @@ export const GAMING_LEADERBOARD: Diagram = {
       detail: {
         what: "The replication stream carrying every accepted write from the primary out to the read replicas.",
         why: "It is async because rank reads tolerate sub-second staleness against a 5s visibility budget, and synchronous replication would put replica acknowledgement on the write path that is already the tightest resource.",
-        numbers: ["sub-second lag in steady state", "route reads away above 500ms"],
+        numbers: ["under 1s lag in steady state", "route reads away above 500ms"],
         breaks:
           "Lag spikes behind a snapshot fork, and a lagging replica answers confidently rather than failing, so the lag metric has to gate routing.",
       },
@@ -442,7 +430,7 @@ export const GAMING_LEADERBOARD: Diagram = {
       detail: {
         what: "The fallback answer for a player outside the top 10,000: a percentile band such as 'top 3%, about 4.2M' rather than an exact position.",
         why: "It collapses the most expensive read shape into an array lookup already resident in the API process, and the API contract carries an explicit exact flag so the client renders a band rather than a number it would otherwise trust.",
-        numbers: ["one in-process lookup", "exact: false in the response"],
+        numbers: ["one in-process lookup", "1 boolean exactness flag carried in every response"],
         breaks:
           "If the client ignores the exact flag it renders an approximate figure as a precise rank, which is a worse lie than showing a band.",
       },
@@ -470,7 +458,7 @@ export const GAMING_LEADERBOARD: Diagram = {
       detail: {
         what: "The same log consumed a second time, into the durable relational record of scores and their provenance.",
         why: "Two consumers off one log rather than a write from the board, so the durable copy does not depend on the in-memory one being correct, and a payout can be computed at a sequence boundary rather than read off a board that is only eventually right.",
-        numbers: ["payouts computed at a log sequence boundary"],
+        numbers: ["1 log sequence number settles any payout dispute"],
         breaks:
           "This consumer can lag independently of the board writer, so for a window the visible standings and the payable record disagree, and only the record is allowed to settle the difference.",
       },
@@ -498,7 +486,7 @@ export const GAMING_LEADERBOARD: Diagram = {
       detail: {
         what: "Loading the most recent snapshot back into a primary, then replaying the AOF tail on top of it.",
         why: "The snapshot is what keeps a cold start bounded, and this arrow is why it is quietly load-bearing despite the design calling it optional: without it the honest recovery time for the all-time board is hours rather than minutes.",
-        numbers: ["hourly snapshot bounds the replay", "9GB board, single-threaded load"],
+        numbers: ["1 hourly snapshot bounds the replay", "9GB board, single-threaded load"],
         breaks:
           "Snapshot loading is single-threaded, so a 9GB board is tens of minutes of unavailability and that number is nowhere near the 30s replica promotion everyone quotes.",
       },
@@ -515,34 +503,6 @@ export const GAMING_LEADERBOARD: Diagram = {
         numbers: ["~250M writes for the all-time board", "~100k/s replay, tens of minutes"],
         breaks:
           "The rebuild is slower than anyone has agreed to and needs retention covering the board's whole lifetime, which is why the snapshot ends up carrying the recovery story in practice.",
-      },
-    },
-    {
-      id: "e14",
-      from: "zset-primary",
-      to: "score-shards",
-      tier: "control",
-      label: "split at ~200k writes/s",
-      detail: {
-        what: "The escape hatch: splitting one board's sorted set into score bands across several primaries once the single-thread write ceiling is genuinely in reach.",
-        why: "It is drawn dashed because it is the scale-out path rather than the starting point. At 60k/s on the busiest key, one primary is at 60% and sharding would buy nothing but merge logic and a band-boundary failure mode.",
-        numbers: ["one primary ceiling ~100k ops/s", "shard above ~200k/s sustained"],
-        breaks:
-          "The shard key must be the score. Hashing by player id spreads writes evenly and destroys global order, which turns top-100 into a fan-out to every shard followed by a merge.",
-      },
-    },
-    {
-      id: "e15",
-      from: "score-shards",
-      to: "leaderboard-svc",
-      tier: "control",
-      label: "sum counts + local rank",
-      detail: {
-        what: "What a rank read becomes once sharded: the counts in every band above the player summed, plus one exact ZREVRANK inside their own band.",
-        why: "This is the asymmetry worth saying out loud. Top-N gets cheaper under score-range sharding because it is always one band, while rank gets linear in the shard count at exactly the read rate that hurts, until the counter layer collapses it back to two operations.",
-        numbers: ["S round trips without the counter layer", "8 shards x 300k reads/s = 2.4M ops/s"],
-        breaks:
-          "The counter layer is fed asynchronously, so at 60k/s and 200ms of lag up to 12,000 entries are uncounted, which is invisible at rank 4.2M and fatal in the top 100.",
       },
     },
   ],
