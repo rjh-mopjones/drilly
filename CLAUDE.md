@@ -55,6 +55,40 @@ fails on any of the first four.
    crossing is not, and a line under a box is invisible and unclickable. The
    router does the work; the author steers.
 
+### Adding a diagram (the checklist that produced the current 56)
+
+1. Copy the closest finished spec (`web-crawler.ts` for a pipeline with a loop,
+   `netflix.ts` for request/data/control bands, `rate-limiter.ts` for an
+   expanded gateway pipeline, `notification-system.ts` for per-channel lanes and
+   a frame-sourced edge). Register it in `index.ts`.
+2. Decide what is on the canvas BEFORE placing anything: ≤ 12 boxes. Stages of
+   one deployable go in a `serviceGroup` (collapsed by default). Attributes of
+   a box (its replicas, its in-process cache, its DLQ, its sampled archive)
+   go into that box's `sub`/`detail`, not into boxes of their own. A box that
+   is really a path ("reject path") is an edge.
+3. Sketch bands: entry at the top-left, request path flowing right/down,
+   stores right/bottom, control plane in its own row or column. Boxes that
+   talk sit in adjacent cells; a hot edge should be straight or one elbow.
+   ≤ 4 columns × 5 rows.
+4. Tier every edge: ≤ 8 `hot` (the request path the reader must see), then
+   `data`, then `control`. Write `tier`, not `animated`/`dashed`.
+5. Run the gate. If it names a crossing: move cells first (most crossings are
+   two diagonals across the same 2×2 of cells — put the endpoints in one row or
+   column), then `fromSide`/`toSide`, then a frame-sourced edge for identical
+   edges from every member of a frame.
+6. Some graphs cannot be drawn crossing-free on a grid however you place them:
+   two antiparallel edges between the same pair with a third edge passing
+   between them, or K₃,₂ (three workers each hitting the same two stores).
+   Fix those with content, never by accepting the crossing: fold the reply into
+   the request edge's detail (the fence check's "0 rows" is the stale write's
+   response), fold the box that is an alternative rather than a step (optimistic
+   CAS is "you don't need the lock"), or merge identical edges into one from
+   the frame. Move the folded facts into the survivor's `detail`.
+7. Render the PNG and look at it. The gate cannot see ugliness — a hot edge
+   that wraps three sides of the canvas passes but reads badly; move cells.
+8. Rebuild layouts (`bunx tsx scripts/build-diagram-layouts.ts`, which
+   `build-web.sh` runs) so `layouts.json` is fresh; the gate warns if stale.
+
 ### How a spec is written
 
 - Nodes declare a **grid cell**: `col`, `row` (0-based), and `parent` for
@@ -63,9 +97,10 @@ fails on any of the first four.
   for the single box it draws; expanded frames are sized from their members.
 - Two boxes cannot share a cell. Processes hidden inside a collapsed group can
   share cells with anything; they are not drawn.
-- `fromSide` / `toSide` on an edge are the author's **routing instrument**: a
-  strong preference the router honours unless it would force a crossing. The
-  gate names every crossing pair; fix by moving cells, then by setting faces.
+- `fromSide` / `toSide` on an edge are the author's **routing instrument**: worth
+  1500 units to the router (a long detour), but never a crossing (3000), so a
+  hint that would force a crossing is ignored rather than obeyed. Clear the old
+  hints when you re-lay a spec; they were tuned for a different router.
 - **Frame-sourced edges**: `from: "<frameId>"` means "from every member". Three
   identical attempt-log edges from three workers are one edge from their lane
   frame; it is also the only way some K₃,₂ patterns draw without a crossing.
@@ -116,6 +151,21 @@ Hard-won facts:
   ugly detours were.
 - Port stub lines beside a box are perpendicular-only (`noH`/`noV`); routes
   never run along a box at 16 px.
+- **Both hint bonuses must be applied.** The `toSide` bonus was computed and
+  dropped for a while, so arrival faces did nothing and the search went in
+  circles on the lock diagram. The end bonus is negative, so Dijkstra only
+  stops once nothing cheaper than the best goal can remain.
+- Hot labels sit on their run, or one label-height off it, or a full row-gap
+  off it when the run is a short gutter; they keep 12 units from any box. The
+  browser checker flags labels within 10 px of a box, and it was right.
+- **Layouts are precomputed** into `mobile/lib/diagrams/layouts.json` (hash of
+  the geometry-relevant fields; the renderer recomputes if stale). The search
+  can take a second on a laptop and several on a phone WebView; the app only
+  draws.
+- The renderer frames `layout.bounds` with `fitBounds`, not `fitView`: routes
+  that detour through the margins fall outside the boxes' bounds and were
+  clipped on phones. On narrow screens the zoom chrome and the hint are hidden
+  — pinch and tap are enough.
 - `ArchDiagram.tsx` is a native stub; the shipping app is a WebView over the
   web build, so the `.web.tsx` renders everywhere.
 - Arrow clicks resolve by distance (`nearestEdgeId`), not hit areas; frames are
