@@ -19,6 +19,7 @@ import {
 import type { SourceConfig } from "../lib/parser";
 import { invalidateSourceItemsCache, useSourceItems } from "../lib/useSourceItems";
 import { syncAll } from "../lib/drillSync";
+import { ChevronsIcon } from "./ChevronsIcon";
 import { useTheme, type Palette } from "../lib/theme";
 
 const SIDEBAR_WIDTH = 300;
@@ -211,7 +212,7 @@ export function DesktopSidebar() {
             style={styles.iconButton}
             accessibilityLabel="Drill"
           >
-            <Text style={[styles.iconGlyph, { color: palette.accent }]}>⚡</Text>
+            <ChevronsIcon size={18} color={palette.accent} />
           </Pressable>
           <Pressable
             onPress={onRefresh}

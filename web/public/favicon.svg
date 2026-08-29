@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <rect width="1024" height="1024" fill="#0b0d12"/>
-  <text x="512" y="648" text-anchor="middle" font-family="Avenir Next, Avenir, Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="800"
-        font-size="500" fill="#ffffff">D</text>
-  <rect x="412" y="700" width="200" height="36" rx="8" fill="#7c9cff"/>
+  <g transform="translate(512 512) scale(5.4) translate(-50 -49)">
+    <path d="M22 18 L50 36 L78 18 M22 40 L50 58 L78 40 M22 62 L50 80 L78 62" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
 </svg>

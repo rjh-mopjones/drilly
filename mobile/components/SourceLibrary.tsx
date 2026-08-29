@@ -15,6 +15,7 @@ import type { SourceConfig } from "../lib/parser";
 import { useTheme, type Palette } from "../lib/theme";
 import { SourceCard } from "./SourceCard";
 import { RefreshAllButton } from "./RefreshAllButton";
+import { ChevronsIcon } from "./ChevronsIcon";
 
 /**
  * Group manifest sources by their `category` field, preserving manifest
@@ -119,7 +120,7 @@ export function SourceLibrary() {
             style={styles.cog}
             accessibilityLabel="Drill"
           >
-            <Text style={styles.drillText}>⚡</Text>
+            <ChevronsIcon size={22} color={palette.accent} />
           </Pressable>
           <RefreshAllButton />
           <Pressable
@@ -222,7 +223,6 @@ function makeStyles(p: Palette) {
       justifyContent: "center",
       borderRadius: 22,
     },
-    drillText: { color: p.accent, fontSize: 20 },
     cogText: {
       color: p.textMuted,
       fontSize: 22,
