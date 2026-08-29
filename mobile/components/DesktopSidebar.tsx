@@ -388,7 +388,7 @@ function SourceTreeNode({
           {/* Pinned last item: the printable A4 cheat sheet (opens externally). */}
           {source.cheatSheetUrl && (
             <Pressable
-              onPress={() => openExternalSource(source.cheatSheetUrl!)}
+              onPress={() => openExternalSource(`${source.cheatSheetUrl}#theme=${palette.scheme}`)}
               style={(s) => [
                 styles.itemRow,
                 styles.cheatRow,

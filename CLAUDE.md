@@ -56,6 +56,17 @@ Plain-markdown conventions the reader draws (`makeRules` in `ItemView.tsx`):
 - `patterns.md` ships in the native bundle: mirror to
   `mobile/assets/content/patterns.md` after editing.
 
+## Cheat sheets
+
+`web/public/*-cheatsheet.html` are standalone A4 print sheets. All 56 share a
+byte-identical `<style>` block and (25 of them) the same mermaid init — keep it
+that way and edit them with a script over the glob, never one file by hand.
+The CSS reflows on screen (3 → 2 → 1 columns, bigger type below 760px) and has
+a dark palette; print resets to light, 4 columns. The app opens a sheet with
+`#theme=dark|light` (its own theme setting) which a head script turns into
+`data-theme`; without it the sheet follows `prefers-color-scheme`. The hash is
+used, not a query string, so the service worker's cache key is unchanged.
+
 ## Interactive diagrams
 
 Whole-solution architecture diagrams for System Design Questions, rendered with

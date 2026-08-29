@@ -155,7 +155,7 @@ export function ItemList({ source }: Props) {
               styles.cheatItem,
               pressed && styles.itemPressed,
             ]}
-            onPress={() => openExternalSource(source.cheatSheetUrl!)}
+            onPress={() => openExternalSource(`${source.cheatSheetUrl}#theme=${palette.scheme}`)}
             accessibilityLabel="Open printable cheat sheet"
           >
             <Text style={[styles.itemNumber, styles.cheatIcon]}>▤</Text>

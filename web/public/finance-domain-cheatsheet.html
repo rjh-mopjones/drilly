@@ -3,28 +3,58 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<script>
+  // The app opens this sheet with #theme=dark|light (its own theme setting,
+  // which may differ from the OS). Set before first paint so there is no flash.
+  (function(){var m=/theme=(dark|light)/.exec(location.hash);if(m)document.documentElement.setAttribute("data-theme",m[1]);})();
+</script>
 <title>Finance Domain Cheat Sheet</title>
 <style>
 :root{
   --fs: 7.2pt;       /* base body */
   --fs-mono: 6.6pt;  /* code blocks */
   --fs-h3: 7.8pt;    /* card header */
+  --fs-h4: 7pt;      /* card subheader */
+  --fs-table: 6.6pt; /* tables */
+  --fs-h1: 13pt;     /* title */
+  --fs-meta: 6.6pt;  /* title-bar meta */
+  --fs-cap: 6.2pt;   /* diagram captions */
+  --fs-badge: 5.6pt; /* footgun / ANSI / pg badges */
   --gap: 5px;        /* column gap */
   --pad: 3px;        /* card padding */
+  --cols: 4;         /* A4 landscape-ish print density */
   --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+  --inlinecode:#eceef1; --page:#9aa0a6; --sheet:#fff; --title-rule:#111; --th-rule:#bbb;
+  --shadow:0 2px 18px rgba(0,0,0,.35);
+  color-scheme: light;
+}
+/* Dark palette: explicit #theme=dark from the app wins; otherwise follow the
+   OS. Print always resets to light below. */
+:root[data-theme="dark"]{
+  --ink:#e6e8ee; --muted:#8a93a6; --rule:#2a3040; --codebg:#161a23; --headbg:#1b202a;
+  --inlinecode:#222835; --page:#0b0d12; --sheet:#11141b; --title-rule:#e6e8ee; --th-rule:#3a4150;
+  --shadow:none; color-scheme: dark;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ink:#e6e8ee; --muted:#8a93a6; --rule:#2a3040; --codebg:#161a23; --headbg:#1b202a;
+    --inlinecode:#222835; --page:#0b0d12; --sheet:#11141b; --title-rule:#e6e8ee; --th-rule:#3a4150;
+    --shadow:none; color-scheme: dark;
+  }
 }
 *{box-sizing:border-box;}
 html,body{margin:0;padding:0;}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  font-size:var(--fs); line-height:1.18; color:var(--ink); background:#9aa0a6;}
-.sheet{background:#fff;}
+  font-size:var(--fs); line-height:1.18; color:var(--ink); background:var(--page);
+  -webkit-text-size-adjust:100%;}
 /* spanning title bar */
-.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid #111;
+.titlebar{column-span:all; -webkit-column-span:all; border-bottom:2px solid var(--title-rule);
   margin-bottom:5px; padding:2px 4px 3px; display:flex; align-items:baseline; gap:10px;}
-.titlebar h1{font-size:13pt; margin:0; letter-spacing:.5px;}
-.titlebar .meta{font-size:6.6pt; color:var(--muted);}
+.titlebar h1{font-size:var(--fs-h1); margin:0; letter-spacing:.5px;}
+.titlebar .meta{font-size:var(--fs-meta); color:var(--muted);}
 /* the multicolumn flow */
-.sheet{column-count:4; column-gap:var(--gap); -webkit-column-count:4; -webkit-column-gap:var(--gap);
+.sheet{background:var(--sheet); column-count:var(--cols); column-gap:var(--gap);
+  -webkit-column-count:var(--cols); -webkit-column-gap:var(--gap);
   column-fill:balance; padding:5px;}
 .card{break-inside:avoid; -webkit-column-break-inside:avoid; page-break-inside:avoid;
   border:0.5pt solid var(--rule); border-radius:2px; margin:0 0 var(--gap); padding:0 var(--pad) var(--pad);
@@ -40,30 +70,57 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Ar
 .card:nth-of-type(8n+6) h3{background:#a23a4e;}
 .card:nth-of-type(8n+7) h3{background:#3a6b35;}
 .card:nth-of-type(8n+8) h3{background:#555e6b;}
-.card h4{font-size:7pt; margin:3px 0 1px; padding-bottom:.5px; color:#222;
+.card h4{font-size:var(--fs-h4); margin:3px 0 1px; padding-bottom:.5px; color:var(--ink);
   border-bottom:0.5pt solid var(--rule); font-weight:700;}
 .card p{margin:2px 0;}
 .card ul{margin:1.5px 0; padding-left:11px;}
 .card li{margin:.5px 0; line-height:1.2;}
-table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:6.6pt;}
-th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid #bbb; font-weight:700;}
-td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top;}
+table{width:100%; border-collapse:collapse; margin:1.5px 0; font-size:var(--fs-table);}
+th{text-align:left; background:var(--headbg); padding:.5px 2px; border-bottom:0.6pt solid var(--th-rule); font-weight:700;}
+td{padding:.5px 2px; border-bottom:0.4pt dotted var(--rule); vertical-align:top; overflow-wrap:anywhere;}
 pre{background:var(--codebg); border-left:1.5px solid #2c6e9b; margin:2px 0; padding:2px 3px;
   font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:var(--fs-mono);
   line-height:1.2; white-space:pre-wrap; overflow-wrap:anywhere;}
 code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace; font-size:.93em;
-  background:#eceef1; padding:0 1.5px; border-radius:2px;}
+  background:var(--inlinecode); padding:0 1.5px; border-radius:2px;}
 pre code{background:none; padding:0; font-size:1em;}
-.pg,.ansi,.warn{display:inline-block; font-size:5.6pt; font-weight:700; line-height:1.4;
+.pg,.ansi,.warn{display:inline-block; font-size:var(--fs-badge); font-weight:700; line-height:1.4;
   padding:0 2.5px; border-radius:2px; color:#fff; vertical-align:middle; letter-spacing:.3px;}
 .pg{background:#2c6e9b;} .ansi{background:#1f7a5a;} .warn{background:#c0392b;}
 .diagram .mermaid{margin:2px 0; text-align:center;}
 .diagram .mermaid svg{max-width:100%; height:auto;}
-.cap{font-size:6.2pt; color:var(--muted); font-style:italic; margin:2px 0 0;}
+.cap{font-size:var(--fs-cap); color:var(--muted); font-style:italic; margin:2px 0 0;}
 .legend li{line-height:1.35;}
-@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:0 2px 18px rgba(0,0,0,.35);} }
+/* ---- Screen: the print density is unreadable below a laptop width, so the
+   sheet reflows — fewer columns, bigger type — while print keeps the A4. ---- */
+@media screen{ body{padding:14px;} .sheet{max-width:1180px; margin:0 auto; box-shadow:var(--shadow);} }
+@media screen and (max-width:1000px){ :root{ --cols:3; } }
+@media screen and (max-width:760px){
+  :root{
+    --fs:14px; --fs-mono:12.5px; --fs-h3:15px; --fs-h4:13.5px; --fs-table:12.5px;
+    --fs-h1:22px; --fs-meta:12px; --fs-cap:12px; --fs-badge:10.5px;
+    --gap:12px; --pad:9px; --cols:2;
+  }
+  body{padding:0; line-height:1.35;}
+  .sheet{padding:12px; max-width:none; box-shadow:none;}
+  .card{border-radius:6px;}
+  .card h3{padding:5px var(--pad);}
+  .card li{line-height:1.35;}
+  .card ul{padding-left:18px;}
+  th,td{padding:3px 5px;}
+  pre{padding:6px 8px; line-height:1.4;}
+}
+@media screen and (max-width:520px){
+  :root{ --cols:1; }
+  .titlebar{flex-direction:column; gap:2px; padding:8px 4px 10px;}
+}
 @page{ size:A4; margin:5mm; }
 @media print{
+  :root, :root[data-theme="dark"]{
+    --ink:#1a1a1a; --muted:#555; --rule:#d8d8d8; --codebg:#f4f5f7; --headbg:#eef0f3;
+    --inlinecode:#eceef1; --page:#fff; --sheet:#fff; --title-rule:#111; --th-rule:#bbb;
+    --cols:4; color-scheme: light;
+  }
   body{background:#fff; padding:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
   /* auto-fill packs each column top-to-bottom across pages — no balance gaps */
   .sheet{box-shadow:none; max-width:none; margin:0; column-fill:auto;}
@@ -690,9 +747,12 @@ after:  200 sh @ 25, price 25  = 5,000  (unchanged)</code></pre>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
   try {
-    mermaid.initialize({ startOnLoad: true, theme: "neutral",
+    var root = document.documentElement, attr = root.getAttribute("data-theme");
+    var dark = attr ? attr === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var narrow = window.matchMedia("(max-width: 760px)").matches;
+    mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral",
       flowchart: { useMaxWidth: true, htmlLabels: true, nodeSpacing: 18, rankSpacing: 18 },
-      themeVariables: { fontSize: "9px" } });
+      themeVariables: { fontSize: narrow ? "13px" : "9px" } });
   } catch (e) { /* offline / blocked CDN: diagrams degrade to source text, rest of sheet is fine */ }
 </script>
 </body>
