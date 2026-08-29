@@ -29,8 +29,8 @@ export const TIKTOK: Diagram = {
   nodes: [
     {
       id: "retrieval-group",
-      label: "Retrieval: 10B to ~300 candidates",
       kind: "zone",
+      label: "Retrieval: 10B to ~300 candidates",
     },
     {
       id: "client",
@@ -63,8 +63,8 @@ export const TIKTOK: Diagram = {
       id: "feed-service",
       label: "Feed Service",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       sub: "context features, 5 channels",
       detail: {
         what: "The regional entry point for a feed call: builds context features, fetches the user vector, and dispatches the five retrieval channels concurrently.",
@@ -91,7 +91,8 @@ export const TIKTOK: Diagram = {
       label: "User embedding store",
       kind: "database",
       col: 1,
-      row: 0,
+      row: 1,
+      parent: "retrieval-group",
       sub: "1TB of vectors, hourly refresh",
       detail: {
         what: "A key-value store holding one 256-dimensional float vector per user, rebuilt hourly in batch from a 30-day interaction window.",
@@ -114,7 +115,7 @@ export const TIKTOK: Diagram = {
       label: "ANN index",
       sub: "IVF-PQ, 10B vectors, ~160GB",
       kind: "database",
-      col: 1,
+      col: 2,
       row: 1,
       parent: "retrieval-group",
       detail: {
@@ -141,8 +142,8 @@ export const TIKTOK: Diagram = {
     {
       id: "trending",
       kind: "database",
-      col: 1,
-      row: 2,
+      col: 3,
+      row: 1,
       parent: "retrieval-group",
       sub: "Redis top-K, non-learned",
       label: "Trending/follows/sound",
@@ -163,42 +164,12 @@ export const TIKTOK: Diagram = {
       },
     },
     {
-      id: "explore-pool",
-      label: "Exploration pool",
-      kind: "database",
-      col: 1,
-      row: 3,
-      parent: "retrieval-group",
-      sub: "1 slot in 10, <500 impressions",
-      detail: {
-        what: "A reserved retrieval channel filling one feed slot in ten from videos with under 500 lifetime impressions that have cleared moderation.",
-        why: "Every other stage ranks on observed engagement, so a video with none is unreachable by construction. This channel is the only door into the corpus, which is why it is an explicit budget line you can read off a dashboard rather than a term buried inside a model.",
-        numbers: [
-          "1 feed slot in 10",
-          "~400 impressions to measure completion to +/-5 points",
-          "40B of demand against 10B supplied, 4x oversubscribed",
-          "bottom-decile kill at 100 impressions recovers ~7% of the quota",
-          "top quartile by prior enters immediately, capped per creator/day",
-        ],
-        breaks:
-          "Uncorrected position bias makes exploration impressions look worse than organic ones, so the promotion threshold ratchets upward and the whole mechanism decays into a no-op while every dashboard stays green. A video that clears neither this nor the ANN tier is served only to followers and its sound page, and we cannot tell which of those was a mistake without spending the impressions we declined to.",
-        choice: {
-          pick: "A reserved quota served as its own retrieval channel, entry ranked by a cheap prior",
-          instead: "A UCB-style uncertainty bonus inside the ranker, so under-observed videos compete on a boosted score.",
-          decider:
-            "Whether the spend is visible. Measuring completion near 40% to +/-5 points needs ~400 impressions, and 100M uploads/day is 40B of demand against 100B of total inventory, so exploration must be rationed. A bonus has no budget: its spend is emergent and shifts silently on every retrain.",
-          flips:
-            "Under roughly 5% of daily impressions needed to explore everything. A niche app at 1M uploads/day needs 400M against 20B of inventory, and there the bonus wins because it explores continuously and targets uncertainty.",
-        },
-      },
-    },
-    {
       id: "union",
-      sub: "~300 candidates survive",
       kind: "service",
-      col: 1,
-      row: 4,
-      label: "Union + safety filter",
+      col: 2,
+      row: 2,
+      sub: "~300 survive; 1 slot in 10 explores",
+      label: "Union + safety + explore",
       detail: {
         what: "Merges the five channels, drops duplicates, and applies moderation, region and block-list filters before anything is scored.",
         why: "The channels overlap heavily and the filters here are set lookups, while the stage immediately after is the most expensive tier in the system. Filtering first guarantees no accelerator time is ever spent on a candidate that could not have been served.",
@@ -220,8 +191,8 @@ export const TIKTOK: Diagram = {
       label: "Multi-task ranker",
       sub: "watch, like, share, follow",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 1,
+      row: 2,
       detail: {
         what: "A multi-task network with sparse embedding tables scoring each candidate for completion, like, share, comment and follow in one forward pass.",
         why: "Retrieval knows what resembles what you watched before and has no notion of what you will actually finish. That prediction is what the expensive stage buys, and it is affordable only because retrieval already bounded the work at a few hundred candidates.",
@@ -247,7 +218,7 @@ export const TIKTOK: Diagram = {
       sub: "top 50 ids + prefetch hints",
       kind: "service",
       col: 0,
-      row: 4,
+      row: 1,
       label: "Re-rank + hydrate",
       detail: {
         what: "Collapses the four predictions into one score with A/B-tuned weights, penalises repeated creators and topics, then hydrates the top 50 with manifest and signed first-chunk URLs.",
@@ -270,8 +241,8 @@ export const TIKTOK: Diagram = {
       label: "Edge CDN",
       sub: "HLS segments, pre-warmed",
       kind: "external",
-      col: 2,
-      row: 0,
+      col: 0,
+      row: 2,
       detail: {
         what: "Edge points of presence serving the HLS segments the client plays and preloads.",
         why: "At 100B impressions a day and roughly 2MB actually watched per impression, egress is about 2.3TB/s, and an edge hit ratio above 95% is what keeps origin egress near 100GB/s. Preload only works if the segment is one short hop away.",
@@ -286,7 +257,7 @@ export const TIKTOK: Diagram = {
       sub: "Kafka, slot_index on every row",
       kind: "queue",
       col: 3,
-      row: 3,
+      row: 2,
       detail: {
         what: "The partitioned durable log carrying impression, start, quartile, complete, skip, like and share events, each stamped with the feed slot index.",
         why: "The label a model trains on has to be joined to the ordering the user was actually shown, and slot index is load-bearing: without it exploration impressions are compared against organic ones and every new video looks worse than it is.",
@@ -313,7 +284,7 @@ export const TIKTOK: Diagram = {
       sub: "ranker 5 min, retrieval hourly",
       kind: "service",
       col: 3,
-      row: 4,
+      row: 3,
       detail: {
         what: "Two paths off one stream: a continuous learner checkpointing the ranker every five minutes, and an hourly batch job rebuilding retrieval embeddings over a 30-day window.",
         why: "The feedback loop closes at retrieval, not at ranking. The ranker only reorders a candidate set it did not choose, so a bad update costs one session's ordering, whereas a bad retrieval update changes what is eligible and is self-reinforcing across every session after it.",
@@ -393,22 +364,6 @@ export const TIKTOK: Diagram = {
       },
     },
     {
-      id: "e5",
-      from: "feed-service",
-      to: "explore-pool",
-      fromSide: "right",
-      toSide: "bottom",
-      tier: "data",
-      label: "1 feed slot in 10",
-      detail: {
-        what: "The reserved exploration draw: candidates with under 500 lifetime impressions, sampled against a per-user quota.",
-        why: "Reserving the slot at dispatch rather than letting exploration compete on score is what makes the spend a number somebody can cap. It is requested even when the other channels have plenty to offer.",
-        numbers: ["10% of slots", "10B exploration impressions/day supplied"],
-        breaks:
-          "An underspent quota is invisible in engagement metrics, which improve when you explore less, so the alarm has to be on weekly promotions out of the pool.",
-      },
-    },
-    {
       id: "e6",
       from: "ann-index",
       to: "union",
@@ -434,20 +389,6 @@ export const TIKTOK: Diagram = {
         numbers: ["~100 of the ~300 candidates"],
         breaks:
           "Trending content is already popular, so it wins the ranker's score comparison structurally and needs the diversity re-rank downstream to stop it dominating every response.",
-      },
-    },
-    {
-      id: "e8",
-      from: "explore-pool",
-      to: "union",
-      tier: "data",
-      label: "under-observed candidates",
-      detail: {
-        what: "Videos with almost no engagement history entering the candidate set through their reserved slot.",
-        why: "This is the only arrow in the diagram that carries a video the models know nothing about, and it exists because every other route into the feed is gated on evidence a new upload cannot have.",
-        numbers: ["~20 per call", "each video runs to a ~400 impression budget"],
-        breaks:
-          "Their slot position is fixed and slot position affects completion independently of the video, so the impressions this edge delivers are not comparable to organic ones without a position-bias correction.",
       },
     },
     {
@@ -566,10 +507,10 @@ export const TIKTOK: Diagram = {
     },
     {
       id: "e17",
+      to: "retrieval-group",
+      label: "hourly: embeddings + index",
       from: "trainer",
-      to: "embedding-store",
       tier: "control",
-      label: "hourly, 30-day window",
       offset: 90,
       detail: {
         what: "The hourly batch rebuild writing 1TB of refreshed user vectors.",
@@ -577,21 +518,6 @@ export const TIKTOK: Diagram = {
         numbers: ["1TB rewritten hourly", "30-day training window"],
         breaks:
           "A rebuild that fails silently leaves vectors ageing with no visible symptom until watch rate regresses days later, which is why embedding age is its own alarm.",
-      },
-    },
-    {
-      id: "e18",
-      from: "trainer",
-      to: "ann-index",
-      tier: "control",
-      label: "hourly index rebuild",
-      offset: 150,
-      detail: {
-        what: "Recomputed video embeddings re-clustered and re-quantised into the IVF-PQ index on the same hourly cadence.",
-        why: "IVF-PQ handles streaming inserts badly, so updates are batched into a rebuild. That is the price paid for the 60x memory saving, and it is also what keeps retrieval too slow to chase its own output.",
-        numbers: ["hourly rebuild", "10B vectors re-quantised"],
-        breaks:
-          "Retrieval is therefore up to an hour stale exactly when trends move fastest, and the trending channel exists to patch that rather than to fix it.",
       },
     },
   ],
