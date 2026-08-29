@@ -3,7 +3,7 @@
  * question touches a new file plus this one line, and parallel authoring never
  * collides. Types live in ./types.
  */
-import { beatLights, beatText, isFrame, type Diagram } from "./types";
+import { type Diagram, type Figure, beatLights, beatText, breaksHandled, breaksText, cruxHandled, cruxText, figureExplain, figureValue, isFrame } from "./types";
 import { parentOf, tierOf } from "./layout";
 import { WEB_CRAWLER } from "./web-crawler";
 import { FLEET_UPDATE } from "./fleet-update";
@@ -147,15 +147,23 @@ export function diagramToMarkdown(d: Diagram): string {
     const e = d.edges.find((x) => x.id === id);
     return e ? `${byId(e.from)} → ${byId(e.to)}` : id;
   };
+  const figures = (xs: Figure[]) => xs.map((f) => `- ${figureValue(f)}${figureExplain(f) ? ` — ${figureExplain(f)}` : ""}`);
   out.push("### Overview", "", `**The shape of it.** ${o.shape}`, "");
+  if (o.forces?.length) {
+    out.push("**What forces what.**", "", "| Constraint | Decision |", "|---|---|");
+    for (const f of o.forces) out.push(`| ${f.constraint} | ${f.decision} |`);
+    out.push("");
+  }
+  if (o.naive) out.push(`**The obvious design, and where it breaks.** ${o.naive.text}`, "");
   out.push("**How it works.**", "");
   o.beats.forEach((b, i) => {
     const lights = beatLights(b).map((id) => (d.nodes.some((n) => n.id === id) ? byId(id) : edgeName(id)));
     out.push(`${i + 1}. ${beatText(b)}${lights.length ? ` _(${lights.join(", ")})_` : ""}`);
   });
   out.push("");
-  if (o.numbers?.length) out.push(`**Numbers.** ${o.numbers.join(" · ")}`, "");
-  out.push(`**The hard part.** ${o.crux}`, "");
+  if (o.numbers?.length) out.push("**Numbers.**", "", ...figures(o.numbers), "");
+  out.push(`**The hard part.** ${cruxText(o.crux)}`, "");
+  if (cruxHandled(o.crux)) out.push(`**How the design handles it.** ${cruxHandled(o.crux)}`, "");
 
   out.push("### Components", "");
   // Frames first, then their members, so the note keeps the containment the picture shows.
@@ -180,9 +188,11 @@ export function diagramToMarkdown(d: Diagram): string {
     out.push(`#### ${n.label}${n.sub ? ` (${n.sub})` : ""}${role}`, "");
     out.push(`- **What it is.** ${n.detail.what}`);
     out.push(`- **Why it exists.** ${n.detail.why}`);
-    if (n.detail.numbers?.length)
-      out.push(`- **Numbers.** ${n.detail.numbers.join(" · ")}`);
-    if (n.detail.breaks) out.push(`- **What breaks.** ${n.detail.breaks}`);
+    if (n.detail.numbers?.length) out.push("- **Numbers.**", ...figures(n.detail.numbers).map((l) => `  ${l}`));
+    if (n.detail.breaks) {
+      out.push(`- **What breaks.** ${breaksText(n.detail.breaks)}`);
+      if (breaksHandled(n.detail.breaks)) out.push(`- **How the design handles it.** ${breaksHandled(n.detail.breaks)}`);
+    }
     const c = n.detail.choice;
     if (c) {
       out.push(`- **Why this technology.**`);
@@ -199,12 +209,15 @@ export function diagramToMarkdown(d: Diagram): string {
     if (!e.detail) continue;
     const hop = `${byId(e.from)} -> ${byId(e.to)}`;
     const tier = tierOf(e);
-    out.push(`#### ${hop}${e.label ? ` (${e.label})` : ""}${tier === "hot" ? " — hot path" : tier === "control" ? " — control" : ""}`, "");
+    const step = e.step != null ? `${e.step}. ` : "";
+    out.push(`#### ${step}${hop}${e.label ? ` (${e.label})` : ""}${tier === "hot" ? " — hot path" : tier === "control" ? " — control" : ""}`, "");
     out.push(`- **What it is.** ${e.detail.what}`);
     out.push(`- **Why it exists.** ${e.detail.why}`);
-    if (e.detail.numbers?.length)
-      out.push(`- **Numbers.** ${e.detail.numbers.join(" · ")}`);
-    if (e.detail.breaks) out.push(`- **What breaks.** ${e.detail.breaks}`);
+    if (e.detail.numbers?.length) out.push("- **Numbers.**", ...figures(e.detail.numbers).map((l) => `  ${l}`));
+    if (e.detail.breaks) {
+      out.push(`- **What breaks.** ${breaksText(e.detail.breaks)}`);
+      if (breaksHandled(e.detail.breaks)) out.push(`- **How the design handles it.** ${breaksHandled(e.detail.breaks)}`);
+    }
     const c = e.detail.choice;
     if (c) {
       out.push(`- **Why this way.**`);

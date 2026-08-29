@@ -64,15 +64,45 @@ export interface TechChoice {
   flips: string;
 }
 
+/**
+ * A figure with its explanation: the derivation where there is one and what
+ * the number means for the design. The panel shows the value as a pill and
+ * opens the explanation on tap. A bare string is a pill with nothing to tap.
+ */
+export type Figure = string | { value: string; explain: string };
+
+export function figureValue(f: Figure): string {
+  return typeof f === "string" ? f : f.value;
+}
+
+export function figureExplain(f: Figure): string | undefined {
+  return typeof f === "string" ? undefined : f.explain;
+}
+
+/**
+ * A failure and what the design does about it. `handled` names the mechanism
+ * that contains the failure, or, when the design accepts it, what would have
+ * to change to fix it and what that would cost. A bare string is unanswered.
+ */
+export type Breaks = string | { failure: string; handled: string };
+
+export function breaksText(b: Breaks): string {
+  return typeof b === "string" ? b : b.failure;
+}
+
+export function breaksHandled(b: Breaks): string | undefined {
+  return typeof b === "string" ? undefined : b.handled;
+}
+
 export interface DiagramNodeDetail {
-  /** One line: what this component is. */
+  /** One plain sentence: what this component is. */
   what: string;
-  /** Why it exists at all; the design pressure it answers. */
+  /** Why it exists at all; the design pressure it answers, then the mechanism. */
   why: string;
-  /** Concrete figures worth quoting in an interview. */
-  numbers?: string[];
-  /** The failure this component owns. */
-  breaks?: string;
+  /** Concrete figures, each with its derivation and meaning. */
+  numbers?: Figure[];
+  /** The failure this component owns, and how the design handles it. */
+  breaks?: Breaks;
   /** Why this technology rather than the obvious alternative. */
   choice?: TechChoice;
 }
@@ -143,6 +173,11 @@ export interface DiagramEdge {
   /** Anchor overrides when the default top/bottom routing reads badly. */
   fromSide?: "top" | "right" | "bottom" | "left";
   toSide?: "top" | "right" | "bottom" | "left";
+  /**
+   * Request-order ordinal, drawn as a badge on the label so the hot path reads
+   * on the canvas before any tap. Only on `tier: "hot"` edges; 1..n contiguous.
+   */
+  step?: number;
 }
 
 /**
@@ -160,14 +195,42 @@ export function beatLights(b: Beat): string[] {
   return typeof b === "string" ? [] : b.lights;
 }
 
+/** One constraint of the problem and the decision it forced; lights the box it produced. */
+export interface Force {
+  constraint: string;
+  decision: string;
+  lights: string[];
+}
+
+/** The design a reader arrives with, and the number at which it breaks. */
+export interface Naive {
+  text: string;
+  lights: string[];
+}
+
+/** The hardest thing, and what the design does about it (or what would have to change). */
+export type Crux = string | { problem: string; handled: string };
+
+export function cruxText(c: Crux): string {
+  return typeof c === "string" ? c : c.problem;
+}
+
+export function cruxHandled(c: Crux): string | undefined {
+  return typeof c === "string" ? undefined : c.handled;
+}
+
 export interface DiagramOverview {
-  /** The one-sentence shape of the system. */
+  /** The one-sentence shape of the system: the design's one idea. */
   shape: string;
+  /** What forces what: 3-5 constraints and the decision each forced. */
+  forces?: Force[];
+  /** The obvious design and where it breaks. */
+  naive?: Naive;
   /** Ordered walk through the design, one beat per paragraph. */
   beats: Beat[];
-  /** The single hardest thing, stated plainly. */
-  crux: string;
-  numbers?: string[];
+  /** The single hardest thing, and how the design handles it. */
+  crux: Crux;
+  numbers?: Figure[];
 }
 
 export interface Diagram {

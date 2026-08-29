@@ -9,7 +9,7 @@ declare const process: { argv: string[]; exit(code: number): never };
 import { mkdirSync, writeFileSync } from "node:fs";
 import { DIAGRAMS } from "../mobile/lib/diagrams";
 import { isFrame } from "../mobile/lib/diagrams/types";
-import { labelWidth, layoutDiagram, routePath, tierOf } from "../mobile/lib/diagrams/layout";
+import { displayLabel, labelWidth, layoutDiagram, routePath, tierOf } from "../mobile/lib/diagrams/layout";
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 const [outDir, ...ids] = process.argv.slice(2);
@@ -46,8 +46,12 @@ for (const id of ids) {
     s += `<path d="${routePath(r.points)}" fill="none" stroke="${hot ? "#3253c7" : "#667"}" stroke-width="${hot ? 2.4 : 1.2}" ${tier === "control" ? 'stroke-dasharray="5 4"' : ""} marker-end="url(#a)"/>`;
     const lp = L.labels[e.id];
     if (lp && e.label) {
-      const w = labelWidth(e.label);
-      s += `<rect x="${lp[0] - w / 2}" y="${lp[1] - 9}" width="${w}" height="18" rx="4" fill="#fff" stroke="#3253c7"/><text x="${lp[0]}" y="${lp[1] + 4}" font-size="11" text-anchor="middle" fill="#3253c7">${esc(e.label)}</text>`;
+      const w = labelWidth(displayLabel(e));
+      s += `<rect x="${lp[0] - w / 2}" y="${lp[1] - 9}" width="${w}" height="18" rx="4" fill="#fff" stroke="#3253c7"/>`;
+      if (e.step != null) {
+        s += `<circle cx="${lp[0] - w / 2 + 11}" cy="${lp[1]}" r="7" fill="#3253c7"/><text x="${lp[0] - w / 2 + 11}" y="${lp[1] + 3}" font-size="9" font-weight="700" text-anchor="middle" fill="#fff">${e.step}</text>`;
+      }
+      s += `<text x="${lp[0] + (e.step != null ? 9 : 0)}" y="${lp[1] + 4}" font-size="11" text-anchor="middle" fill="#3253c7">${esc(e.label)}</text>`;
     }
     const mid = r.points[Math.floor(r.points.length / 2)];
     s += `<text x="${mid[0] + 3}" y="${mid[1] - 3}" font-size="9" fill="#c33">${e.id}</text>`;

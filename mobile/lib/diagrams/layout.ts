@@ -1096,6 +1096,14 @@ export function labelWidth(text: string): number {
   return text.length * LABEL_CHAR_W + LABEL_PAD;
 }
 
+/** Height of the title strip along the top of an expanded frame, in layout units. */
+const FRAME_TITLE_H = 22;
+
+/** The label as drawn: a stepped hot edge carries a round badge before the text. */
+export function displayLabel(e: DiagramEdge): string {
+  return e.step != null ? `00 ${e.label ?? ""}` : (e.label ?? "");
+}
+
 export function placeLabels(
   d: Diagram,
   rects: Record<string, Rect>,
@@ -1104,6 +1112,12 @@ export function placeLabels(
   collapsed: Set<string> = new Set(),
 ): Record<string, Point> {
   const boxes = d.nodes.filter((n) => !isFrame(n.kind) || collapsed.has(n.id)).map((n) => rects[n.id]).filter(Boolean);
+  // An expanded frame's title strip is text too; a label on it is unreadable.
+  for (const n of d.nodes) {
+    if (!isFrame(n.kind) || collapsed.has(n.id) || !rects[n.id]) continue;
+    const r = rects[n.id];
+    boxes.push({ x: r.x, y: r.y, w: Math.min(r.w, labelWidth(n.label) + 8), h: FRAME_TITLE_H });
+  }
   const placed: Rect[] = [];
   const out: Record<string, Point> = {};
   const allSegs = Object.values(routes).map((r) => ({ id: r.id, segs: segments(r.points) }));
@@ -1113,7 +1127,7 @@ export function placeLabels(
   const edges = d.edges.filter((e) => e.label && want(e) && routes[e.id]);
   edges.sort((a, b) => (a.label as string).length - (b.label as string).length);
   for (const e of edges) {
-    const w = labelWidth(e.label as string);
+    const w = labelWidth(displayLabel(e));
     const pts = routes[e.id].points;
     const segs = segments(pts);
     const total = segs.reduce((s, [p, q]) => s + Math.abs(q[0] - p[0]) + Math.abs(q[1] - p[1]), 0);
@@ -1193,7 +1207,8 @@ export function layoutDiagram(authored: Diagram): Layout {
   }
   for (const rt of Object.values(routes)) for (const p of rt.points) grow(p[0], p[1]);
   for (const [id, p] of Object.entries(labels)) {
-    const w = labelWidth(diagram.edges.find((e) => e.id === id)?.label ?? "");
+    const edge = diagram.edges.find((e) => e.id === id);
+    const w = labelWidth(edge ? displayLabel(edge) : "");
     grow(p[0] - w / 2, p[1] - LABEL_H / 2);
     grow(p[0] + w / 2, p[1] + LABEL_H / 2);
   }
@@ -1246,7 +1261,7 @@ export function routePath(points: Point[], radius = 9): string {
 export function specHash(d: Diagram): string {
   const geom = JSON.stringify({
     n: d.nodes.map((n) => [n.id, n.kind, n.col, n.row, n.parent, n.expanded, n.label, n.sub, n.x, n.y, n.w, n.h]),
-    e: d.edges.map((e) => [e.id, e.from, e.to, e.label, tierOf(e), e.fromSide, e.toSide]),
+    e: d.edges.map((e) => [e.id, e.from, e.to, e.label, tierOf(e), e.fromSide, e.toSide, e.step]),
   });
   let h = 2166136261;
   for (let i = 0; i < geom.length; i++) {

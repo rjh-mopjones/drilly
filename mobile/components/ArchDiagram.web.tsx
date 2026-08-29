@@ -24,7 +24,19 @@ import type {
   NodeKind,
   TechChoice,
 } from "../lib/diagrams";
-import { beatLights, beatText, isFrame } from "../lib/diagrams";
+import {
+  beatLights,
+  beatText,
+  breaksHandled,
+  breaksText,
+  cruxHandled,
+  cruxText,
+  figureExplain,
+  figureValue,
+  isFrame,
+  type DiagramOverview,
+  type Figure,
+} from "../lib/diagrams";
 import { GLOSSARY } from "../lib/diagrams/glossary";
 import LAYOUTS from "../lib/diagrams/layouts.json";
 import {
@@ -337,6 +349,8 @@ type EdgeData = {
   points: Point[];
   label?: string;
   showLabel: boolean;
+  /** Request-order badge on a hot edge. */
+  step?: number;
   lx?: number;
   ly?: number;
   fg: string;
@@ -388,6 +402,27 @@ function RoutedEdge({ id, style, markerEnd, data }: EdgeProps) {
               pointerEvents: "none",
             }}
           >
+            {d.step != null ? (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 14,
+                  height: 14,
+                  marginRight: 5,
+                  marginLeft: -2,
+                  borderRadius: 999,
+                  background: d.fg,
+                  color: d.bg,
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  verticalAlign: -2,
+                }}
+              >
+                {d.step}
+              </span>
+            ) : null}
             {d.label}
           </div>
         </EdgeLabelRenderer>
@@ -478,8 +513,8 @@ export default function ArchDiagram({
   const diagram = layout.diagram;
   const [sel, setSel] = useState<Selection | null>(null);
   const [hover, setHover] = useState<string | null>(null);
-  /** Which overview beat is being walked; lights what that beat is about. */
-  const [walk, setWalk] = useState<number | null>(null);
+  /** Which overview step is being walked ("beat:2", "force:0", "naive"); lights what it is about. */
+  const [walk, setWalk] = useState<string | null>(null);
   useEffect(() => {
     if (sel?.kind !== "overview") setWalk(null);
   }, [sel]);
@@ -503,7 +538,7 @@ export default function ArchDiagram({
   /** Edges a walked beat names outright (as opposed to lit through both endpoints). */
   const litEdges = useMemo(() => {
     if (sel?.kind !== "overview" || walk == null) return null;
-    const ids = beatLights(diagram.overview.beats[walk] ?? "");
+    const ids = walkLights(diagram.overview, walk);
     return new Set(ids.filter((id) => diagram.edges.some((e) => e.id === id)));
   }, [diagram, sel, walk]);
 
@@ -512,7 +547,7 @@ export default function ArchDiagram({
     if (sel?.kind === "overview") {
       if (walk == null) return null;
       const s = new Set<string>();
-      for (const id of beatLights(diagram.overview.beats[walk] ?? "")) {
+      for (const id of walkLights(diagram.overview, walk)) {
         const e = diagram.edges.find((x) => x.id === id);
         if (e) {
           s.add(groupOf.get(e.from) ?? e.from);
@@ -603,6 +638,7 @@ export default function ArchDiagram({
             data: {
               points: route.points,
               label: e.label,
+              step: e.step,
               showLabel: hot || isSel || isHover || !!touchesSel,
               lx: label?.[0],
               ly: label?.[1],
@@ -720,7 +756,7 @@ export default function ArchDiagram({
         style={{
           position: "absolute",
           top: 12,
-          right: 12,
+          left: 12,
           padding: "8px 14px",
           borderRadius: 999,
           border: `1px solid ${sel?.kind === "overview" ? palette.accent : palette.border}`,
@@ -741,7 +777,7 @@ export default function ArchDiagram({
           palette={palette}
           narrow={narrow}
           walk={walk}
-          onWalk={(i) => setWalk((cur) => (cur === i ? null : i))}
+          onWalk={(k) => setWalk((cur) => (cur === k ? null : k))}
           onClose={() => setSel(null)}
         />
       ) : selNode?.detail ? (
@@ -912,10 +948,22 @@ function DetailPanel({
       <Section p={p} title="What it is" body={detail.what} />
       <Section p={p} title="Why it exists" body={detail.why} />
       {detail.numbers?.length ? <Pills p={p} items={detail.numbers} /> : null}
-      {detail.breaks ? <Section p={p} title="What breaks" body={detail.breaks} accent /> : null}
+      {detail.breaks ? (
+        <Section p={p} title="What breaks" body={breaksText(detail.breaks)} handled={breaksHandled(detail.breaks)} accent />
+      ) : null}
       {detail.choice ? <ChoiceBlock p={p} c={detail.choice} /> : null}
     </div>
   );
+}
+
+/** The ids a walked Overview step is about: a beat, a force row, or the naive design. */
+function walkLights(o: DiagramOverview, walk: string | null): string[] {
+  if (!walk) return [];
+  const [kind, i] = walk.split(":");
+  if (kind === "beat") return beatLights(o.beats[Number(i)] ?? "");
+  if (kind === "force") return o.forces?.[Number(i)]?.lights ?? [];
+  if (kind === "naive") return o.naive?.lights ?? [];
+  return [];
 }
 
 /** Overview panel geometry; fit() keeps the picture out from under it. */
@@ -933,11 +981,31 @@ function OverviewPanel({
   diagram: Diagram;
   palette: Palette;
   narrow: boolean;
-  walk: number | null;
-  onWalk: (i: number) => void;
+  walk: string | null;
+  onWalk: (key: string) => void;
   onClose: () => void;
 }) {
   const o = diagram.overview;
+  /** Labels of the boxes a step lights, so the text can name them in bold. */
+  const labelsOf = (ids: string[]) =>
+    ids
+      .map((id) => diagram.nodes.find((n) => n.id === id)?.label)
+      .filter((l): l is string => !!l)
+      // "Sketch workers (x64)" is named "Sketch workers" in prose.
+      .flatMap((l) => [l, l.replace(/\s*\(.*\)$/, "")]);
+  const rowStyle = (active: boolean, walkable: boolean): React.CSSProperties => ({
+    display: "flex",
+    gap: 10,
+    marginTop: 8,
+    padding: "6px 8px",
+    marginLeft: -8,
+    marginRight: -8,
+    borderRadius: 8,
+    cursor: walkable ? "pointer" : "default",
+    background: active ? `${p.accent}18` : "transparent",
+    border: `1px solid ${active ? `${p.accent}66` : "transparent"}`,
+    transition: "background 120ms ease",
+  });
   return (
     <div
       style={{
@@ -954,31 +1022,52 @@ function OverviewPanel({
     >
       <PanelHeader p={p} title={diagram.title} sub={diagram.question} onClose={onClose} />
       <Section p={p} title="The shape of it" body={o.shape} />
+      {o.forces?.length ? (
+        <>
+          <Label p={p}>What forces what</Label>
+          <div style={{ color: p.textMuted, fontSize: 11.5, marginTop: 4 }}>
+            The numbers that shaped this design and the decision each one forced. Tap a row to see where.
+          </div>
+          {o.forces.map((f, i) => {
+            const key = `force:${i}`;
+            return (
+              <div key={key} role="button" onClick={() => onWalk(key)} style={rowStyle(walk === key, true)}>
+                <div style={{ flex: "0 0 42%", color: p.textStrong, fontSize: 13, lineHeight: 1.45, fontWeight: 600 }}>
+                  <Glossed p={p} text={f.constraint} />
+                </div>
+                <div style={{ flex: "0 0 auto", color: p.accent, fontSize: 13, lineHeight: 1.45 }}>→</div>
+                <div style={{ color: p.text, fontSize: 13, lineHeight: 1.45 }}>
+                  <Glossed p={p} text={f.decision} bold={labelsOf(f.lights)} />
+                </div>
+              </div>
+            );
+          })}
+        </>
+      ) : null}
+      {o.naive ? (
+        <>
+          <Label p={p}>The obvious design, and where it breaks</Label>
+          <div role="button" onClick={() => onWalk("naive")} style={rowStyle(walk === "naive", true)}>
+            <div style={{ color: p.text, fontSize: 13.5, lineHeight: 1.55 }}>
+              <Glossed p={p} text={o.naive.text} bold={labelsOf(o.naive.lights)} />
+            </div>
+          </div>
+        </>
+      ) : null}
       <Label p={p}>How it works</Label>
       <div style={{ color: p.textMuted, fontSize: 11.5, marginTop: 4 }}>
         Tap a step to light the parts of the picture it is about.
       </div>
       {o.beats.map((b, i) => {
-        const active = walk === i;
+        const key = `beat:${i}`;
+        const active = walk === key;
         const walkable = beatLights(b).length > 0;
         return (
           <div
-            key={i}
+            key={key}
             role={walkable ? "button" : undefined}
-            onClick={walkable ? () => onWalk(i) : undefined}
-            style={{
-              display: "flex",
-              gap: 10,
-              marginTop: 8,
-              padding: "6px 8px",
-              marginLeft: -8,
-              marginRight: -8,
-              borderRadius: 8,
-              cursor: walkable ? "pointer" : "default",
-              background: active ? `${p.accent}18` : "transparent",
-              border: `1px solid ${active ? `${p.accent}66` : "transparent"}`,
-              transition: "background 120ms ease",
-            }}
+            onClick={walkable ? () => onWalk(key) : undefined}
+            style={rowStyle(active, walkable)}
           >
             <div
               style={{
@@ -999,13 +1088,13 @@ function OverviewPanel({
               {i + 1}
             </div>
             <div style={{ color: p.text, fontSize: 13.5, lineHeight: 1.55 }}>
-              <Glossed p={p} text={beatText(b)} />
+              <Glossed p={p} text={beatText(b)} bold={labelsOf(beatLights(b))} />
             </div>
           </div>
         );
       })}
       {o.numbers?.length ? <Pills p={p} items={o.numbers} /> : null}
-      <Section p={p} title="The hard part" body={o.crux} accent />
+      <Section p={p} title="The hard part" body={cruxText(o.crux)} handled={cruxHandled(o.crux)} accent />
     </div>
   );
 }
@@ -1032,27 +1121,46 @@ function ChoiceBlock({ p, c }: { p: Palette; c: TechChoice }) {
   );
 }
 
-function Pills({ p, items }: { p: Palette; items: string[] }) {
+/** Figures as pills; a pill with an explanation opens it inline on tap. */
+function Pills({ p, items }: { p: Palette; items: Figure[] }) {
+  const [open, setOpen] = useState<number | null>(null);
+  const explain = open != null ? figureExplain(items[open]) : undefined;
   return (
     <>
       <Label p={p}>Numbers</Label>
+      <div style={{ color: p.textMuted, fontSize: 11.5, marginTop: 4 }}>Tap a number for where it comes from.</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-        {items.map((n) => (
-          <span
-            key={n}
-            style={{
-              fontSize: 12,
-              color: p.text,
-              background: p.codeBg,
-              border: `1px solid ${p.border}`,
-              borderRadius: 999,
-              padding: "3px 9px",
-            }}
-          >
-            {n}
-          </span>
-        ))}
+        {items.map((n, i) => {
+          const tappable = !!figureExplain(n);
+          const active = open === i;
+          return (
+            <span
+              key={`${figureValue(n)}-${i}`}
+              onClick={tappable ? () => setOpen(active ? null : i) : undefined}
+              style={{
+                fontSize: 12,
+                color: active ? p.accent : p.text,
+                background: p.codeBg,
+                border: `1px solid ${active ? p.accent : p.border}`,
+                borderRadius: 999,
+                padding: "3px 9px",
+                cursor: tappable ? "help" : "default",
+                textDecoration: tappable ? "underline dotted" : "none",
+                textDecorationColor: p.accent,
+                textUnderlineOffset: 3,
+              }}
+            >
+              {figureValue(n)}
+            </span>
+          );
+        })}
       </div>
+      {explain ? (
+        <div style={{ marginTop: 8, color: p.text, fontSize: 13, lineHeight: 1.5 }}>
+          <span style={{ color: p.accent, fontWeight: 600 }}>{figureValue(items[open as number])} </span>
+          <Glossed p={p} text={explain} />
+        </div>
+      ) : null}
     </>
   );
 }
@@ -1065,13 +1173,36 @@ function Label({ p, children }: { p: Palette; children: React.ReactNode }) {
   );
 }
 
-function Section({ p, title, body, accent }: { p: Palette; title: string; body: string; accent?: boolean }) {
+function Section({
+  p,
+  title,
+  body,
+  handled,
+  accent,
+}: {
+  p: Palette;
+  title: string;
+  body: string;
+  /** What the design does about it; drawn under the body with its own heading. */
+  handled?: string;
+  accent?: boolean;
+}) {
   return (
     <>
       <Label p={p}>{title}</Label>
       <div style={{ color: accent ? p.errorFg : p.text, fontSize: 13.5, lineHeight: 1.55, marginTop: 5 }}>
         <Glossed p={p} text={body} />
       </div>
+      {handled ? (
+        <div style={{ marginTop: 8, paddingLeft: 10, borderLeft: `2px solid ${p.accent}66` }}>
+          <div style={{ color: p.accent, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700 }}>
+            How the design handles it
+          </div>
+          <div style={{ color: p.text, fontSize: 13.5, lineHeight: 1.55, marginTop: 3 }}>
+            <Glossed p={p} text={handled} />
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }
@@ -1095,25 +1226,45 @@ function lookup(raw: string): string | undefined {
   return key ? GLOSSARY[key] : undefined;
 }
 
-function Glossed({ p, text }: { p: Palette; text: string }) {
+function Glossed({ p, text, bold }: { p: Palette; text: string; bold?: string[] }) {
   const [open, setOpen] = useState<Set<number>>(() => new Set());
+  const boldKey = (bold ?? []).join("\u0000");
   const parts = useMemo(() => {
-    const out: { text: string; def?: string }[] = [];
+    const out: { text: string; def?: string; bold?: boolean }[] = [];
+    const glossed = (s: string) => {
+      let last = 0;
+      for (const m of s.matchAll(GLOSS_RE)) {
+        const def = lookup(m[0]);
+        if (!def) continue;
+        if (m.index! > last) out.push({ text: s.slice(last, m.index) });
+        out.push({ text: m[0], def });
+        last = m.index! + m[0].length;
+      }
+      if (last < s.length) out.push({ text: s.slice(last) });
+    };
+    // Box labels the step lights are set in bold, so the eye finds the box the sentence is about.
+    const labels = boldKey ? boldKey.split("\u0000").sort((a, b) => b.length - a.length) : [];
+    const boldRe = labels.length
+      ? new RegExp(labels.map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g")
+      : null;
     let last = 0;
-    for (const m of text.matchAll(GLOSS_RE)) {
-      const def = lookup(m[0]);
-      if (!def) continue;
-      if (m.index! > last) out.push({ text: text.slice(last, m.index) });
-      out.push({ text: m[0], def });
-      last = m.index! + m[0].length;
-    }
-    if (last < text.length) out.push({ text: text.slice(last) });
+    if (boldRe)
+      for (const m of text.matchAll(boldRe)) {
+        glossed(text.slice(last, m.index));
+        out.push({ text: m[0], bold: true });
+        last = m.index! + m[0].length;
+      }
+    glossed(text.slice(last));
     return out;
-  }, [text]);
+  }, [text, boldKey]);
   return (
     <>
       {parts.map((part, i) =>
-        part.def ? (
+        part.bold ? (
+          <span key={i} style={{ fontWeight: 600, color: p.textStrong }}>
+            {part.text}
+          </span>
+        ) : part.def ? (
           <span key={i}>
             <span
               onClick={(ev) => {

@@ -25,7 +25,19 @@ declare const process: { argv: string[]; exit(code: number): never };
 
 import { readFileSync } from "node:fs";
 import { DIAGRAMS } from "../mobile/lib/diagrams";
-import { beatLights, beatText, isFrame, type Diagram } from "../mobile/lib/diagrams/types";
+import {
+  beatLights,
+  beatText,
+  breaksHandled,
+  breaksText,
+  cruxHandled,
+  cruxText,
+  figureExplain,
+  figureValue,
+  isFrame,
+  type Diagram,
+  type Figure,
+} from "../mobile/lib/diagrams/types";
 import { GLOSSARY } from "../mobile/lib/diagrams/glossary";
 import {
   layoutDiagram,
@@ -66,6 +78,32 @@ const KNOWN = new Set(["HTTP", "HTTPS", "URL", "URLS", "API", "APIS", "SQL", "JS
 const UNIT = /^(\d|[KMGTPE]?B|MS|US|NS|GB|TB|PB|KB|MB|GBPS|MBPS|KBPS|GHZ|MHZ|X\d*|\d+[KMGT]?B?)$/;
 const GLOSS_UPPER = new Set(Object.keys(GLOSSARY).map((k) => k.toUpperCase()));
 
+/** Every glossary term, longest first, for counting how much jargon one paragraph leans on. */
+const GLOSS_RE = new RegExp(
+  `(?<![\\w-])(${Object.keys(GLOSSARY)
+    .sort((a, b) => b.length - a.length)
+    .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})(?![\\w-])`,
+  "gi",
+);
+/** Same rule as the renderer's lookup: words match case-insensitively, acronyms only as written. */
+function glossaryHas(raw: string): boolean {
+  if (GLOSSARY[raw] !== undefined) return true;
+  const lower = raw.toLowerCase();
+  return raw !== lower ? false : GLOSSARY[lower] !== undefined;
+}
+const MAX_SENTENCE = 30;
+const HARD_SENTENCE = 45;
+const MAX_BEAT_TERMS = 3;
+const MIN_HANDLED_WORDS = 12;
+
+function sentences(s: string): string[] {
+  return s.split(/(?<=[.!?])\s+(?=[A-Z0-9"'~(])/).filter((x) => x.trim().length);
+}
+function wordCount(s: string): number {
+  return s.trim().split(/\s+/).filter(Boolean).length;
+}
+
 /** A figure: a digit, or a number word standing where a digit would ("one fetch per host"). */
 function hasDigit(s: string): boolean {
   return /\d/.test(s) || /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|dozen|half|single|once|twice|hundreds?|thousands?|millions?|billions?)\b/i.test(s);
@@ -78,9 +116,36 @@ function textLint(d: Diagram): { errors: string[]; warnings: string[] } {
   const edgeIds = new Set(d.edges.map((e) => e.id));
   const texts: [string, string][] = [];
   const o = d.overview;
-  texts.push(["overview.shape", o.shape], ["overview.crux", o.crux]);
+  texts.push(["overview.shape", o.shape], ["overview.crux", cruxText(o.crux)]);
+  if (cruxHandled(o.crux)) texts.push(["overview.crux.handled", cruxHandled(o.crux) as string]);
+  else warnings.push("overview.crux does not say how the design handles it (a bare string)");
   o.beats.forEach((b, i) => texts.push([`beat ${i + 1}`, beatText(b)]));
-  (o.numbers ?? []).forEach((n, i) => texts.push([`overview.numbers[${i}]`, n]));
+  const figures = (where: string, xs: Figure[] | undefined, fail: (m: string) => void) =>
+    (xs ?? []).forEach((f, i) => {
+      texts.push([`${where}[${i}]`, figureValue(f)]);
+      if (!hasDigit(figureValue(f))) fail(`${where}[${i}] is not a number: "${figureValue(f)}"`);
+      const ex = figureExplain(f);
+      if (ex) texts.push([`${where}[${i}].explain`, ex]);
+      else warnings.push(`${where}[${i}] has no explanation to tap: "${figureValue(f)}"`);
+    });
+  figures("overview.numbers", o.numbers, (m) => errors.push(m));
+  const lightsOk = (where: string, lights: string[]) => {
+    if (!lights.length) errors.push(`${where} lights nothing`);
+    for (const id of lights) if (!nodeIds.has(id) && !edgeIds.has(id)) errors.push(`${where} lights unknown id "${id}"`);
+  };
+  if (!o.forces || o.forces.length < 3) errors.push(`overview.forces: ${o.forces?.length ?? 0} rows; a design has 3-5 constraints that forced it`);
+  else if (o.forces.length > 5) warnings.push(`overview.forces has ${o.forces.length} rows; keep the 3-5 that matter`);
+  (o.forces ?? []).forEach((f, i) => {
+    texts.push([`force ${i + 1} constraint`, f.constraint], [`force ${i + 1} decision`, f.decision]);
+    if (!hasDigit(f.constraint)) errors.push(`force ${i + 1} constraint carries no figure: "${f.constraint}"`);
+    lightsOk(`force ${i + 1}`, f.lights);
+  });
+  if (!o.naive) errors.push("overview.naive missing: the obvious design and the number at which it breaks");
+  else {
+    texts.push(["overview.naive", o.naive.text]);
+    if (!hasDigit(o.naive.text)) errors.push("overview.naive has no figure: say the number at which it breaks");
+    lightsOk("overview.naive", o.naive.lights);
+  }
   for (const n of d.nodes) {
     texts.push([`node "${n.label}" label`, n.label]);
     if (n.sub) texts.push([`node "${n.label}" sub`, n.sub]);
@@ -90,11 +155,17 @@ function textLint(d: Diagram): { errors: string[]; warnings: string[] } {
       continue;
     }
     texts.push([`node "${n.label}" what`, det.what], [`node "${n.label}" why`, det.why]);
-    if (det.breaks) texts.push([`node "${n.label}" breaks`, det.breaks]);
-    (det.numbers ?? []).forEach((x, i) => {
-      texts.push([`node "${n.label}" numbers[${i}]`, x]);
-      if (!hasDigit(x)) errors.push(`node "${n.label}" numbers[${i}] is not a number: "${x}"`);
-    });
+    if (sentences(det.what).length > 2) warnings.push(`node "${n.label}" what is ${sentences(det.what).length} sentences; one plain sentence says what it is`);
+    if (det.breaks) {
+      texts.push([`node "${n.label}" breaks`, breaksText(det.breaks)]);
+      const h = breaksHandled(det.breaks);
+      if (h == null) warnings.push(`node "${n.label}" breaks does not say how the design handles it`);
+      else {
+        texts.push([`node "${n.label}" breaks.handled`, h]);
+        if (wordCount(h) < MIN_HANDLED_WORDS) warnings.push(`node "${n.label}" breaks.handled is too thin: "${h}"`);
+      }
+    }
+    figures(`node "${n.label}" numbers`, det.numbers, (m) => errors.push(m));
     if (det.choice) {
       for (const k of ["pick", "instead", "decider", "flips"] as const) texts.push([`node "${n.label}" choice.${k}`, det.choice[k]]);
       if (!hasDigit(det.choice.decider)) warnings.push(`node "${n.label}" choice.decider has no number or measurable property: "${det.choice.decider.slice(0, 60)}"`);
@@ -108,18 +179,42 @@ function textLint(d: Diagram): { errors: string[]; warnings: string[] } {
     const det = e.detail;
     if (!det) continue;
     texts.push([`edge ${e.id} what`, det.what], [`edge ${e.id} why`, det.why]);
-    if (det.breaks) texts.push([`edge ${e.id} breaks`, det.breaks]);
-    (det.numbers ?? []).forEach((x, i) => {
-      texts.push([`edge ${e.id} numbers[${i}]`, x]);
-      if (!hasDigit(x)) errors.push(`edge ${e.id} numbers[${i}] is not a number: "${x}"`);
-    });
+    if (det.breaks) {
+      texts.push([`edge ${e.id} breaks`, breaksText(det.breaks)]);
+      const h = breaksHandled(det.breaks);
+      if (h == null) warnings.push(`edge ${e.id} breaks does not say how the design handles it`);
+      else {
+        texts.push([`edge ${e.id} breaks.handled`, h]);
+        if (wordCount(h) < MIN_HANDLED_WORDS) warnings.push(`edge ${e.id} breaks.handled is too thin: "${h}"`);
+      }
+    }
+    figures(`edge ${e.id} numbers`, det.numbers, (m) => errors.push(m));
     if (det.choice) for (const k of ["pick", "instead", "decider", "flips"] as const) texts.push([`edge ${e.id} choice.${k}`, det.choice[k]]);
   }
   o.beats.forEach((b, i) => {
     const lights = beatLights(b);
     if (!lights.length) warnings.push(`beat ${i + 1} lights nothing`);
     for (const id of lights) if (!nodeIds.has(id) && !edgeIds.has(id)) errors.push(`beat ${i + 1} lights unknown id "${id}"`);
+    const terms = new Set([...beatText(b).matchAll(GLOSS_RE)].filter((m) => glossaryHas(m[0])).map((m) => m[0].toLowerCase()));
+    if (terms.size > MAX_BEAT_TERMS) warnings.push(`beat ${i + 1} leans on ${terms.size} glossary terms (${[...terms].join(", ")}); define the core ones in the sentence`);
   });
+  // The hot path is numbered on the canvas: every hot edge has a step, steps are 1..n, nothing else has one.
+  const hotEdges = d.edges.filter((e) => e.tier === "hot" || (!e.tier && e.animated));
+  for (const e of d.edges) if (e.step != null && !hotEdges.includes(e)) errors.push(`edge ${e.id} has a step but is not hot`);
+  const missing = hotEdges.filter((e) => e.step == null);
+  if (missing.length) errors.push(`hot edges without a step: ${missing.map((e) => e.id).join(", ")}`);
+  else {
+    const steps = hotEdges.map((e) => e.step as number).sort((a, b) => a - b);
+    if (steps.some((s, i) => s !== i + 1)) errors.push(`hot-edge steps are ${steps.join(",")}; they must run 1..${steps.length}`);
+  }
+  for (const [where, text] of texts) {
+    if (/\b(label|sub)$/.test(where)) continue;
+    for (const s of sentences(text)) {
+      const w = wordCount(s);
+      if (w > HARD_SENTENCE) errors.push(`${where}: a ${w}-word sentence; split it: "${s.slice(0, 50)}…"`);
+      else if (w > MAX_SENTENCE) warnings.push(`${where}: a ${w}-word sentence: "${s.slice(0, 50)}…"`);
+    }
+  }
   const unknown = new Set<string>();
   for (const [where, text] of texts) {
     for (const re of CROSS_REF) if (re.test(text)) errors.push(`${where}: reference to something the reader cannot see: "${text.match(re)?.[0]?.trim()}"`);
