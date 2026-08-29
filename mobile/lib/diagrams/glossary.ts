@@ -193,6 +193,9 @@ export const GLOSSARY: Record<string, string> = {
   DNS: "the lookup from a host name to an IP address; cached with a TTL",
   // --- rate limiting, admission ---
   GCRA: "generic cell rate algorithm: a token bucket stored as a single timestamp, so the check is one compare and one write",
+  TAT: "theoretical arrival time: the single timestamp GCRA stores per key, the moment the next request would be allowed at the steady rate",
+  "X-RateLimit": "the response headers (limit, remaining, reset) that tell a well-behaved client how much budget it has left",
+  "shadow mode": "running a new rule and recording what it would have decided, without enforcing it",
   "token bucket": "a bucket refilled at a fixed rate; each request takes a token and is refused when the bucket is empty",
   "sliding window": "counting requests in the last N seconds precisely, or approximating it from two fixed windows",
   "circuit breaker": "after repeated failures stop calling the dependency for a while, then probe; turns a slow failure into a fast one",
