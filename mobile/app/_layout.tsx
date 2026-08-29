@@ -29,6 +29,27 @@ if (
   }
 }
 
+// Inside the Android app (a WebView; its UA carries "; wv)") the page is a
+// fixed-viewport app that scrolls internally, so browser pinch-zoom only
+// clips it. Lock the viewport and refuse pinch at the document level. This
+// does not reach the diagrams: React Flow's pane sets touch-action: none and
+// handles pinch itself, and the intersection with pan-x pan-y is still none.
+// Plain browsers keep their accessibility zoom.
+if (
+  Platform.OS === "web" &&
+  typeof navigator !== "undefined" &&
+  typeof document !== "undefined" &&
+  /\bwv\b/.test(navigator.userAgent)
+) {
+  document
+    .querySelector('meta[name="viewport"]')
+    ?.setAttribute(
+      "content",
+      "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, shrink-to-fit=no",
+    );
+  document.documentElement.style.touchAction = "pan-x pan-y";
+}
+
 export default function RootLayout() {
   // Native (Android / iOS) is a thin WebView wrapper around the production
   // site. The web build of this same codebase IS the site — keeping a
