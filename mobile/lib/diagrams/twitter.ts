@@ -249,7 +249,7 @@ export const TWITTER: Diagram = {
     {
       id: "hydrator",
       label: "Hydration + counters",
-      sub: "20 bodies, tombstones, sharded counts",
+      sub: "20 bodies, tombstones, counters",
       kind: "service",
       col: 1,
       row: 3,

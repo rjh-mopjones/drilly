@@ -41,7 +41,7 @@ export const TINDER: Diagram = {
     {
       id: "client",
       label: "Client",
-      sub: "20 cards per page, last known coords",
+      sub: "20 cards per page, last coords",
       kind: "external",
       col: 0,
       row: 0,
@@ -115,7 +115,7 @@ export const TINDER: Diagram = {
     },
     {
       id: "exposure",
-      label: "Exposure budget + diversify",
+      label: "Exposure + diversify",
       sub: "decaying multiplier, then top 20",
       kind: "service",
       col: 3,
@@ -309,7 +309,7 @@ export const TINDER: Diagram = {
       kind: "service",
       col: 0,
       row: 2,
-      sub: "idempotent (min, max); emits to chat",
+      sub: "idempotent (min, max), then chat",
       detail: {
         what: "On a reciprocal right-swipe, creates one match keyed on the canonical ordered pair (min(a, b), max(a, b)) and notifies both sides exactly once.",
         why: "Two people can right-swipe each other within milliseconds, and naive per-user writes produce two match rows and two divergent inboxes. Canonicalising the key makes both writers target the same row, so the database's own uniqueness constraint does the coordination instead of a lock on the hot path.",

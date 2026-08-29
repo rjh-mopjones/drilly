@@ -105,7 +105,7 @@ export const URL_SHORTENER: Diagram = {
     {
       id: "cache",
       label: "In-memory cache",
-      sub: "Redis, 75 GB LRU, ~99% of origin reads",
+      sub: "Redis, 75 GB LRU, ~99% of reads",
       kind: "cache",
       col: 1,
       row: 1,
@@ -159,7 +159,7 @@ export const URL_SHORTENER: Diagram = {
     {
       id: "cold-archive",
       label: "Cold archive",
-      sub: "columnar on object storage, ~8 GB/day",
+      sub: "columnar object storage, ~8 GB/day",
       kind: "blob",
       col: 0,
       row: 2,
@@ -383,7 +383,7 @@ export const URL_SHORTENER: Diagram = {
     {
       id: "cdn-logs",
       label: "CDN log stream",
-      sub: "vendor-delivered, the ~95% origin never saw",
+      sub: "vendor logs, ~95% of clicks",
       kind: "external",
       col: 3,
       row: 2,

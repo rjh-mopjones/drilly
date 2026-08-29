@@ -41,7 +41,7 @@ export const SPOTIFY: Diagram = {
     {
       id: "client",
       label: "Listener client",
-      sub: "whole-object fetch, ~830-track device cache",
+      sub: "whole-object fetch, device cache",
       kind: "external",
       col: 0,
       row: 0,
@@ -68,7 +68,7 @@ export const SPOTIFY: Diagram = {
     {
       id: "play-api",
       label: "Play API",
-      sub: "catalogue read + entitlement, per play",
+      sub: "catalogue + entitlement per play",
       kind: "service",
       col: 2,
       row: 0,
@@ -119,7 +119,7 @@ export const SPOTIFY: Diagram = {
     {
       id: "events",
       label: "Play-event log",
-      sub: "partitioned by user_id, ~500k/s peak",
+      sub: "by user_id, ~500k/s peak",
       kind: "queue",
       col: 0,
       row: 1,
@@ -200,7 +200,7 @@ export const SPOTIFY: Diagram = {
     {
       id: "queue",
       label: "Queue service",
-      sub: "ranks the listener's own <10k tracks",
+      sub: "ranks the listener's <10k tracks",
       kind: "service",
       col: 1,
       row: 0,
@@ -307,7 +307,7 @@ export const SPOTIFY: Diagram = {
     {
       id: "labels",
       label: "Label builder",
-      sub: "skip<30s negative, repeat-7d positive",
+      sub: "skip<30s negative, repeat-7d +",
       kind: "service",
       col: 2,
       row: 2,

@@ -207,7 +207,7 @@ function BoxNode({ data }: NodeProps) {
         <div
           style={{
             color: p.textStrong,
-            fontSize: 15,
+            fontSize: 14.5,
             fontWeight: 600,
             lineHeight: "18px",
             whiteSpace: "nowrap",
@@ -221,9 +221,9 @@ function BoxNode({ data }: NodeProps) {
           <div
             style={{
               color: p.textMuted,
-              fontSize: 12,
-              marginTop: 1,
-              lineHeight: "15px",
+              fontSize: 11,
+              marginTop: 2,
+              lineHeight: "14px",
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",

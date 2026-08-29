@@ -137,7 +137,7 @@ export const INSTAGRAM: Diagram = {
     {
       id: "variant-store",
       label: "Variant store",
-      sub: "deterministic keys, per-rung tiering",
+      sub: "deterministic keys, per-rung tiers",
       kind: "database",
       col: 3,
       row: 1,

@@ -63,7 +63,7 @@ export const PRICE_ALERTS: Diagram = {
     {
       id: "gateway",
       label: "Market data gateway",
-      sub: "dedupe on seq, binary encode, stamp ts",
+      sub: "dedupe on seq, binary, stamp ts",
       kind: "service",
       col: 1,
       row: 0,
@@ -109,7 +109,7 @@ export const PRICE_ALERTS: Diagram = {
     {
       id: "evaluator",
       label: "Rule evaluator",
-      sub: "Flink + RocksDB, last_price, gap guard",
+      sub: "Flink + RocksDB, gap guard",
       kind: "service",
       col: 1,
       row: 2,
@@ -133,7 +133,7 @@ export const PRICE_ALERTS: Diagram = {
     {
       id: "threshold-idx",
       label: "Threshold index",
-      sub: "skip list per instrument, sorted by price",
+      sub: "skip list per instrument, by price",
       kind: "database",
       col: 2,
       row: 2,
@@ -157,7 +157,7 @@ export const PRICE_ALERTS: Diagram = {
     {
       id: "windowed",
       label: "Windowed rule scan",
-      sub: "ring buffer of (ts, price), full scan",
+      sub: "ring buffer (ts, price), full scan",
       kind: "service",
       col: 0,
       row: 2,
@@ -203,7 +203,7 @@ export const PRICE_ALERTS: Diagram = {
     {
       id: "rule-cdc",
       label: "Rule change stream",
-      sub: "Debezium, co-partitioned by instrument",
+      sub: "Debezium CDC, by instrument",
       kind: "queue",
       col: 2,
       row: 1,

@@ -56,7 +56,7 @@ export const MATCHING_ENGINE: Diagram = {
     {
       id: "dispatch",
       label: "Event dispatch",
-      sub: "new / cancel / replace, price to tick",
+      sub: "new / cancel / replace, to tick",
       kind: "service",
       col: 1,
       row: 0,
@@ -122,7 +122,7 @@ export const MATCHING_ENGINE: Diagram = {
     {
       id: "remainder",
       label: "Remainder handling",
-      sub: "LIMIT rests, MARKET / IOC / FOK cancels",
+      sub: "LIMIT rests; MARKET/IOC/FOK cancel",
       kind: "service",
       col: 1,
       row: 2,
@@ -143,8 +143,8 @@ export const MATCHING_ENGINE: Diagram = {
     },
     {
       id: "outputs",
-      label: "Fills and book deltas out",
-      sub: "sequenced reports + latest-wins ticks",
+      label: "Fills + book deltas",
+      sub: "sequenced reports, latest-wins",
       kind: "queue",
       col: 3,
       row: 2,
@@ -211,7 +211,7 @@ export const MATCHING_ENGINE: Diagram = {
     },
     {
       id: "level-array",
-      label: "Price levels, indexed by tick",
+      label: "Price levels by tick",
       sub: "levels[(price - band_low) / tick]",
       kind: "database",
       col: 3,
@@ -258,7 +258,7 @@ export const MATCHING_ENGINE: Diagram = {
     {
       id: "tree-tail",
       label: "Tree levels for the tail",
-      sub: "TreeMap or skip list, per instrument",
+      sub: "TreeMap / skip list per instrument",
       kind: "database",
       col: 2,
       row: 3,
@@ -279,7 +279,7 @@ export const MATCHING_ENGINE: Diagram = {
     },
     {
       id: "invariants",
-      label: "Invariants and shadow model",
+      label: "Invariants + shadow model",
       sub: "asserted after every apply",
       kind: "service",
       col: 3,

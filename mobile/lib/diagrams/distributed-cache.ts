@@ -125,7 +125,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
     {
       id: "shard",
       label: "Cache shard",
-      sub: "Redis, 180GB maxmemory, persistence off",
+      sub: "Redis, 180GB max, no persistence",
       kind: "database",
       col: 3,
       row: 1,
@@ -212,7 +212,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
     {
       id: "loader",
       label: "Single-flight loader",
-      sub: "per-key lock, early refresh, TTL jitter",
+      sub: "per-key lock, early refresh",
       kind: "service",
       col: 2,
       row: 2,

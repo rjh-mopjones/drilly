@@ -68,7 +68,7 @@ export const NETFLIX: Diagram = {
     {
       id: "playback-api",
       label: "Playback API",
-      sub: "auth, entitlement, server-verified geo",
+      sub: "auth, entitlement, verified geo",
       kind: "service",
       col: 1,
       row: 0,
@@ -142,7 +142,7 @@ export const NETFLIX: Diagram = {
     {
       id: "telemetry",
       label: "Playback telemetry",
-      sub: "Kafka, 200 B every 30s, fire and forget",
+      sub: "Kafka, 200 B every 30s",
       kind: "queue",
       col: 0,
       row: 3,
@@ -165,7 +165,7 @@ export const NETFLIX: Diagram = {
     {
       id: "recs",
       label: "Personalised rows",
-      sub: "offline model, precomputed per profile",
+      sub: "offline model, per profile",
       kind: "service",
       col: 3,
       row: 0,
@@ -234,7 +234,7 @@ export const NETFLIX: Diagram = {
     {
       id: "placement",
       label: "Placement controller",
-      sub: "target set per appliance, nightly delta",
+      sub: "target set per appliance, nightly",
       kind: "service",
       col: 2,
       row: 3,

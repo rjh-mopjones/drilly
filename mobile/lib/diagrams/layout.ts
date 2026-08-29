@@ -43,9 +43,9 @@ export const MIN_ZOOM = 0.8;
 export const MAX_BOXES = 12;
 export const MAX_HOT = 8;
 export const MAX_LABEL = 28;
-/** Longest node label / sub that fits a 220px box without an ellipsis (measured: 15px/600 and 12px). */
-export const MAX_NODE_LABEL = 24;
-export const MAX_NODE_SUB = 32;
+/** Longest node label / sub that fits a 220px box without an ellipsis (measured: 14.5px/600 and 11px). */
+export const MAX_NODE_LABEL = 26;
+export const MAX_NODE_SUB = 35;
 
 // Legacy (pixel spec) constants, kept until every spec is on the grid.
 export const MIN_GUTTER = 190;
@@ -1130,7 +1130,7 @@ export function placeLabels(
         const y = p[1] + (q[1] - p[1]) * t;
         // On the line, or one label-height off it: a short run between two
         // boxes has no room on the line, but plenty just above or below.
-        for (const off of [0, -(LABEL_H + 3), LABEL_H + 3, -(BOX_H / 2 + LABEL_H / 2 + 6), BOX_H / 2 + LABEL_H / 2 + 6]) {
+        for (const off of [0, -(LABEL_H + 3), LABEL_H + 3, -(BOX_H / 2 + LABEL_H / 2 + 16), BOX_H / 2 + LABEL_H / 2 + 16]) {
           cands.push({ p: horiz ? [x, y + off] : [x + off * 1.2, y], along: acc + len * t, seg: si, off });
         }
       }
@@ -1141,7 +1141,8 @@ export function placeLabels(
       const [x, y] = cand.p;
       const r = { x: x - w / 2, y: y - LABEL_H / 2, w, h: LABEL_H };
       let c = 0;
-      for (const b of boxes) c += overlap(r, b, 6) * 4;
+      // A label touching a box reads as part of it: keep a real margin.
+      for (const b of boxes) c += overlap(r, b, 12) * 4;
       for (const q of placed) c += overlap(r, q, 4) * 3;
       // other lines under the label
       for (const o of allSegs) {

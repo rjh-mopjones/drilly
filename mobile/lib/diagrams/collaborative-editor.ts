@@ -48,7 +48,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
     {
       id: "socket-edge",
       label: "WebSocket edge",
-      sub: "session terminator, presence throttle",
+      sub: "session terminator, presence",
       kind: "service",
       col: 1,
       row: 0,
@@ -171,7 +171,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
     {
       id: "oplog",
       label: "Op log",
-      sub: "Cassandra, PK doc_id, clustered by rev",
+      sub: "Cassandra, PK doc_id, by rev",
       kind: "queue",
       col: 2,
       row: 2,
@@ -225,7 +225,7 @@ export const COLLABORATIVE_EDITOR: Diagram = {
     {
       id: "presence",
       label: "Presence channel",
-      sub: "cursors and selections, never logged",
+      sub: "cursors + selections, never logged",
       kind: "service",
       col: 2,
       row: 0,

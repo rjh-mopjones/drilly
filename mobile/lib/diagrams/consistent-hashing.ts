@@ -93,7 +93,7 @@ export const CONSISTENT_HASHING: Diagram = {
     {
       id: "ring-search",
       label: "Ring lookup",
-      sub: "bisect_left over 200k uint32, ~3.2MB",
+      sub: "bisect over 200k uint32, ~3.2MB",
       kind: "process",
       col: 1,
       row: 1,
@@ -242,7 +242,7 @@ export const CONSISTENT_HASHING: Diagram = {
     {
       id: "warming",
       label: "Warming state",
-      sub: "takes writes, reads stay on the donor",
+      sub: "takes writes; reads stay on donor",
       kind: "process",
       col: 1,
       row: 3,
@@ -270,7 +270,7 @@ export const CONSISTENT_HASHING: Diagram = {
     {
       id: "arc-handoff",
       label: "Arc handoff",
-      sub: "writes flip at epoch, donor deletes last",
+      sub: "writes flip at epoch, then delete",
       kind: "process",
       col: 1,
       row: 4,

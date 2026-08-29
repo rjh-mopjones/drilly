@@ -59,7 +59,7 @@ export const GITHUB: Diagram = {
       kind: "service",
       col: 1,
       row: 0,
-      sub: "stateless; etcd routing table, 30s cache",
+      sub: "stateless; etcd routes, 30s cache",
       detail: {
         what: "Stateless L7 servers that terminate TLS or SSH, authenticate the token, translate owner/name into (repo_id, primary, generation) and proxy the bidirectional git byte stream.",
         why: "It exists so that the only stateful thing in the read and write path is the file server itself. Any instance handles any repository, so a crashed proxy costs one retry and the fleet sits behind an ordinary L4 load balancer.",

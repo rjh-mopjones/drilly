@@ -268,7 +268,7 @@ export const DISTRIBUTED_KV_STORE: Diagram = {
     {
       id: "lsm",
       label: "LSM storage engine",
-      sub: "WAL + memtable + SSTables, Bloom per file",
+      sub: "WAL + memtable + SSTables + Bloom",
       kind: "database",
       col: 1,
       row: 3,
