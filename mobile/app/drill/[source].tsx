@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, ScrollView, StyleSheet, Platform } from "react-native";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import Markdown from "react-native-markdown-display";
+import * as Clipboard from "expo-clipboard";
 import { useSource } from "../../lib/manifest";
 import { useSourceItems } from "../../lib/useSourceItems";
 import { markdownRules } from "../../components/CodeBlock";
@@ -85,8 +86,25 @@ export default function DrillSession() {
     [queue, i, recs, hydrated, sourceId],
   );
 
+  // Copy the revealed card as Markdown — the same shape the reader's copy
+  // button produces, so it pastes into a notes app or a chat for follow-up.
+  const [copied, setCopied] = useState(false);
+  const copyCard = useCallback(async () => {
+    const card = queue[i];
+    if (!card) return;
+    const heading = card.number ? `${card.topic} · ${card.number}` : card.topic;
+    const text = `# ${heading}\n## ${card.question}\n\n${card.answer.trim()}\n`;
+    try {
+      await Clipboard.setStringAsync(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard write can fail on rare platforms; the missing tick says so.
+    }
+  }, [queue, i]);
+
   // Same keyboard contract the reader already uses: Space reveals, and here
-  // 1/2/3 grade. Guarded against text inputs exactly as ItemView does.
+  // 1/2/3 grade and C copies. Guarded against text inputs exactly as ItemView does.
   useEffect(() => {
     if (Platform.OS !== "web" || typeof document === "undefined") return;
     const onKey = (e: KeyboardEvent) => {
@@ -97,11 +115,14 @@ export default function DrillSession() {
       else if (flipped && ["Digit1", "Digit2", "Digit3"].includes(e.code)) {
         e.preventDefault();
         grade((["hard", "medium", "easy"] as Label[])[Number(e.code.slice(5)) - 1]);
+      } else if (flipped && e.code === "KeyC" && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        copyCard();
       } else if (e.code === "Escape") { e.preventDefault(); setPhase("pick"); }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [phase, flipped, grade]);
+  }, [phase, flipped, grade, copyCard]);
 
   if (!source) {
     return (
@@ -247,18 +268,29 @@ export default function DrillSession() {
                   {card.answer}
                 </Markdown>
               </View>
-              <Pressable
-                onPress={() =>
-                  router.push(`/reader/${sourceId}/${card.itemId}` as never)
-                }
-                style={styles.src}
-              >
+              <View style={styles.src}>
                 <Text style={styles.srcText} numberOfLines={1}>
                   {card.topic}
                   {card.number ? ` · ${card.number}` : ""}
                 </Text>
-                <Text style={styles.srcOpen}>Open ↗</Text>
-              </Pressable>
+                <View style={styles.srcActions}>
+                  <Pressable
+                    onPress={copyCard}
+                    accessibilityLabel="Copy question and answer to clipboard"
+                    hitSlop={8}
+                  >
+                    <Text style={styles.srcOpen}>{copied ? "Copied ✓" : "Copy ⧉"}</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() =>
+                      router.push(`/reader/${sourceId}/${card.itemId}` as never)
+                    }
+                    hitSlop={8}
+                  >
+                    <Text style={styles.srcOpen}>Open ↗</Text>
+                  </Pressable>
+                </View>
+              </View>
             </>
           )}
         </View>
@@ -383,6 +415,7 @@ function makeStyles(p: Palette) {
       marginTop: 16, paddingTop: 12, borderTopWidth: 1, borderTopColor: p.border,
     },
     srcText: { color: p.textMuted, fontSize: 12, fontFamily: MONO_FONT, flexShrink: 1 },
+    srcActions: { flexDirection: "row", gap: 16, flexShrink: 0 },
     srcOpen: { color: p.accent, fontSize: 12 },
     grades: { flexDirection: "row", gap: 8, marginTop: 18 },
     grade: {
