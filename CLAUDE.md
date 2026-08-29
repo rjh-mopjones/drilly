@@ -17,9 +17,9 @@ Every primer is **one markdown file** at `web/public/<name>-interview-primer.md`
 
 Manifest at `web/public/manifest.json` + mirror at `mobile/assets/content/manifest.json` declares each source. Build script `scripts/build-web.sh` mirrors `web/public/*.md` + `manifest.json` into `mobile/dist/` for Vercel to serve at the deploy root.
 
-### Summary section — required for every topic
+### Summary section — required for every topic (except System Design Questions)
 
-Every `## Topic` must open with a `### Summary` card (~700-900 words, 6 subsections in bold). Reference: `web/public/java-interview-primer.md` → `## Core Java` → `### Summary`. See the **Content authoring** section in `README.md` for the full structure and rules.
+Every `## Topic` must open with a `### Summary` card (~700-900 words, 6 subsections in bold). The one exception is `patterns.md` (System Design Questions), whose items use the breakdown format below instead. Reference: `web/public/java-interview-primer.md` → `## Core Java` → `### Summary`. See the **Content authoring** section in `README.md` for the full structure and rules.
 
 **Hard rules when adding content**:
 - Use `**bold**` for subsections inside a Summary, **never** `###` — `###` is reserved for the question cards and creates parser splits.
@@ -257,12 +257,22 @@ Hard-won facts:
 - Arrow clicks resolve by distance (`nearestEdgeId`), not hit areas; frames are
   click-through via `LABEL_LAYER_CSS` (the `!important` is load-bearing).
 
-### Wiring a diagram to a question
+### Adding a new System Design Question (the whole recipe)
 
-Set `sourceId` + `itemId` on the spec, add an `#### Interactive diagram`
-section to that question linking to `/diagram/<id>` (`ItemView` routes `/`
-links through expo-router), and add the section to `sectionOrder` in both
-manifests. `scripts/validate_sd.py` treats the section as optional.
+1. **Diagram spec** `mobile/lib/diagrams/<id>.ts` with `sourceId: "patterns"`
+   and the new `itemId`; register it in `index.ts`. Follow "Adding a diagram"
+   and "The text" above; `bunx tsx scripts/check-diagrams.ts <id>` must be
+   clean with 0 warnings. `itemRoute()` then sends taps on the question to
+   `/diagram/<id>` automatically; nothing to wire in the reader.
+2. **Write-up** appended to `web/public/patterns.md` as `### N. Title` in the
+   breakdown format (see "System Design Questions: diagram first, Deep dive
+   behind it"); Q53 Trending Topics is the pattern. Focus embeds use the spec's
+   node/edge ids (`bunx tsx scripts/diagram-skeleton.ts <id>`).
+   `python3 scripts/validate_sd.py --items N` must be clean (run
+   `--write-svg-hashes` once for its new figures), then mirror the file to
+   `mobile/assets/content/patterns.md` and bump `itemCount` in both manifests.
+3. `bunx tsx scripts/build-diagram-layouts.ts` (or `build-web.sh`), open
+   `/diagram/<id>` and its Deep dive on desktop and a phone viewport.
 
 ## Standing user preferences
 
