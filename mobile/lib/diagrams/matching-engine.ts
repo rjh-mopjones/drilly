@@ -102,8 +102,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Self-trade prevention",
       sub: "checked before the fill is emitted",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 2,
+      row: 2,
       detail: {
         what: "A participant comparison between the incoming order and the specific resting order about to trade, applying cancel-newest, cancel-resting or decrement-both.",
         why: "It has to sit inside the inner loop because it compares two concrete orders, not two accounts in the abstract. Structurally the interesting part is what the policy does: it removes a resting order from the middle of a price level, which is exactly the operation the intrusive list already makes free.",
@@ -146,7 +146,7 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Fills and book deltas out",
       sub: "sequenced reports + latest-wins ticks",
       kind: "queue",
-      col: 0,
+      col: 3,
       row: 2,
       detail: {
         what: "The two output streams: sequenced execution reports to both parties, and top-of-book plus incremental updates to market data subscribers.",
@@ -191,8 +191,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Best-price pointer",
       sub: "one per side, nudges inward",
       kind: "database",
-      col: 3,
-      row: 0,
+      col: 2,
+      row: 1,
       parent: "book-group",
       detail: {
         what: "A single index per side holding the current best bid and best ask, advanced by one tick at a time when a level empties.",
@@ -237,8 +237,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Intrusive FIFO per level",
       sub: "prev/next on the order record",
       kind: "database",
-      col: 2,
-      row: 1,
+      col: 3,
+      row: 0,
       parent: "book-group",
       detail: {
         what: "The queue of resting orders at one price, as a doubly linked list whose prev and next pointers live on the order record itself rather than in container nodes.",
@@ -260,8 +260,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Tree levels for the tail",
       sub: "TreeMap or skip list, per instrument",
       kind: "database",
-      col: 3,
-      row: 2,
+      col: 2,
+      row: 3,
       detail: {
         what: "The other implementation of the same interface: a sorted map keyed by price allocating only levels that actually hold orders, chosen per instrument at listing time.",
         why: "It is drawn outside the dense book because it is not a fallback you hope never fires, it is what most of the venue's 10,000 instruments actually run. The array buys the last few microseconds for symbols where microseconds are worth paying for; everything else gets correctness by construction and costs nothing when nobody trades it.",
@@ -282,8 +282,8 @@ export const MATCHING_ENGINE: Diagram = {
       label: "Invariants and shadow model",
       sub: "asserted after every apply",
       kind: "service",
-      col: 2,
-      row: 2,
+      col: 3,
+      row: 3,
       detail: {
         what: "Two assertions run inline after each applied event, that the book is not crossed and that quantity is conserved across the fill, plus a slow reference matcher run in shadow on the same input.",
         why: "The failures this design can produce are not crashes, they are quietly wrong trades, and a wrong trade surfaces weeks later as a regulatory incident rather than an alert. The assertions are a handful of comparisons against a 5 to 20 microsecond budget, which makes them cheap enough to leave on in production.",

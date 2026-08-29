@@ -1186,7 +1186,7 @@ export function layoutDiagram(authored: Diagram): Layout {
     grow(p[0] + w / 2, p[1] + LABEL_H / 2);
   }
   const bounds = { x: l, y: t, w: r - l, h: b - t };
-  const zoom = Math.min(CANVAS.w / (bounds.w + 40), CANVAS.h / (bounds.h + 40));
+  const zoom = Math.min(CANVAS.w / (bounds.w + 30), CANVAS.h / (bounds.h + 30));
   return {
     diagram,
     crossingPairs: crossingPairs(Object.values(routes)),

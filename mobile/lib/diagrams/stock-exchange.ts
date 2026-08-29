@@ -58,8 +58,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Order gateway",
       sub: "decode, auth, pre-trade risk",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       detail: {
         what: "The entry point per member firm: wire-format decode, authentication, syntax validation and the 15c3-5 style pre-trade risk checks of max size, max notional, buying power and kill switch.",
         why: "Risk lives here, above the sequencer, because a rejected order must never enter the official record. Put it inside the engine and the input log contains messages that were never real trades, and the engine acquires a reason to un-match, which nothing downstream can survive.",
@@ -81,8 +81,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Per-firm risk state",
       sub: "positions, limits, verdict journal",
       kind: "database",
-      col: 1,
-      row: 1,
+      col: 2,
+      row: 0,
       detail: {
         what: "Mutable per-firm position and buying-power state held local to the gateway, with every risk verdict journalled to a log separate from the sequenced input log.",
         why: "The verdict has to be recorded because it is the one input to the venue that is not reproducible: risk decisions read state that fills change, so recomputing them at replay time produces different rejects and therefore a different input log. Journalling the decision keeps a venue-level replay faithful.",
@@ -104,8 +104,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Sequencer",
       sub: "single pinned thread, global seq",
       kind: "service",
-      col: 0,
-      row: 2,
+      col: 1,
+      row: 1,
       parent: "core-group",
       detail: {
         what: "One thread on one isolated core doing exactly three things per message: assign the next sequence number, copy the message into a preallocated slot, publish the slot index to readers.",
@@ -126,11 +126,11 @@ export const STOCK_EXCHANGE: Diagram = {
     {
       id: "input-log",
       label: "Sequenced input log",
-      sub: "mmap append, RDMA replica",
       kind: "queue",
-      col: 1,
-      row: 2,
+      col: 2,
+      row: 1,
       parent: "core-group",
+      sub: "mmap append, RDMA replica, DR ship",
       detail: {
         what: "The append-only memory-mapped journal of every sequenced message. It is the system of record; every other piece of state in the venue is derived from it.",
         why: "A slot is not visible to any engine until it is durable and replicated, because a trade that exists in the market data feed but not in the log cannot be unwound. Committing first means the worst case is an unacknowledged order, which the firm simply retries.",
@@ -152,8 +152,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Matching engines",
       sub: "one single thread per symbol",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 1,
+      row: 2,
       parent: "core-group",
       detail: {
         what: "One single-threaded engine per symbol, each consuming only its symbol's slice of the sequenced stream and applying the venue's priority rule to produce trades.",
@@ -176,8 +176,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Order book, per symbol",
       sub: "sorted levels, FIFO per level",
       kind: "database",
-      col: 1,
-      row: 3,
+      col: 2,
+      row: 2,
       parent: "core-group",
       detail: {
         what: "In-memory book per symbol: bids highest first, asks lowest first, sorted price levels with a FIFO queue of orders at each level.",
@@ -200,8 +200,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Hot standby",
       sub: "second reader, same binary",
       kind: "service",
-      col: 1,
-      row: 4,
+      col: 3,
+      row: 1,
       detail: {
         what: "A second engine process on another host reading the same log and running the same binary, so it is doing identical work at the same rate rather than receiving state.",
         why: "Because the engine is a pure function of the log, failover has no state-migration step: detect, stop routing to the primary, start routing to the standby. This is the payoff for every determinism constraint imposed on the core.",
@@ -223,8 +223,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Failover controller",
       sub: "quorum, fences before promoting",
       kind: "service",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 2,
       detail: {
         what: "A separate quorum-based controller that detects primary failure, revokes the old primary's ability to publish to the output sequencer, and only then promotes the standby.",
         why: "The takeover is trivial; detection is the entire problem. Two engines that both believe they are primary emit trades against the same sequence numbers with different order ids, and subscribers will have accepted both, which is worse than a halt because there is nothing to unwind to.",
@@ -246,8 +246,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Output sequencer",
       sub: "one global stream out",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 1,
+      row: 3,
       detail: {
         what: "Reassembles the per-symbol output of every engine into one globally sequenced stream of execution reports and book deltas.",
         why: "It exists so subscribers detect a gap by counting rather than by timing out. Waiting for a message that never arrives is unbounded; noticing that sequence 4,271 followed 4,269 is immediate, and it is also the fence point the failover controller revokes.",
@@ -269,8 +269,8 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Market data publisher",
       sub: "reliable multicast + gap fill",
       kind: "service",
-      col: 0,
-      row: 5,
+      col: 2,
+      row: 3,
       detail: {
         what: "Publishes trade reports and book deltas over reliable multicast, with a dedicated gap-fill channel serving specific sequence ranges from a ring buffer of the last N seconds.",
         why: "One packet on the wire that the network fans out to every subscriber is the only mechanism that gets the same bytes to everyone at the same instant. Fairness here is physical rather than logical, which is the only form of it you can actually demonstrate.",
@@ -292,37 +292,14 @@ export const STOCK_EXCHANGE: Diagram = {
       label: "Market data subscribers",
       sub: "same rack, same bytes",
       kind: "external",
-      col: 0,
-      row: 6,
+      col: 3,
+      row: 3,
       detail: {
         what: "Market makers, brokers and vendors consuming the feed on subscriber NICs in the same data centre rack as the publisher.",
         why: "Drawn outside the trust boundary because their behaviour is not ours to control: they decide how fast they consume, whether they request gap fill, and how much of the arms race lands on our edge.",
         numbers: ["cable-length parity inside the co-location facility", "per-subscriber gap-fill rate limits"],
         breaks:
           "Fairness is provable per gateway, not per order. The sequencer's arrival order still encodes which gateway happened to be least loaded at that microsecond, a few hundred nanoseconds to a few microseconds of unobservable jitter, and a sophisticated participant will notice.",
-      },
-    },
-    {
-      id: "archive",
-      label: "Archive and DR",
-      sub: "columnar cold copy, async ship",
-      kind: "database",
-      col: 1,
-      row: 6,
-      detail: {
-        what: "Asynchronous geographic shipping of the input log plus a compressed columnar archive held for the regulatory retention period.",
-        why: "Retention under 17a-4 and CAT is cheap in bytes; the property worth paying for is that the retained artifact stays executable, so why did this trade happen at this price is answered by a rerun rather than by an argument.",
-        numbers: ["~35GB/day at ~10x compression", "~62TB over 7 years, call it 100TB with erasure coding", "sub-second DR lag target, alert at 5s"],
-        breaks:
-          "The recovery point objective is non-zero across regions. On loss of the primary site the venue loses up to the lag window of orders, which is a deliberate trade published to participants rather than an oversight.",
-        choice: {
-          pick: "Tiered durability: synchronous only within the rack, asynchronous to the DR site",
-          instead: "Synchronous replication to the geographic DR site before acknowledging an order.",
-          decider:
-            "The cross-region round trip is 10s of milliseconds against an engine budget of single-digit μs and a 10 to 100μs end-to-end ack, three orders of magnitude apart. Making every ack wait for it would end the venue's latency proposition to close a lag window already under 1s.",
-          flips:
-            "A mandate or jurisdiction requiring zero data loss across sites, where the round trip has to be paid and the venue's latency profile is redefined around it rather than optimised.",
-        },
       },
     },
   ],
@@ -347,8 +324,6 @@ export const STOCK_EXCHANGE: Diagram = {
       to: "risk-state",
       label: "check + journal verdict",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Reading per-firm position and buying power to decide the order, and journalling the verdict whichever way it goes.",
         why: "The verdict is recorded rather than recomputed because the state it reads changes with fills. Without the journal, replaying a day against a different risk snapshot produces different rejects and therefore a different input log.",
@@ -377,8 +352,6 @@ export const STOCK_EXCHANGE: Diagram = {
       to: "input-log",
       label: "seq + append, commit both",
       animated: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Assigning the sequence number, copying the message into a preallocated slot, fsyncing to NVMe behind a battery-backed cache and replicating synchronously over RDMA to the second sequencer.",
         why: "Durability before visibility. The slot index is not published to readers until both copies have it, so the worst case at a crash is an order that was never acknowledged rather than a trade that exists everywhere except the record.",
@@ -393,8 +366,6 @@ export const STOCK_EXCHANGE: Diagram = {
       to: "matching",
       label: "sequenced stream, per symbol",
       animated: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "Each engine reading its own symbol's slice of the committed stream out of shared memory, in strict sequence order.",
         why: "Engines read rather than receive, and that verb is the whole trick. A reader can be duplicated for free, which is why the hot standby is an extra consumer of this same arrow rather than a replica that has to be kept in sync.",
@@ -408,8 +379,6 @@ export const STOCK_EXCHANGE: Diagram = {
       from: "matching",
       to: "order-book",
       label: "walk levels, pop FIFO",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The match loop itself: while the best opposing price crosses the limit, fill against the head of that level's queue, decrement, remove depleted orders, then rest any remainder at its own price level.",
         why: "The book is drawn as the engine's private state rather than a shared store because it is derived, not durable. Nothing else may read or write it, which is what keeps the engine a pure function of its input.",
@@ -424,8 +393,6 @@ export const STOCK_EXCHANGE: Diagram = {
       to: "standby",
       label: "same log, same binary",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 100,
       detail: {
         what: "The standby consuming the identical committed stream on another host, at the same rate as the primary.",
@@ -455,8 +422,6 @@ export const STOCK_EXCHANGE: Diagram = {
       to: "standby",
       label: "promote after fence",
       dashed: true,
-      fromSide: "top",
-      toSide: "bottom",
       detail: {
         what: "Promoting the standby to primary once the old primary is provably fenced, and redirecting gateway routing to it.",
         why: "The takeover itself is trivial because the log is the state. Putting promotion behind a quorum decision rather than a heartbeat is what stops two hosts reaching that conclusion independently.",
@@ -512,8 +477,6 @@ export const STOCK_EXCHANGE: Diagram = {
       from: "output-seq",
       to: "gateway",
       label: "exec reports, TCP unicast",
-      fromSide: "right",
-      toSide: "right",
       offset: 200,
       detail: {
         what: "Execution reports and drop copies routed back to the originating member firm over its own TCP session, rather than over the multicast feed.",
@@ -521,23 +484,6 @@ export const STOCK_EXCHANGE: Diagram = {
         numbers: ["~100M trades/day of reports to route", "part of the 10 to 100μs order-to-ack path"],
         breaks:
           "A firm that stops reading its session backs this path up into gateway send queues, which is the specific reason unread-ack backlog is a quota'd and disconnectable condition.",
-      },
-    },
-    {
-      id: "e14",
-      from: "input-log",
-      to: "archive",
-      label: "async ship, 7-year copy",
-      dashed: true,
-      fromSide: "right",
-      toSide: "right",
-      offset: 260,
-      detail: {
-        what: "Asynchronous shipping of the committed log to the DR site and to a compressed columnar archive held for the regulatory retention period.",
-        why: "It is asynchronous on purpose: making the ack wait for a cross-region round trip would add tens of milliseconds to a microsecond-scale path. The archive matters because replay is a product, used for forensics and for regression-testing rule changes, not only for recovery.",
-        numbers: ["~350GB/day raw, ~35GB/day compressed", "sub-second lag target, alert at 5s", "~62TB over 7 years"],
-        breaks:
-          "Replay reproduces which trades happened and in what order, never how long each took. Latency regressions are invisible to an output diff, so the replay harness has to be paired with a separate benchmark on production-identical hardware.",
       },
     },
   ],

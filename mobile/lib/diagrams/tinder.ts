@@ -62,8 +62,8 @@ export const TINDER: Diagram = {
       label: "Feed Service",
       sub: "geo, prefs, exclusion, per request",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       parent: "funnel-group",
       detail: {
         what: "Runs the first three funnel stages on every request: geo radius, preference predicate, exclusion, then hands the survivors to the ranker.",
@@ -90,8 +90,8 @@ export const TINDER: Diagram = {
       label: "Two-tower ranker",
       sub: "128-d dot product, ~1.5k scored",
       kind: "service",
-      col: 0,
-      row: 2,
+      col: 2,
+      row: 0,
       parent: "funnel-group",
       detail: {
         what: "Scores the ~1,500 survivors with one user-tower pass plus a dot product against each candidate's precomputed 128-dimensional embedding.",
@@ -118,8 +118,8 @@ export const TINDER: Diagram = {
       label: "Exposure budget + diversify",
       sub: "decaying multiplier, then top 20",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 3,
+      row: 0,
       parent: "funnel-group",
       detail: {
         what: "Applies the per-profile daily impression budget and a diversity penalty to the scored list, then cuts the top twenty.",
@@ -173,8 +173,8 @@ export const TINDER: Diagram = {
       label: "Candidate embeddings",
       sub: "128 floats/profile, ~50GB",
       kind: "database",
-      col: 1,
-      row: 2,
+      col: 2,
+      row: 1,
       detail: {
         what: "One 128-dimensional vector per profile produced by the candidate tower offline, pushed to regional caches and read by every ranking pass.",
         why: "This is the cache that makes the ranker affordable at all. The candidate half of the model changes only when the profile does, while it is read by every feed request that retrieves that profile, so computing it once and reading it thousands of times is the whole economy of the two-tower design.",
@@ -200,8 +200,8 @@ export const TINDER: Diagram = {
       label: "Exclusion filter",
       sub: "Bloom 1% FP + exact overlay",
       kind: "database",
-      col: 1,
-      row: 3,
+      col: 3,
+      row: 1,
       detail: {
         what: "One compact bit array per user answering 'have I probably swiped this person', warmed into the feed server at session start, with a small exact overlay in front of it.",
         why: "A candidate can be spent only once, so this is the stage that makes the pool behave like inventory, and it is the only stage whose selectivity gets worse every day the user keeps swiping. Loading it per session makes the check a local memory probe rather than a database round trip inside the request budget.",
@@ -228,7 +228,7 @@ export const TINDER: Diagram = {
       sub: "one row write, one reverse read",
       kind: "service",
       col: 0,
-      row: 4,
+      row: 1,
       detail: {
         what: "Records every swipe partitioned by the swiper, then asks the reverse index exactly one question: has this target already swiped right on me?",
         why: "The write path is deliberately trivial because it runs twenty times harder than the read path, at 20k/s steady against 925 feed requests/s. Everything expensive and approximate lives in the funnel; this side is cheap and has to be exact, because it is the only irreversible thing the system does.",
@@ -255,7 +255,7 @@ export const TINDER: Diagram = {
       sub: "Cassandra, partition = swiper_id",
       kind: "database",
       col: 1,
-      row: 4,
+      row: 2,
       detail: {
         what: "Every swipe as (swiper_id, target_id, direction, ts), partitioned by the swiper so the write load spreads evenly across the ring.",
         why: "Append-only, write-heavy, no joins and single-key reads is the exact shape a wide-column store is for. Partitioning by the swiper balances by construction because everyone swipes at roughly the same rate, which is the property the target-keyed copy conspicuously lacks.",
@@ -281,8 +281,8 @@ export const TINDER: Diagram = {
       label: "Reverse index",
       sub: "by target_id, sub-sharded when hot",
       kind: "database",
-      col: 1,
-      row: 5,
+      col: 2,
+      row: 2,
       detail: {
         what: "The same swipe data indexed by target_id, existing for exactly one purpose: answering the reciprocity question in a single row read.",
         why: "Reciprocity must never be a scan, and it must never be answered by asking the target's client anything, because unreciprocated interest has to stay invisible. One index gives you both the match rule and the privacy rule, which are the same rule.",
@@ -306,10 +306,10 @@ export const TINDER: Diagram = {
     {
       id: "match-svc",
       label: "Match Service",
-      sub: "idempotent insert on (min, max)",
       kind: "service",
       col: 0,
-      row: 5,
+      row: 2,
+      sub: "idempotent (min, max); emits to chat",
       detail: {
         what: "On a reciprocal right-swipe, creates one match keyed on the canonical ordered pair (min(a, b), max(a, b)) and notifies both sides exactly once.",
         why: "Two people can right-swipe each other within milliseconds, and naive per-user writes produce two match rows and two divergent inboxes. Canonicalising the key makes both writers target the same row, so the database's own uniqueness constraint does the coordination instead of a lock on the hot path.",
@@ -335,8 +335,8 @@ export const TINDER: Diagram = {
       label: "Matches table",
       sub: "keyed on the canonical pair",
       kind: "database",
-      col: 1,
-      row: 6,
+      col: 3,
+      row: 2,
       detail: {
         what: "One row per match: (match_id, user_a, user_b, created_at, state, last_msg_ts), keyed on the ordered pair so it is unique by construction.",
         why: "The match is the canonical entity and the swipes are the audit log, which is what lets a swipe be corrected without the match identity moving. Storing both swipe timestamps in the row answers 'who liked first' for analytics without a join back into 1.6B swipes a day.",
@@ -355,25 +355,6 @@ export const TINDER: Diagram = {
           flips:
             "When the inbox read overwhelmingly dominates and its latency is the product, where the per-user copy stops being a projection and becomes the primary, with a reconciliation job accepting the risk.",
         },
-      },
-    },
-    {
-      id: "chat",
-      label: "Chat Service",
-      sub: "Q9, channel bound async",
-      kind: "external",
-      col: 0,
-      row: 6,
-      detail: {
-        what: "A separate messaging service that a match event unlocks. The diagram stops at the handoff on purpose.",
-        why: "Matching and messaging have opposite shapes: one is a single exact write per pair, the other is a long-lived ordered stream per channel with delivery and presence semantics. Folding them together means the match path inherits the messaging system's availability, which is the wrong direction for the only guarantee this product makes.",
-        numbers: [
-          "~10% of matches actually converse",
-          "20 messages/day at 300B, ~18GB/day backlog",
-          "binding is async, the match row exists immediately",
-        ],
-        breaks:
-          "A match created with no chat channel bound. The match row lands first and the inbox renders it, and the binding retries with backoff, so the failure surfaces as a delay rather than as a match nobody can open.",
       },
     },
   ],
@@ -397,8 +378,6 @@ export const TINDER: Diagram = {
       from: "feed",
       to: "geo",
       label: "10km radius, ~10k ids",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The radius query plus the attribute reads that back the preference filter, returning candidate ids rather than profiles.",
         why: "Ids only, because a feed page is about 5KB of JSON carrying photo URLs and media never touches this path. Pulling 10,000 full profile records to discard 8,500 of them would spend the whole latency budget on serialisation.",
@@ -412,8 +391,6 @@ export const TINDER: Diagram = {
       from: "feed",
       to: "bloom",
       label: "already swiped? ~1.5k left",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The exclusion probe: seven hash lookups per candidate against the session's warmed bit array.",
         why: "This is the stage that makes the pool inventory rather than a corpus, and it has to run before the ranker so the model's cost stays independent of how depleted the user is. Running it after would mean over-fetching by a factor that grows as the user consumes their market.",
@@ -442,8 +419,6 @@ export const TINDER: Diagram = {
       to: "embeddings",
       label: "128-d vectors",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Reading the precomputed candidate vectors for the 1,500 survivors so the request path only has to do dot products.",
         why: "The asymmetry is the point: the candidate tower runs once per profile offline, the user tower runs once per request, and everything in between is arithmetic. That is what turns 4.2M model invocations a second into microseconds of linear algebra.",
@@ -470,8 +445,6 @@ export const TINDER: Diagram = {
       from: "exposure",
       to: "client",
       label: "top 20, p99 < 300ms",
-      fromSide: "left",
-      toSide: "left",
       animated: true,
       detail: {
         what: "Twenty candidate cards as roughly 5KB of JSON carrying photo URLs, a bucketed distance and profile text.",
@@ -500,8 +473,6 @@ export const TINDER: Diagram = {
       from: "swipe-svc",
       to: "swipes",
       label: "append, by swiper_id",
-      fromSide: "right",
-      toSide: "left",
       animated: true,
       detail: {
         what: "The durable swipe record, and the exact check that catches a Bloom false positive before it masks a duplicate write.",
@@ -516,8 +487,6 @@ export const TINDER: Diagram = {
       from: "swipe-svc",
       to: "reverse",
       label: "did they swipe me?",
-      fromSide: "right",
-      toSide: "left",
       animated: true,
       detail: {
         what: "A single-row read against the target-keyed index asking whether the reciprocal right-swipe already exists.",
@@ -533,8 +502,6 @@ export const TINDER: Diagram = {
       to: "bloom",
       label: "set bit + overlay",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 40,
       detail: {
         what: "Marking the target as swiped in this user's filter, and pushing it onto the small exact overlay that fronts it.",
@@ -550,8 +517,6 @@ export const TINDER: Diagram = {
       to: "embeddings",
       label: "swipe labels",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 56,
       detail: {
         what: "The training loop: swipe outcomes and conversation labels flowing back into the towers that produce candidate vectors.",
@@ -580,28 +545,12 @@ export const TINDER: Diagram = {
       from: "match-svc",
       to: "matches",
       label: "insert (min, max)",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The idempotent insert on the canonical ordered pair, where the second of two simultaneous writers becomes a no-op.",
         why: "This is the only place in the system where correctness is settled by a constraint rather than by convention. Both users converge on one row, so exactly one match exists and each side is notified once.",
         numbers: ["100B row", "~3GB/day"],
         breaks:
           "The no-op has to be genuinely silent to the caller but visible to monitoring, because a rising rate of conflicts is the signal that the reciprocity path is being retried more than it should be.",
-      },
-    },
-    {
-      id: "e15",
-      from: "match-svc",
-      to: "chat",
-      label: "match event",
-      dashed: true,
-      detail: {
-        what: "A published match event that a separate messaging service consumes to bind a channel for the pair.",
-        why: "Asynchronous on purpose. The match row is the source of truth and exists the moment the insert lands, so a messaging outage delays a conversation rather than losing a match, which is the only ordering of those two failures that is acceptable.",
-        numbers: ["~30M events/day", "~10% produce a conversation"],
-        breaks:
-          "Matches without a chat binding accumulate silently if nobody counts them, because the inbox still renders the match and only the user who taps it finds out.",
       },
     },
   ],
