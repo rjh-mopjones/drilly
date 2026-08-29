@@ -45,7 +45,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       sub: "acquires, then pauses 35s in GC",
       kind: "service",
       col: 0,
-      row: 0,
+      row: 1,
       detail: {
         what: "The process that acquired the lock first, did some work, and then stopped running for 35 seconds inside a stop-the-world garbage collection pause.",
         why: "It is drawn as a first-class component because it is the failure the whole design answers to. A holder that is merely slow rather than dead is indistinguishable from a dead one at the lock service, and it wakes up with no notification that its lease expired.",
@@ -73,7 +73,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "router",
       label: "Lock class router",
       kind: "service",
-      col: 1,
+      col: 0,
       row: 0,
       sub: "correctness or best-effort",
       detail: {
@@ -99,6 +99,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       kind: "database",
       col: 2,
       row: 2,
+      parent: "grant-side",
       detail: {
         what: "A small consensus cluster that does not acknowledge a lock write until a majority holds it durably on disk.",
         why: "Majority commit is what stops two grants for the same key being recorded across a leader change or a partition. It is also what gives the log a single agreed order, which is where the fencing token comes from, so the two properties are bought together.",
@@ -121,6 +122,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       kind: "service",
       col: 3,
       row: 2,
+      parent: "grant-side",
       sub: "TTL 30s, renew at 10s",
       detail: {
         what: "The expiry attached to every grant, plus the holder's renewal loop that extends it while work is still in progress.",
@@ -143,8 +145,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       label: "Fencing token",
       sub: "etcd mod_revision, ZK czxid",
       kind: "database",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 2,
       detail: {
         what: "A number returned with every grant that strictly increases across successive grants, taken from the position of that grant in the consensus log.",
         why: "It is the one thing the lock service produces that the resource can check. It has to come from something that already has a single agreed order, and a renewal deliberately does not mint a new one, or an in-flight write from the correct holder would be rejected by your own fence.",
@@ -166,7 +168,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       label: "Redis SETNX, 3 shards",
       sub: "SET key NX EX 30, no token",
       kind: "database",
-      col: 2,
+      col: 1,
       row: 0,
       detail: {
         what: "Sharded single-instance Redis holding a key with an expiry, used for locks where a duplicate holder is annoying rather than damaging.",
@@ -188,8 +190,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "fence-check",
       label: "Fence check at the write",
       kind: "service",
-      col: 1,
-      row: 2,
+      col: 0,
+      row: 3,
       sub: "AND fence_token < :token",
       detail: {
         what: "The compare-and-advance predicate that rides inside the same UPDATE as the write, refusing any token lower than the highest already accepted.",
@@ -212,7 +214,7 @@ export const DISTRIBUTED_LOCK: Diagram = {
       label: "Protected resource",
       sub: "row with a fence_token column",
       kind: "database",
-      col: 0,
+      col: 1,
       row: 3,
       detail: {
         what: "The database row the lock exists to protect, carrying the highest token it has ever accepted alongside the data.",
@@ -273,8 +275,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       label: "Fenced-write rejections",
       sub: "plus duplicate-holder canary",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 2,
+      row: 3,
       detail: {
         what: "The counter of writes refused by the fence at the resource, plus a synthetic that deliberately pauses a holder past its TTL to prove the counter can move.",
         why: "A bad cache shows up in hit rate within minutes; a bad lock shows up as a support ticket three weeks later about a balance that does not add up. This is the instrument that closes that gap, and it is the only proof that the end-to-end design is actually safe rather than merely drawn correctly.",
@@ -426,6 +428,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "e10",
       from: "worker-b",
       to: "fence-check",
+      fromSide: "left",
+      toSide: "top",
       tier: "hot",
       label: "write, fence=34",
       offset: 90,
@@ -441,10 +445,8 @@ export const DISTRIBUTED_LOCK: Diagram = {
       id: "e11",
       from: "worker-a",
       to: "fence-check",
-      fromSide: "left",
-      toSide: "left",
+      label: "stale write 33: 0 rows, fenced",
       tier: "hot",
-      label: "stale write, fence=33",
       offset: 110,
       detail: {
         what: "The late write from the resumed holder, carrying the token it was granted before its lease expired.",
@@ -466,23 +468,6 @@ export const DISTRIBUTED_LOCK: Diagram = {
         numbers: ["1 extra predicate", "1 extra column write", "0 extra round trips"],
         breaks:
           "The cost of fencing is organisational rather than computational: this predicate is trivial, and the difficulty is getting every writer to the row to carry a token at all.",
-      },
-    },
-    {
-      id: "e13",
-      from: "fence-check",
-      to: "worker-a",
-      fromSide: "left",
-      toSide: "left",
-      tier: "hot",
-      label: "0 rows: fenced out",
-      offset: 160,
-      detail: {
-        what: "The rejection: zero rows affected, returned to the stale holder.",
-        why: "It has to be surfaced as a terminal failure rather than a transient one. Retrying with the same token can only fail again, and retrying after reacquiring means redoing work whose earlier steps may already have landed.",
-        numbers: ["0 rows affected", "terminal, not retryable"],
-        breaks:
-          "A client library that treats zero rows as a normal no-op swallows the only signal that a duplicate holder existed, which is how this failure stays invisible for weeks.",
       },
     },
     {
