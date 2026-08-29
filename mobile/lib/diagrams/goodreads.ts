@@ -104,8 +104,8 @@ export const GOODREADS: Diagram = {
       label: "Shelf + Review Service",
       sub: "shelve, progress, rate, review",
       kind: "service",
-      col: 1,
-      row: 2,
+      col: 0,
+      row: 1,
       detail: {
         what: "The write path and the personalised read: shelvings, reading progress, ratings, review bodies and helpfulness votes.",
         why: "User state cannot be shared between viewers, so it is kept out of the cacheable body and served live. The volumes are genuinely small, which is why the interview sits upstream of serving rather than here.",
@@ -127,8 +127,8 @@ export const GOODREADS: Diagram = {
       label: "Kafka",
       sub: "rating + activity events",
       kind: "queue",
-      col: 1,
-      row: 3,
+      col: 0,
+      row: 2,
       detail: {
         what: "The durable log carrying aggregate-update events and follower activity away from the request path.",
         why: "A rating write must not wait on aggregate maintenance, feed fanout or search. Events carry a UUID so at-least-once delivery does not double count a star, and the log gives replay after a bad consumer deploy.",
@@ -150,8 +150,8 @@ export const GOODREADS: Diagram = {
       label: "Entity resolution",
       sub: "Spark: normalise, block, score",
       kind: "service",
-      col: 3,
-      row: 1,
+      col: 1,
+      row: 3,
       parent: "offline-group",
       detail: {
         what: "Nightly batch plus a streaming path for new records: normalise, block into candidate groups, score pairs on about eight weighted features, then auto-merge, queue for a moderator, or create a new work.",
@@ -174,8 +174,8 @@ export const GOODREADS: Diagram = {
       label: "Recommender",
       sub: "batch CF, popularity-discounted",
       kind: "service",
-      col: 3,
-      row: 2,
+      col: 2,
+      row: 3,
       parent: "offline-group",
       detail: {
         what: "Offline job producing a per-user list of works, blending collaborative filtering with a content-based path for titles that have no ratings yet.",
@@ -244,8 +244,8 @@ export const GOODREADS: Diagram = {
       label: "Search index",
       sub: "OpenSearch, one doc per work",
       kind: "database",
-      col: 2,
-      row: 4,
+      col: 0,
+      row: 3,
       detail: {
         what: "An inverted index over works with every edition title and author-name variant folded into one document, and ISBN and ASIN as exact-match keyword fields.",
         why: "The same box takes both a title and a 13 digit identifier, and fuzzy-matching an identifier is never what anyone wants. Ranking blends BM25 with a capped popularity prior so a geology textbook mentioning sand dunes does not outrank the novel.",
@@ -266,7 +266,7 @@ export const GOODREADS: Diagram = {
       id: "shelvings",
       sub: "Cassandra, ~1.8TB at RF=3",
       kind: "database",
-      col: 2,
+      col: 1,
       row: 2,
       label: "Shelves & reviews",
       detail: {
@@ -291,7 +291,7 @@ export const GOODREADS: Diagram = {
       sub: "Redis, sum, count, histogram[5]",
       kind: "database",
       col: 2,
-      row: 3,
+      row: 2,
       detail: {
         what: "One small row per work holding (sum_stars, count, histogram[5], last_recompute_ts), with a durable store behind Redis. An in-line stream processor consumes rating events off Kafka and applies atomic increments here rather than recomputing from the ratings table.",
         why: "The page needs an average and a star histogram in about a millisecond and there is no version of that which touches rating rows. Publishing the histogram rather than only the mean also makes a brigade visible in the shape of the distribution. Commutative increments off an idempotent stream also make concurrent raters a non-issue rather than a lock problem.",

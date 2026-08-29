@@ -56,10 +56,10 @@ export const GITHUB: Diagram = {
     {
       id: "git-proxy",
       label: "Git proxy fleet",
-      sub: "stateless, 30s route cache",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
+      sub: "stateless; etcd routing table, 30s cache",
       detail: {
         what: "Stateless L7 servers that terminate TLS or SSH, authenticate the token, translate owner/name into (repo_id, primary, generation) and proxy the bidirectional git byte stream.",
         why: "It exists so that the only stateful thing in the read and write path is the file server itself. Any instance handles any repository, so a crashed proxy costs one retry and the fleet sits behind an ordinary L4 load balancer.",
@@ -81,8 +81,8 @@ export const GITHUB: Diagram = {
       label: "Primary file server",
       sub: "bare git on local NVMe",
       kind: "database",
-      col: 0,
-      row: 2,
+      col: 2,
+      row: 0,
       parent: "replica-set",
       detail: {
         what: "The elected owner of this repository. Receives the packfile, verifies every object hash, fsyncs, replicates, then compare-and-swaps the ref.",
@@ -105,8 +105,8 @@ export const GITHUB: Diagram = {
       label: "Two replicas, other DCs",
       sub: "quorum before the ref CAS",
       kind: "database",
-      col: 0,
-      row: 3,
+      col: 3,
+      row: 0,
       parent: "replica-set",
       detail: {
         what: "The other two members of the replica set, each holding a full bare git repo, acknowledging an fsync before the primary is allowed to move the ref.",
@@ -129,8 +129,8 @@ export const GITHUB: Diagram = {
       label: "Diff + merge service",
       sub: "cached by (repo, base, head)",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 3,
+      row: 1,
       detail: {
         what: "Computes a pull request's diff and merge preview from two SHAs by reading trees out of a replica, and caches the result keyed by repository, base and head.",
         why: "A diff is a pure function of two immutable SHAs, which makes the cache key exact and the entry permanently valid. Storing diffs instead would mean rewriting them every time a force-push moved head.",
@@ -152,8 +152,8 @@ export const GITHUB: Diagram = {
       label: "Push event queue",
       sub: "durable, published after the ack",
       kind: "queue",
-      col: 0,
-      row: 5,
+      col: 2,
+      row: 2,
       detail: {
         what: "A durable log carrying push_event records of (repo_id, ref, old_sha, new_sha) to CI, webhook delivery and the search indexer.",
         why: "It exists to put every consequence of a push strictly after the ack. CI fan-out and webhook delivery are several times the git traffic humans generate, and a receiver having a bad day must never be able to fail somebody's push.",
@@ -175,8 +175,8 @@ export const GITHUB: Diagram = {
       label: "CI scheduler + runners",
       sub: "per-org caps, dedup on SHA",
       kind: "service",
-      col: 0,
-      row: 6,
+      col: 3,
+      row: 2,
       detail: {
         what: "Reads .github/workflows at the pushed SHA, enqueues jobs, and runs untrusted code in isolated per-job runners placed near the replica they will clone from.",
         why: "CI is the largest reader in the system, not the largest compute problem. At 870 jobs/s each cloning once, the clone bandwidth against the git layer saturates before the runner CPU does.",
@@ -198,8 +198,8 @@ export const GITHUB: Diagram = {
       label: "Web + API frontend",
       sub: "REST + GraphQL",
       kind: "service",
-      col: 1,
-      row: 0,
+      col: 0,
+      row: 1,
       detail: {
         what: "The stateless application tier behind the web UI, REST and GraphQL: pull requests, issues, reviews, org and team management.",
         why: "It is a separate path from the git protocol on purpose. The product surface looks unified, but a PR page reads relational rows and a cached diff, and never touches the push transaction.",
@@ -240,35 +240,12 @@ export const GITHUB: Diagram = {
       },
     },
     {
-      id: "router",
-      label: "Routing table",
-      sub: "etcd: primary + generation",
-      kind: "database",
-      col: 1,
-      row: 2,
-      detail: {
-        what: "A small consensus store holding repo_id to (primary, replicas[], generation). The controller promotes on primary loss and bumps the generation.",
-        why: "Content addressing does not protect you from split brain. Two primaries both accepting pushes to main produce two valid DAG extensions with no hash mismatch to detect, so one of them is a silently lost update. The generation is the fence.",
-        numbers: ["~30s RTO for in-region failover", "generation stamped on every forwarded request"],
-        breaks:
-          "If the lookup is unavailable the proxy serves a stale route, which is safe only because a demoted primary rejects writes stamped with an older generation.",
-        choice: {
-          pick: "A consensus store (etcd) with a monotonic generation per repository",
-          instead: "Keep the routing row in the metadata database, or elect by heartbeat with no fencing token.",
-          decider:
-            "Whether a demoted primary can still take a write. Promotion is a linearizable decision on 1 row per repository, and without a fencing token an old primary that comes back after a network partition accepts pushes that are then silently lost. A database row gives you the storage but not the election.",
-          flips:
-            "Deployments small enough for a single-writer control plane, where an operator promotes by hand and the fencing is a human closing a valve.",
-        },
-      },
-    },
-    {
       id: "object-pool",
       label: "Fork network object pool",
       sub: "one per visibility class",
       kind: "database",
-      col: 1,
-      row: 3,
+      col: 2,
+      row: 1,
       detail: {
         what: "One shared object store per fork network, mounted by every member as a git alternate. Each fork owns only its own refs plus the objects it uniquely added.",
         why: "A fork is not a copy. Ten thousand forks are ten thousand ref namespaces over one copy of the history, and fork fan-out concentrates on exactly the largest and most-cloned repositories, so the saving lands where storage hurts most.",
@@ -290,8 +267,8 @@ export const GITHUB: Diagram = {
       label: "Code search index",
       sub: "ngram index, sharded by repo",
       kind: "database",
-      col: 1,
-      row: 5,
+      col: 0,
+      row: 2,
       detail: {
         what: "An inverted ngram index over default-branch working trees, built and served on its own cluster, with shards keyed by repository.",
         why: "Sharding by repository is what makes access control a shard filter rather than a post-filter. Filtering after retrieval leaks existence through timing and result counts, so an inaccessible shard must never be read at all.",
@@ -314,7 +291,7 @@ export const GITHUB: Diagram = {
       sub: "backoff within 24h window",
       kind: "service",
       col: 1,
-      row: 6,
+      row: 2,
       detail: {
         what: "Workers that deliver HMAC-signed push, pull_request and check_run payloads to subscriber endpoints, with exponential backoff and per-receiver circuit breaking.",
         why: "The queue is not the problem here; delivery concurrency against slow receivers is. One integrator timing out on every request will consume the whole worker pool unless its failures are isolated per receiver.",
@@ -352,30 +329,12 @@ export const GITHUB: Diagram = {
       from: "client",
       to: "web-app",
       label: "web + API request",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Ordinary HTTPS traffic for the web UI, REST and GraphQL, entirely separate from the git protocol path.",
         why: "Drawing it as its own arrow is the point: a pull request page is a database read plus a cached diff, and it can be served while the repository's primary is mid-failover.",
         numbers: ["~500M authenticated web and API actions/day"],
         breaks:
           "The two paths have no shared transaction, so the page can show a state the git store has already moved past.",
-      },
-    },
-    {
-      id: "e3",
-      from: "git-proxy",
-      to: "router",
-      label: "resolve primary + gen",
-      dashed: true,
-      fromSide: "right",
-      toSide: "left",
-      detail: {
-        what: "Translating owner/name into repo_id, then into the current primary, its replica set and the generation number.",
-        why: "It is drawn as a control path because it carries no git data. It exists so the proxy can stay stateless while the thing it routes to moves on every failover and every migration.",
-        numbers: ["30s TTL cache at the proxy"],
-        breaks:
-          "When the consensus store is unavailable the proxy serves the last-known primary and probes in the background, which is only safe because the generation stamp fences a demoted target.",
       },
     },
     {
@@ -411,8 +370,6 @@ export const GITHUB: Diagram = {
       from: "primary",
       to: "object-pool",
       label: "shared history alternate",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Object lookups falling through to the fork network's shared pool when the object is not in this repository's own storage.",
         why: "This is the mechanism that makes forking free: a fork contributes only its own new objects, and everything it inherits is resolved through the alternate rather than copied.",
@@ -426,8 +383,6 @@ export const GITHUB: Diagram = {
       from: "primary",
       to: "event-queue",
       label: "push_event after ack",
-      fromSide: "left",
-      toSide: "left",
       offset: 70,
       detail: {
         what: "A durable (repo_id, ref, old_sha, new_sha) record published once the ref compare-and-swap has committed and the client has been acked.",
@@ -468,8 +423,6 @@ export const GITHUB: Diagram = {
       from: "web-app",
       to: "diff-service",
       label: "diff for base..head",
-      fromSide: "left",
-      toSide: "right",
       offset: 40,
       detail: {
         what: "A request for the diff or merge preview between the two SHAs the pull request row names.",
@@ -498,8 +451,6 @@ export const GITHUB: Diagram = {
       from: "event-queue",
       to: "webhooks",
       label: "fan-out, HMAC signed",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Push, pull_request and check_run events handed to the delivery workers for at-least-once HTTP delivery to subscriber endpoints.",
         why: "The queue absorbs the difference between an event rate we control and a delivery rate somebody else's server controls, which is the only reason a slow integrator is their problem rather than ours.",
@@ -514,8 +465,6 @@ export const GITHUB: Diagram = {
       to: "search",
       label: "index update",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "An incremental index update for pushes that touch an indexed default branch.",
         why: "The index is a derived view, so it is fed from the event stream rather than by scanning the git store. Nothing about a push waits for it.",
@@ -529,8 +478,6 @@ export const GITHUB: Diagram = {
       from: "ci",
       to: "replicas",
       label: "clone at pushed SHA",
-      fromSide: "right",
-      toSide: "right",
       offset: 90,
       animated: true,
       detail: {

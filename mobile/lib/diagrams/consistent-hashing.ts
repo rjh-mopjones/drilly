@@ -45,10 +45,11 @@ export const CONSISTENT_HASHING: Diagram = {
     // --- the ring library: one linked artefact, three stages ------------------
     {
       id: "ring-lib",
-      label: "Ring library (linked in-process)",
       kind: "serviceGroup",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
+      sub: "in-process: hash → lookup → walk",
+      label: "Ring library",
       detail: {
         what: "The whole lookup as one linked artefact: hash the key, binary-search the ring, walk to the replica set. Three stages of one function call, all against local memory.",
         why: "The requirement that shapes everything else is that no lookup consults a coordinator. At a sub-1ms budget and 1M lookups/s/node, a network hop per lookup is not a slower design, it is a different one. Drawing these as three peer services would claim three deployables and three failure modes where there is one binary.",
@@ -70,8 +71,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Key hash",
       sub: "xxHash, seed pinned in config",
       kind: "process",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       parent: "ring-lib",
       detail: {
         what: "Maps a key into the 32-bit position space: `pos = xxhash(key) % RING_SIZE`.",
@@ -94,8 +95,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Ring lookup",
       sub: "bisect_left over 200k uint32, ~3.2MB",
       kind: "process",
-      col: 0,
-      row: 2,
+      col: 1,
+      row: 1,
       parent: "ring-lib",
       detail: {
         what: "The binary search over the in-memory ring: positions sorted ascending, looked up with `bisect_left(ring_positions, pos)` wrapped modulo the ring length.",
@@ -123,8 +124,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Replica walk",
       sub: "next 3 distinct hosts, AZ-aware",
       kind: "process",
-      col: 0,
-      row: 3,
+      col: 1,
+      row: 2,
       parent: "ring-lib",
       detail: {
         what: "Continues clockwise from the primary position to the next N distinct physical hosts, skipping further positions of a host already chosen.",
@@ -147,8 +148,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "vnode to physical map",
       sub: "server_id, rack, az, in memory",
       kind: "cache",
-      col: 1,
-      row: 3,
+      col: 2,
+      row: 0,
       detail: {
         what: "The in-memory mapping from each ring position to the physical server behind it, together with that server's rack and availability zone. Derived from the membership view alongside the ring and rebuilt with it.",
         why: "The ring answers which position, not which machine. The replica walk needs physical identity to tell when two positions are the same host, and needs the failure-domain labels to spread the replica set across them.",
@@ -171,8 +172,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Request coordinator",
       sub: "coalescing, per-key QPS counters",
       kind: "service",
-      col: 0,
-      row: 4,
+      col: 1,
+      row: 1,
       detail: {
         what: "The caller-side dispatch layer that takes the ordered replica list, stamps the request with the local ring epoch, spreads reads across the replicas and collapses concurrent misses for the same key into one backend fetch.",
         why: "The ring distributes keys evenly and does nothing about per-key load, so the only place a hot key can be seen or absorbed is where the requests are issued. This is also where the epoch is attached, which is what turns a stale view into a refresh rather than a wrong answer.",
@@ -197,10 +198,11 @@ export const CONSISTENT_HASHING: Diagram = {
     // --- the storage node: one deployable, three states of one arc -----------
     {
       id: "storage-node",
-      label: "Storage node (arc owner)",
       kind: "serviceGroup",
-      col: 0,
-      row: 5,
+      col: 1,
+      row: 2,
+      sub: "owns arcs; warms, hands off",
+      label: "Storage node",
       detail: {
         what: "The physical server the walk resolved to, and the three things it does with an arc: serve it, take it over during a handoff, and warm up before it is trusted with reads.",
         why: "Drawn as one service because these compete for the same NIC and page cache on the same box. A rebalance is not a separate system, it is the same machine spending its bandwidth on something other than foreground traffic, which is exactly why pacing it is hard.",
@@ -214,8 +216,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Serve owned arcs",
       sub: "~30GB across 200 arcs",
       kind: "process",
-      col: 0,
-      row: 5,
+      col: 1,
+      row: 2,
       parent: "storage-node",
       detail: {
         what: "Steady state: the node owns roughly 1/1000 of the keyspace spread across 200 small arcs and serves reads and writes for them, checking the epoch on every inter-node RPC.",
@@ -242,8 +244,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Warming state",
       sub: "takes writes, reads stay on the donor",
       kind: "process",
-      col: 0,
-      row: 6,
+      col: 1,
+      row: 3,
       parent: "storage-node",
       detail: {
         what: "The state a freshly joined or returning node sits in after it claims its arcs: it takes writes immediately, because the ring says it is the owner and a write needs exactly one home, while reads keep going to whoever covered for it until its hit rate crosses a threshold.",
@@ -270,8 +272,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Arc handoff",
       sub: "writes flip at epoch, donor deletes last",
       kind: "process",
-      col: 0,
-      row: 7,
+      col: 1,
+      row: 4,
       parent: "storage-node",
       detail: {
         what: "The migration of one arc: stream the range from the donor, dual-read both owners while it is in flight, cut writes over at the epoch, then let the donor drop its copy.",
@@ -298,8 +300,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Donor nodes",
       sub: "up to 200 per join, ~150MB each",
       kind: "database",
-      col: 1,
-      row: 7,
+      col: 0,
+      row: 2,
       detail: {
         what: "The existing servers that each cede a handful of small arcs to a joining node, stream the data behind them, and keep serving reads for those arcs until the handoff completes.",
         why: "With 200 positions per server a join takes tiny slices from nearly the whole fleet instead of half of one neighbour's range. That is exactly why load smooths out, and it is also why pacing a rebuild is a fleet-wide decision rather than a local one.",
@@ -324,10 +326,11 @@ export const CONSISTENT_HASHING: Diagram = {
     // --- membership: detection and dissemination ride the same exchange ------
     {
       id: "membership-agent",
-      label: "Membership agent (on every node)",
       kind: "serviceGroup",
-      col: 1,
-      row: 5,
+      col: 2,
+      row: 2,
+      sub: "on every node: detector + gossip",
+      label: "Membership agent",
       detail: {
         what: "The daemon every node runs to keep its view of the fleet current: it watches peer heartbeats and it exchanges the membership view, both over the same 1Hz gossip round.",
         why: "Detection and dissemination are two jobs but one deployable, because a heartbeat and a membership entry travel in the same 1KB exchange with the same three random peers. What is genuinely separate is deciding, which needs one decider and lives in the consensus group next door.",
@@ -341,8 +344,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Failure detector",
       sub: "phi-accrual, k=5 rounds + quorum",
       kind: "process",
-      col: 1,
-      row: 5,
+      col: 2,
+      row: 2,
       parent: "membership-agent",
       detail: {
         what: "Watches peer heartbeats and maintains a suspicion level per node, escalating to a down declaration only once a quorum of peers agrees.",
@@ -369,8 +372,8 @@ export const CONSISTENT_HASHING: Diagram = {
       label: "Gossip: membership view",
       sub: "3 random peers/s, epoch tagged",
       kind: "process",
-      col: 1,
-      row: 6,
+      col: 2,
+      row: 3,
       parent: "membership-agent",
       detail: {
         what: "The `(epoch, [node_id, state, positions, heartbeat])` view every node holds, exchanged with a few random peers every second and applied only when the epoch is higher than the local one.",
@@ -398,7 +401,7 @@ export const CONSISTENT_HASHING: Diagram = {
       sub: "consensus group or leaseholder",
       kind: "database",
       col: 2,
-      row: 5,
+      row: 1,
       detail: {
         what: "A small consensus group, or a designated coordinator holding a lease from one, that issues the monotonic epoch stamped on every ring version.",
         why: "Gossip converges a fleet on facts but cannot make a decision: two nodes can decide S2 is dead differently and both will happily spread their version. Ordering membership changes needs exactly one decider, and this is the only thing left on the path that needs consensus. It is also the only piece here that deploys and fails on its own.",
@@ -426,7 +429,7 @@ export const CONSISTENT_HASHING: Diagram = {
       sub: "hourly, object storage",
       kind: "blob",
       col: 2,
-      row: 7,
+      row: 3,
       detail: {
         what: "Hourly snapshots of the ring plus membership state at the epoch that produced them, written to object storage for audit.",
         why: "Ownership is computed rather than recorded, so after the fact nothing in the system knows who owned a key yesterday. Every wrong-replica investigation starts with that question, and it cannot be answered from a structure that holds no history.",
@@ -493,8 +496,6 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "vnode-table",
       label: "vnode to host, rack, az",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Resolving each position on the walk to the physical server behind it, along with its failure-domain labels.",
         why: "The walk has to know when two positions are the same machine. Without that, taking the next three positions can quietly return one host three times, and RF=3 becomes RF=1 with nothing reporting it.",
@@ -537,8 +538,6 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "failure-detector",
       label: "heartbeat + epoch, 1Hz",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Heartbeats and the sender's current epoch, exchanged with three random peers every second.",
         why: "Liveness is measured by peers rather than reported to a central watcher, for the same reason membership is gossiped: no fan-out point, and the per-node cost stays flat as the fleet grows.",
@@ -553,8 +552,6 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "epoch-issuer",
       label: "down, with quorum",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "An escalation: enough peers agree a node has missed k consecutive rounds, so a membership change is proposed.",
         why: "Detection and decision are deliberately separate. Gossip can spread the fact that a node looks unreachable, but only one place is allowed to turn that into the statement that its arcs are reassigned.",
@@ -569,8 +566,6 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "gossip-view",
       label: "epoch++, new node state",
       dashed: true,
-      fromSide: "bottom",
-      toSide: "right",
       detail: {
         what: "The decided membership change, published as a new `(epoch, membership)` pair for gossip to spread.",
         why: "This is the handover from consensus to dissemination. Consensus decides once, about ten times a day, and gossip does the fan-out to a thousand nodes that a consensus group would be a poor tool for.",
@@ -585,8 +580,6 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "snapshots",
       label: "hourly, ~5MB",
       dashed: true,
-      fromSide: "bottom",
-      toSide: "top",
       offset: 60,
       detail: {
         what: "The ring and membership state at the current epoch, written out to object storage once an hour.",
@@ -602,8 +595,6 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "ring-search",
       label: "(epoch, positions)",
       dashed: true,
-      fromSide: "left",
-      toSide: "right",
       offset: 20,
       detail: {
         what: "A converged membership view being applied: positions recomputed and the local ring and vnode map rebuilt with the new epoch stamped on them.",
@@ -619,8 +610,6 @@ export const CONSISTENT_HASHING: Diagram = {
       to: "arc-handoff",
       label: "epoch bump: writes flip",
       dashed: true,
-      fromSide: "bottom",
-      toSide: "top",
       offset: 20,
       detail: {
         what: "The new epoch reaching the node that is taking the arc, which is the instant the new owner becomes the single destination for writes to it.",
@@ -635,8 +624,6 @@ export const CONSISTENT_HASHING: Diagram = {
       from: "arc-handoff",
       to: "donors",
       label: "pull arc ranges",
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "Requests to each donor for the specific contiguous key ranges it is ceding, staged arc by arc so the transfer can be paused.",
         why: "Streaming a contiguous range is the reason this is a ring at all. Rendezvous hashing gives the same minimal-disruption property with better balance, and gives you no contiguous range to hand off, repair or reason about.",
@@ -650,8 +637,6 @@ export const CONSISTENT_HASHING: Diagram = {
       from: "donors",
       to: "arc-handoff",
       label: "~30GB streamed",
-      fromSide: "bottom",
-      toSide: "bottom",
       offset: 60,
       detail: {
         what: "The actual bytes, plus the ordering that makes a join abortable: the donor drops its copy only after the recipient acknowledges the arc and the epoch marks the handoff complete.",
@@ -666,8 +651,6 @@ export const CONSISTENT_HASHING: Diagram = {
       from: "arc-handoff",
       to: "warming",
       label: "arc claimed, cache cold",
-      fromSide: "left",
-      toSide: "left",
       offset: 60,
       detail: {
         what: "The transition once the arc is claimed: the node is the ring's answer for those keys and takes their writes, with an empty page cache behind it.",
@@ -682,8 +665,6 @@ export const CONSISTENT_HASHING: Diagram = {
       from: "warming",
       to: "serve-arcs",
       label: "hit rate over threshold",
-      fromSide: "top",
-      toSide: "bottom",
       detail: {
         what: "Promotion to full owner: reads stop routing to the donor and start landing on the new owner.",
         why: "The threshold is a cache hit rate rather than a timer because the thing being waited on is a warm working set, and how long that takes depends on the traffic the arc actually gets.",

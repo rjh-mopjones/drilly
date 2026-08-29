@@ -28,8 +28,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
   nodes: [
     {
       id: "tier-group",
-      label: "Cache tier: 60 shards, ~30TB RAM, nothing durable",
       kind: "zone",
+      label: "Cache tier: 60 shards, ~30TB RAM",
       detail: {
         what: "The cache cluster itself: 60 primary shards with one replica each, holding a 10TB working set entirely in RAM with persistence switched off.",
         why: "Everything in this box is derived state. Disaster recovery is refilling from the origin rather than restoring anything, which is what makes the tier cheap to run and what makes invalidation the only hard problem it has.",
@@ -64,8 +64,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "In-process L1",
       sub: "hot-key allowlist, 100ms to 1s TTL",
       kind: "service",
-      col: 0,
-      row: 1,
+      col: 1,
+      row: 0,
       detail: {
         what: "A per-process copy of an explicitly allowlisted set of hot keys, held for 100ms to 1s and checked before the tier.",
         why: "Reads reaching the cache tier for one key fall to P/T, where P is the process count and T the L1 TTL. At P = 10k and T = 1s that is 10k/s instead of 1M/s, which takes a hot key from 16 Gbps on one NIC to 160 Mbps.",
@@ -85,8 +85,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "Proxy tier",
       sub: "~200 proxies, 4 conns per shard",
       kind: "service",
-      col: 0,
-      row: 2,
+      col: 2,
+      row: 0,
       detail: {
         what: "A fleet that multiplexes application connections onto a few hundred backend connections per shard and owns the topology on behalf of every client.",
         why: "Connection count is a real constraint before throughput is. It also gives one place to change the shard map without redeploying 10k application servers, which is what makes a resize an operation rather than a release.",
@@ -106,8 +106,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "Consistent hash ring",
       sub: "~150 vnodes per shard, 60 shards",
       kind: "service",
-      col: 0,
-      row: 3,
+      col: 3,
+      row: 0,
       detail: {
         what: "The function mapping a key to its owning shard, with roughly 150 virtual positions per physical shard. Q2 is the ring itself in full; here it is one lookup on the hot path.",
         why: "The placement decision is load-bearing for the cache specifically because a remap is a miss burst. Hashing modulo the node count empties the cache on every resize and hands the full read load to an origin sized for 2% of it.",
@@ -127,8 +127,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "Cache shard",
       sub: "Redis, 180GB maxmemory, persistence off",
       kind: "database",
-      col: 0,
-      row: 4,
+      col: 3,
+      row: 1,
       parent: "tier-group",
       detail: {
         what: "One single-threaded in-memory shard holding about 1/60 of the working set and answering GET and SET in well under a millisecond.",
@@ -149,8 +149,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "TTL + eviction",
       sub: "LRU + backstop TTL, jittered 10%",
       kind: "service",
-      col: 1,
-      row: 4,
+      col: 3,
+      row: 2,
       parent: "tier-group",
       detail: {
         what: "Two different mechanisms that both remove data: a TTL that bounds how stale a value can be, and eviction that decides who survives a full memory cap.",
@@ -171,8 +171,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "Async replica",
       sub: "one per shard, ~10s promotion",
       kind: "database",
-      col: 1,
-      row: 5,
+      col: 3,
+      row: 3,
       parent: "tier-group",
       detail: {
         what: "One asynchronous replica per primary, promoted on failure and optionally serving reads to multiply read capacity.",
@@ -214,8 +214,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "Single-flight loader",
       sub: "per-key lock, early refresh, TTL jitter",
       kind: "service",
-      col: 0,
-      row: 6,
+      col: 2,
+      row: 2,
       detail: {
         what: "The miss path: the first request to detect a miss takes a short-lived per-key lock, queries the origin, populates the cache and releases, while everyone else waits and reads what it wrote.",
         why: "Three defences layered because each leaves a gap the others cover. One loader per key limits the damage of an expiry; probabilistic refresh before expiry and jittered TTLs stop expiries being synchronised in the first place.",
@@ -235,8 +235,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "Origin database",
       sub: "50 read replicas, 100k QPS ceiling",
       kind: "database",
-      col: 0,
-      row: 7,
+      col: 1,
+      row: 2,
       detail: {
         what: "The only authoritative copy of the data. Every miss and every fill lands here, and every write commits here first.",
         why: "This number sets the required hit rate rather than the other way round. 5M x (1 - h) < 100k gives h > 98%, so each point of hit rate is 50k QPS and a key format change is a capacity change.",
@@ -256,8 +256,8 @@ export const DISTRIBUTED_CACHE: Diagram = {
       label: "Write path",
       sub: "commit, then DELETE, never SET",
       kind: "service",
-      col: 1,
-      row: 7,
+      col: 0,
+      row: 2,
       detail: {
         what: "The 50k writes/s path. It commits to the origin first and then deletes the cache key rather than overwriting it.",
         why: "Only one of four orderings survives. Delete first and a reader caches the pre-write value inside the commit window. Overwrite after committing and two writers can apply SETs in the opposite order to their commits. Deletes commute, and absent is always safe.",
@@ -278,7 +278,7 @@ export const DISTRIBUTED_CACHE: Diagram = {
       sub: "CDC consumer + cross-region delete",
       kind: "queue",
       col: 1,
-      row: 8,
+      row: 3,
       detail: {
         what: "A consumer of the origin's committed change stream that deletes the affected keys, and broadcasts those deletes to the other regions' independent pools.",
         why: "It gives one implementation of invalidation ordered by the store's own commit ordering, instead of a hand-written delete at every call site where one forgotten delete is a stale value that lives until its TTL.",
@@ -352,8 +352,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "app",
       label: "hit: ~0.3ms, 98%",
       animated: true,
-      fromSide: "left",
-      toSide: "left",
       offset: 90,
       detail: {
         what: "The hit path returning a ~2KB value, which is where 98% of the 5M gets/s end.",
@@ -393,8 +391,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       from: "loader",
       to: "shard",
       label: "SET, TTL 300s +/-10%",
-      fromSide: "left",
-      toSide: "left",
       offset: 40,
       detail: {
         what: "The fill: writing the loaded value back with a jittered TTL, which is why every miss is also a small write.",
@@ -409,8 +405,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "eviction",
       label: "180GB cap, TTL sweep",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       detail: {
         what: "The two mechanisms inside the shard that remove data: expiry sweeping keys past their TTL, and eviction reclaiming under the memory cap.",
         why: "It is drawn as a control path because it removes data rather than serving it, and because which of the two is actually binding decides whether the eviction policy fork is worth any time at all.",
@@ -424,8 +418,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "replica",
       label: "async replication",
       dashed: true,
-      fromSide: "right",
-      toSide: "left",
       offset: 40,
       detail: {
         what: "Asynchronous replication of the primary's writes to its replica, which stands ready for promotion and can serve reads.",
@@ -440,8 +432,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "hotkey",
       label: "sampled per-key counts",
       dashed: true,
-      fromSide: "right",
-      toSide: "bottom",
       offset: 60,
       detail: {
         what: "Per-shard egress and sampled request counts flowing to the detector that decides which keys are hot.",
@@ -456,8 +446,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "l1",
       label: "promote to L1 allowlist",
       dashed: true,
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "A detected hot key being added to the allowlist that application processes cache locally.",
         why: "This is the cheap mitigation and it is one-way in a way worth stating: adding a key here caps its tier load at P/T and simultaneously sets its staleness floor at T, with no path back for a delete.",
@@ -471,8 +459,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "ring",
       label: "or spread :0-:7 over 8",
       dashed: true,
-      fromSide: "bottom",
-      toSide: "right",
       detail: {
         what: "The other mitigation: storing the hot value under 8 suffixed names so reads pick a suffix at random and land on 8 different shards.",
         why: "It is the answer when the value must stay invalidatable. Splitting one key over 8 shards divides 16 Gbps into 2 Gbps each and keeps DELETE working, which the L1 cannot do at any TTL.",
@@ -485,8 +471,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       from: "writer",
       to: "origin",
       label: "commit v2 first",
-      fromSide: "left",
-      toSide: "right",
       detail: {
         what: "The write committing to the authoritative store before anything touches the cache.",
         why: "Ordering is the whole point. Touching the cache first opens a window, single-digit milliseconds long, in which any reader misses, reads the pre-write value and caches it, and on a hot key that window is a certainty rather than a risk.",
@@ -500,8 +484,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "shard",
       label: "then DELETE, never SET",
       dashed: true,
-      fromSide: "left",
-      toSide: "right",
       offset: 100,
       detail: {
         what: "The invalidation itself: remove the key rather than overwrite it with the new value.",
@@ -516,8 +498,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "invalidator",
       label: "committed change log",
       dashed: true,
-      fromSide: "bottom",
-      toSide: "left",
       detail: {
         what: "The origin's committed change stream feeding the invalidation consumer.",
         why: "Reading the log rather than trusting writers gives one implementation of invalidation with the store's own commit ordering, and nothing is forgotten because nothing is hand-written per call site.",
@@ -531,8 +511,6 @@ export const DISTRIBUTED_CACHE: Diagram = {
       to: "shard",
       label: "delete the row's keys",
       dashed: true,
-      fromSide: "right",
-      toSide: "right",
       offset: 150,
       detail: {
         what: "Deletes derived from committed row changes, applied to this region's pool and broadcast to the others.",
