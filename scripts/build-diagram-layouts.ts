@@ -11,12 +11,12 @@
  */
 declare const process: { argv: string[]; exit(code: number): never };
 import { writeFileSync } from "node:fs";
-import { DIAGRAMS } from "../mobile/lib/diagrams";
+import { DIAGRAMS, allFigures } from "../mobile/lib/diagrams";
 import { layoutDiagram, specHash, serializeLayout } from "../mobile/lib/diagrams/layout";
 
 const out: Record<string, unknown> = {};
 const t0 = Date.now();
-for (const [id, d] of Object.entries(DIAGRAMS)) {
+for (const [id, d] of [...Object.entries(DIAGRAMS), ...Object.entries(allFigures())]) {
   const L = layoutDiagram(d);
   out[id] = { hash: specHash(d), layout: serializeLayout(L) };
 }

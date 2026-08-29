@@ -11604,26 +11604,26 @@ This is the mechanism everything else sits on, so take it apart properly. How do
 Worked example. `#eclipse` truly occurred 41,000 times this minute, and its seven cells read `41,207 · 43,880 · 41,940 · 52,110 · 41,033 · 46,720 · 44,201`. The estimate is 41,033: 33 high, against a guaranteed bound of ~4,980. The mean (44,441) and the median (43,880) are both worse, because every sample is biased the same way. Only the minimum is an extremum of the contamination rather than an average of it.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="Seven rows of counters; one key hashes to one cell per row; the estimate is the minimum">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 236" role="img" aria-label="Seven rows of counters; one key hashes to one cell per row; the estimate is the minimum">
   <style>
     .r{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
     .c{fill:var(--accent)}
     .m{fill:currentColor;fill-opacity:.85}
-    .t{font:12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.75}
-    .b{font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
   </style>
-  <text class="b" x="20" y="28">#eclipse → 7 hashes → 7 cells</text>
-  <g transform="translate(20,44)">
-    <rect class="r" x="0" y="0" width="560" height="22" rx="4"/><rect class="c" x="88" y="0" width="14" height="22" rx="3"/><text class="t" x="580" y="16">41,207</text>
-    <rect class="r" x="0" y="30" width="560" height="22" rx="4"/><rect class="c" x="301" y="30" width="14" height="22" rx="3"/><text class="t" x="580" y="46">43,880</text>
-    <rect class="r" x="0" y="60" width="560" height="22" rx="4"/><rect class="c" x="196" y="60" width="14" height="22" rx="3"/><text class="t" x="580" y="76">41,940</text>
-    <rect class="r" x="0" y="90" width="560" height="22" rx="4"/><rect class="c" x="470" y="90" width="14" height="22" rx="3"/><text class="t" x="580" y="106">52,110</text>
-    <rect class="r" x="0" y="120" width="560" height="22" rx="4"/><rect class="m" x="358" y="120" width="14" height="22" rx="3"/><text class="b" x="580" y="136">41,033 ← min</text>
-    <rect class="r" x="0" y="150" width="560" height="22" rx="4"/><rect class="c" x="41" y="150" width="14" height="22" rx="3"/><text class="t" x="580" y="166">46,720</text>
-    <rect class="r" x="0" y="180" width="560" height="22" rx="4"/><rect class="c" x="512" y="180" width="14" height="22" rx="3"/><text class="t" x="580" y="196">44,201</text>
+  <text class="b" x="8" y="16">#eclipse → 7 hashes → 7 cells</text>
+  <g transform="translate(8,28)">
+    <rect class="r" x="0" y="0" width="300" height="18" rx="3"/><rect class="c" x="47" y="0" width="10" height="18" rx="2"/><text class="t" x="308" y="13">41,207</text>
+    <rect class="r" x="0" y="24" width="300" height="18" rx="3"/><rect class="c" x="161" y="24" width="10" height="18" rx="2"/><text class="t" x="308" y="37">43,880</text>
+    <rect class="r" x="0" y="48" width="300" height="18" rx="3"/><rect class="c" x="105" y="48" width="10" height="18" rx="2"/><text class="t" x="308" y="61">41,940</text>
+    <rect class="r" x="0" y="72" width="300" height="18" rx="3"/><rect class="c" x="252" y="72" width="10" height="18" rx="2"/><text class="t" x="308" y="85">52,110</text>
+    <rect class="r" x="0" y="96" width="300" height="18" rx="3"/><rect class="m" x="192" y="96" width="10" height="18" rx="2"/><text class="b" x="308" y="109">41,033 ← min</text>
+    <rect class="r" x="0" y="120" width="300" height="18" rx="3"/><rect class="c" x="22" y="120" width="10" height="18" rx="2"/><text class="t" x="308" y="133">46,720</text>
+    <rect class="r" x="0" y="144" width="300" height="18" rx="3"/><rect class="c" x="274" y="144" width="10" height="18" rx="2"/><text class="t" x="308" y="157">44,201</text>
   </g>
-  <text class="t" x="20" y="270">d = 7 rows · w = 32,768 counters per row · 7 × 32,768 × 4 bytes = 917KB, whatever the number of keys</text>
-  <text class="t" x="20" y="290">true count 41,000 · every cell ≥ truth · estimate = min = 41,033 · bound ε·N ≈ 4,980</text>
+  <text class="t" x="8" y="210">7 rows × 32,768 counters × 4 bytes = 917KB, whatever the key count</text>
+  <text class="t" x="8" y="228">true 41,000 · every cell ≥ truth · min = 41,033 · bound ≈ 4,980</text>
 </svg>
 ```
 
@@ -11644,29 +11644,7 @@ Sixty-four workers each hold a grid and a heap. How do we get one global top 50 
 
 **Great: merge the grids, then re-estimate every candidate.** Add the 64 tiles cell by cell: 64 × 229,376 ≈ 14.7M integer adds, ~20 ms. Union the heaps into ~32,000 candidate strings. Then read every candidate from the *merged* grid (32,000 × 7 = 224k probes, ~2 ms) and sort on those numbers. The candidate set is allowed to be lossy, because a key outside the top 500 on every one of 64 shards cannot plausibly be globally top 50 under a heavy-tailed distribution. The counts used to rank it are not allowed to be lossy, which is why the re-estimation is mandatory.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 250" role="img" aria-label="64 tiles sum cell-wise into one grid; 64 heaps union into candidates; candidates are re-estimated against the merged grid">
-  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah)}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box" x="20" y="30" width="150" height="50" rx="8"/><text class="lbl" x="95" y="48">64 tiles</text><text class="sub" x="95" y="66">917KB each, exact counts</text>
-  <rect class="box" x="20" y="150" width="150" height="50" rx="8"/><text class="lbl" x="95" y="168">64 heaps</text><text class="sub" x="95" y="186">500 strings each</text>
-  <rect class="box acc" x="280" y="30" width="170" height="50" rx="8"/><text class="lbl" x="365" y="48">Σ cell by cell</text><text class="sub" x="365" y="66">14.7M adds, ~20ms, exact</text>
-  <rect class="box" x="280" y="150" width="170" height="50" rx="8"/><text class="lbl" x="365" y="168">∪ candidates</text><text class="sub" x="365" y="186">~32,000 keys, lossy is fine</text>
-  <rect class="box acc" x="560" y="90" width="180" height="60" rx="8"/><text class="lbl" x="650" y="110">re-estimate each</text><text class="sub" x="650" y="130">224k probes, ~2ms → top 500</text>
-  <path class="flow" d="M170,55 L280,55"/>
-  <path class="flow" d="M170,175 L280,175"/>
-  <path class="flow" d="M450,55 L520,55 L520,110 L560,110"/>
-  <path class="flow" d="M450,175 L520,175 L520,130 L560,130"/>
-  <text class="sub" x="380" y="230">names come from the heaps · counts come from the merged grid · never from the heaps' own numbers</text>
-</svg>
-```
+[Merging 64 shards: grids add, heaps only nominate](/diagram/trending-topics?figure=merge)
 
 This is also why the stream is partitioned by `hash(key)`. Not for the counts, which merge correctly under any partitioning, but for *nomination*: a shard can only put a key in its heap if it has seen enough of it to believe it is heavy. The price is that a viral key at 200k events/s pins one worker. A skew monitor switches just that key to round-robin above 2× the median shard rate. At 1/64th of its volume it is still the biggest thing on every shard, so it is nominated everywhere.
 
@@ -11683,30 +11661,7 @@ The product ships three named windows. How do we maintain "the last hour" as the
 
 **Great: a ring of tiles, add the newest and subtract the oldest.** Keep the last 60 minute tiles and 24 hour tiles per geo. A 5-minute window is the sum of 5 tiles, an hour is 60, a day is 24 hour tiles. To slide, add the newest tile to the running window grid and subtract the one that just fell off the tail. Subtraction is safe because you are only ever removing increments you previously added, so no cell can go negative. 84 tiles × ~1.8MB ≈ 150MB per geo, 7.5% of a 2GB aggregator, against the 216GB an exact map would need.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 170" role="img" aria-label="A ring of minute tiles; the window is their sum; the tail tile is subtracted as it expires">
-  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
-  <style>
-    .box{fill:none;stroke:currentColor;stroke-width:1.5}
-    .acc{stroke:var(--accent)}
-    .dash{stroke-dasharray:5 4}
-    .flow{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#ah2)}
-    .sub{fill:currentColor;font:12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .edge{fill:currentColor;opacity:.72;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    text{dominant-baseline:middle;text-anchor:middle}
-  </style>
-  <rect class="box acc" x="12" y="70" width="104" height="46" rx="9"/><text class="sub" x="64" y="93">minute m</text>
-  <rect class="box" x="128" y="70" width="104" height="46" rx="9"/><text class="sub" x="180" y="93">m − 1</text>
-  <rect class="box" x="244" y="70" width="104" height="46" rx="9"/><text class="sub" x="296" y="93">m − 2</text>
-  <rect class="box dash" x="360" y="70" width="104" height="46" rx="9"/><text class="sub" x="412" y="93">…</text>
-  <rect class="box" x="476" y="70" width="104" height="46" rx="9"/><text class="sub" x="528" y="93">m − 59</text>
-  <rect class="box acc" x="606" y="64" width="142" height="58" rx="9"/><text class="sub" x="677" y="84">Σ cell-wise</text><text class="sub" x="677" y="104">= 1h window</text>
-  <path class="flow" d="M116,93 L128,93"/><path class="flow" d="M232,93 L244,93"/><path class="flow" d="M348,93 L360,93"/><path class="flow" d="M464,93 L476,93"/><path class="flow" d="M580,93 L606,93"/>
-  <path class="flow dash" d="M528,70 L528,40 L64,40 L64,66"/>
-  <text class="edge" x="300" y="30">tail evicted: subtract cell-wise, never goes negative</text>
-  <text class="edge" x="380" y="150">5m = sum of 5 tiles · 1h = 60 · 24h = 24 hour tiles · ~150MB per geo</text>
-</svg>
-```
+[The ring of tiles: a window is a sum, sliding is add and subtract](/diagram/trending-topics?figure=ring)
 
 #### Trending, not popular
 We now have accurate-enough counts for ~500 candidates a minute. Which of them are *trending*?
@@ -11720,23 +11675,23 @@ We now have accurate-enough counts for ~500 candidates a minute. Which of them a
 **Great: score against each key's own baseline.** The Baseline store keeps, per key, an EWMA of its rate and of its variance at a 7-day half-life. An EWMA is a running average that forgets the past on a half-life, so one spike does not become the new normal. For the top ~100k keys it also keeps a minute-of-day profile, because "coffee" is normal at 8am and strange at 3am. The score is z = (rate now − usual rate) ÷ usual spread.
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210" role="img" aria-label="Two keys: a famous one slightly above its normal scores low; a small one far above its normal scores high">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 210" role="img" aria-label="Two keys: a famous one slightly above its normal scores low; a small one far above its normal scores high">
   <style>
     .bar{fill:var(--accent);fill-opacity:.25;stroke:var(--accent);stroke-width:1.5}
     .bar2{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.5}
     .line{stroke:currentColor;stroke-width:1.5;stroke-dasharray:4 3}
-    .lbl{fill:currentColor;font:600 13px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
-    .sub{fill:currentColor;opacity:.75;font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
     text{dominant-baseline:middle}
   </style>
-  <text class="lbl" x="20" y="24">#monday · usually 10,000/min, spread 1,500</text>
-  <rect class="bar2" x="20" y="40" width="300" height="22" rx="4"/><rect class="bar" x="20" y="68" width="315" height="22" rx="4"/>
-  <line class="line" x1="320" y1="34" x2="320" y2="96"/>
-  <text class="sub" x="345" y="51">normal 10,000</text><text class="sub" x="345" y="79">now 10,500 → z = (10,500 − 10,000) ÷ 1,500 = 0.33 · ignored</text>
-  <text class="lbl" x="20" y="130">#eclipse · usually 10/min, spread 4</text>
-  <rect class="bar2" x="20" y="146" width="3" height="22" rx="2"/><rect class="bar" x="20" y="174" width="150" height="22" rx="4"/>
-  <line class="line" x1="23" y1="140" x2="23" y2="202"/>
-  <text class="sub" x="40" y="157">normal 10</text><text class="sub" x="180" y="185">now 500 → z = (500 − 10) ÷ 4 = 122 · top of the list</text>
+  <text class="lbl" x="8" y="14">#monday · usually 10,000/min, spread 1,500</text>
+  <rect class="bar2" x="8" y="28" width="240" height="16" rx="3"/><text class="sub" x="256" y="36">normal 10,000</text>
+  <rect class="bar" x="8" y="50" width="252" height="16" rx="3"/><text class="sub" x="268" y="58">now 10,500</text>
+  <text class="sub" x="8" y="80">z = (10,500 − 10,000) ÷ 1,500 = 0.33 · ignored</text>
+  <text class="lbl" x="8" y="114">#eclipse · usually 10/min, spread 4</text>
+  <rect class="bar2" x="8" y="128" width="3" height="16" rx="2"/><text class="sub" x="18" y="136">normal 10</text>
+  <rect class="bar" x="8" y="150" width="120" height="16" rx="3"/><text class="sub" x="136" y="158">now 500</text>
+  <text class="sub" x="8" y="180">z = (500 − 10) ÷ 4 = 122 · top of the list</text>
 </svg>
 ```
 

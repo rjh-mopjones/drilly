@@ -56,14 +56,20 @@ function SvgHost({
       vbW = p[2] || 0;
       vbH = p[3] || 0;
     }
-    if (!vbW || !vbH) {
-      try {
-        const b = el.getBBox();
-        vbW = vbW || b.width;
-        vbH = vbH || b.height;
-      } catch {
-        /* not laid out yet */
+    // Size from what is drawn, not from the declared box: a figure that fills
+    // the top third of a tall viewBox otherwise leaves a void under it.
+    try {
+      const b = el.getBBox();
+      if (b.width > 0 && b.height > 0) {
+        const pad = 8;
+        if (!vbW || !vbH || vbH > b.height + 60 || vbW > b.width + 120) {
+          vbW = b.width + pad * 2;
+          vbH = b.height + pad * 2;
+          el.setAttribute("viewBox", `${b.x - pad} ${b.y - pad} ${vbW} ${vbH}`);
+        }
       }
+    } catch {
+      /* not laid out yet */
     }
     el.style.width = vbW ? `${vbW}px` : "";
     el.style.height = vbH ? `${vbH}px` : "auto";
@@ -80,7 +86,8 @@ function SvgHost({
         (host.parentElement && host.parentElement.clientWidth) ||
         host.clientWidth ||
         vbW;
-      const s = vbW > 0 && avail > 0 && vbW > avail ? avail / vbW : 1;
+      // Shrink to fit; grow a little on wide columns so phone-sized figures stay legible.
+      const s = vbW > 0 && avail > 0 ? Math.min(avail / vbW, 1.4) : 1;
       el.style.transform = `scale(${s})`;
       host.style.height = vbH ? `${Math.ceil(vbH * s)}px` : "";
       host.style.width = "100%";

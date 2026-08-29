@@ -833,4 +833,81 @@ export const TRENDING_TOPICS: Diagram = {
       },
     },
   ],
+  figures: {
+    merge: {
+      title: "Merging 64 shards: grids add, heaps only nominate",
+      nodes: [
+        { id: "tiles", label: "64 sealed tiles", sub: "917KB each, exact counts", kind: "blob", col: 0, row: 0 },
+        { id: "heaps", label: "64 heaps", sub: "500 key strings each", kind: "database", col: 1, row: 0 },
+        {
+          id: "sum",
+          label: "Σ cell by cell",
+          sub: "14.7M adds, ~20ms, exact",
+          kind: "service",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The 64 tiles added cell by cell into one merged grid.",
+            why: "A sketch of A plus a sketch of B is exactly the sketch of A ∪ B, so the merge adds no error. 64 × 229,376 cells is ~14.7M integer additions, about 20ms on one core.",
+          },
+        },
+        {
+          id: "union",
+          label: "∪ candidates",
+          sub: "~32,000 keys, lossy is fine",
+          kind: "service",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "The 64 heaps unioned into one candidate set of key strings.",
+            why: "The heaps supply names only. Their per-shard counts are discarded here, because a shard's estimate is local and the ranking must use global counts.",
+          },
+        },
+        {
+          id: "reest",
+          label: "Re-estimate each",
+          sub: "224k probes, ~2ms → top 500",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "Every candidate read from the merged grid, sorted, truncated to 500.",
+            why: "32,000 candidates × 7 cells is 224k probes, ~2ms. This is what makes a lossy candidate set safe: the names may miss a key no shard nominated, but the counts that order them are global.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "tiles", to: "sum", tier: "hot", step: 1, label: "add, exactly" },
+        { id: "e2", from: "heaps", to: "union", tier: "data", label: "names only" },
+        { id: "e3", from: "sum", to: "reest", tier: "hot", step: 2, label: "merged grid" },
+        { id: "e4", from: "union", to: "reest", tier: "data", label: "~32k candidates" },
+      ],
+    },
+    ring: {
+      title: "The ring of tiles: a window is a sum, sliding is add and subtract",
+      nodes: [
+        { id: "t0", label: "Minute m (newest)", sub: "917KB tile, just sealed", kind: "blob", col: 0, row: 0 },
+        { id: "t1", label: "Minute m − 1", sub: "tile", kind: "blob", col: 0, row: 1 },
+        { id: "t2", label: "Minutes m − 2 … m − 58", sub: "57 more tiles", kind: "blob", col: 0, row: 2 },
+        { id: "t59", label: "Minute m − 59 (tail)", sub: "falls off next minute", kind: "blob", col: 0, row: 3 },
+        {
+          id: "win",
+          label: "1h window grid",
+          sub: "Σ of 60 tiles, cell by cell",
+          kind: "cache",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "The running sum of the last 60 minute tiles, one grid per geo.",
+            why: "Sketches add exactly, so they subtract exactly. To slide, add the newest tile and subtract the one that fell off the tail. You only ever remove increments you previously added, so no cell can go negative. 84 tiles × ~1.8MB ≈ 150MB per geo.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "t0", to: "win", tier: "hot", step: 1, label: "add newest" },
+        { id: "e2", from: "t1", to: "win", tier: "data", label: "already in the sum" },
+        { id: "e3", from: "t59", to: "win", tier: "control", label: "subtract when evicted" },
+      ],
+    },
+  },
 };

@@ -2,7 +2,7 @@ import { useLocalSearchParams, Stack, router } from "expo-router";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ArchDiagram from "../../components/ArchDiagram";
-import { getDiagram, itemRoute } from "../../lib/diagrams";
+import { figureDiagram, getDiagram, itemRoute } from "../../lib/diagrams";
 import { loadSource } from "../../lib/content";
 import { useSource } from "../../lib/manifest";
 import { parseContent, type Pattern } from "../../lib/parser";
@@ -17,8 +17,9 @@ import { useTheme, type Palette } from "../../lib/theme";
 export default function DiagramScreen() {
   const palette = useTheme();
   const styles = useMemo(() => makeStyles(palette), [palette]);
-  const params = useLocalSearchParams<{ id: string }>();
+  const params = useLocalSearchParams<{ id: string; figure?: string }>();
   const diagram = getDiagram(params.id ?? "");
+  const figure = diagram && params.figure ? figureDiagram(diagram, params.figure) : undefined;
   const source = useSource(diagram?.sourceId ?? "");
 
   const [items, setItems] = useState<Pattern[] | null>(null);
@@ -60,6 +61,34 @@ export default function DiagramScreen() {
   const idx = items?.findIndex((it) => it.id === diagram.itemId) ?? -1;
   const hasPrev = idx > 0;
   const hasNext = items != null && idx >= 0 && idx < items.length - 1;
+
+  if (figure) {
+    return (
+      <View style={styles.root}>
+        <Stack.Screen options={{ title: figure.title }} />
+        <View style={styles.header}>
+          <Pressable
+            onPress={() => router.push(`/reader/${diagram.sourceId}/${diagram.itemId}` as never)}
+            style={styles.backButton}
+            accessibilityLabel="Back to the write-up"
+          >
+            <Text style={styles.backArrow}>‹</Text>
+          </Pressable>
+          <View style={styles.headerTitle}>
+            <Text style={styles.crumb} numberOfLines={1}>
+              {diagram.question.toUpperCase()}
+            </Text>
+            <Text style={styles.subtitle} numberOfLines={1}>
+              {figure.title}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.canvas}>
+          <ArchDiagram diagram={figure} palette={palette} embedded />
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.root}>

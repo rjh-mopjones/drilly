@@ -233,6 +233,19 @@ export interface DiagramOverview {
   numbers?: Figure[];
 }
 
+/**
+ * A small diagram in the same language as the big one, embedded in the
+ * write-up where a mechanism needs its own picture (push vs pull lanes, a
+ * ring of tiles, a race). Laid out and drawn by the same engine as the main
+ * diagram, so it reads the same and is tappable where a box has a `detail`.
+ * Author it tall rather than wide: at most 2 columns reads on a phone.
+ */
+export interface FigureSpec {
+  title: string;
+  nodes: DiagramNode[];
+  edges: DiagramEdge[];
+}
+
 export interface Diagram {
   id: string;
   title: string;
@@ -244,4 +257,6 @@ export interface Diagram {
   itemId: number;
   nodes: DiagramNode[];
   edges: DiagramEdge[];
+  /** Figures the write-up embeds with `/diagram/<id>?figure=<key>`. */
+  figures?: Record<string, FigureSpec>;
 }

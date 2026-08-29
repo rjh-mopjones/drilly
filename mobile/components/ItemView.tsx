@@ -17,7 +17,9 @@ import {
 import { useSettings } from "../lib/settings";
 import { useTheme, MONO_FONT, type Palette } from "../lib/theme";
 import { markdownRules } from "./CodeBlock";
-import { getDiagram, getDiagramForItem, itemRoute } from "../lib/diagrams";
+import { figureDiagram, getDiagram, getDiagramForItem, itemRoute } from "../lib/diagrams";
+import { layoutFor, type SerializedLayout } from "../lib/diagrams/layout";
+import LAYOUTS from "../lib/diagrams/layouts.json";
 import { GlossedText, type Terms } from "./GlossedText";
 import ArchDiagram from "./ArchDiagram";
 import { CopyButton } from "./CopyButton";
@@ -633,10 +635,10 @@ function makeRules(p: Palette, terms: Terms | undefined, push: (url: string) => 
       }
       const link = soleLink(node);
       const href = link?.attributes?.href ?? "";
+      const caption = (link?.children ?? []).map((c) => c.content ?? "").join("");
       const m = href.match(/^\/diagram\/([^/?]+)\?focus=([^&]+)/);
       const d = m ? getDiagram(m[1]) : undefined;
       if (m && d) {
-        const caption = (link?.children ?? []).map((c) => c.content ?? "").join("");
         return (
           <View key={node.key} style={{ marginVertical: 10 }}>
             <View style={{ height: 320, borderWidth: 1, borderColor: p.border, borderRadius: 10, overflow: "hidden", backgroundColor: p.surface }}>
@@ -647,6 +649,29 @@ function makeRules(p: Palette, terms: Terms | undefined, push: (url: string) => 
               {caption ? " · " : ""}
               <Text style={{ color: p.accent }} onPress={() => push(`/diagram/${d.id}`)}>
                 open the full diagram
+              </Text>
+            </Text>
+          </View>
+        );
+      }
+      const fm = href.match(/^\/diagram\/([^/?]+)\?figure=([^&]+)/);
+      const fd = fm ? getDiagram(fm[1]) : undefined;
+      const fig = fm && fd ? figureDiagram(fd, fm[2]) : undefined;
+      if (fig) {
+        // Height follows the figure's own shape, so a tall two-column figure
+        // gets the room it needs instead of shrinking into a fixed box.
+        const L = layoutFor(fig, (LAYOUTS as unknown as Record<string, { hash: string; layout: SerializedLayout }>)[fig.id]);
+        const height = Math.round(Math.min(560, Math.max(180, 340 * (L.bounds.h / Math.max(L.bounds.w, 1)) + 40)));
+        return (
+          <View key={node.key} style={{ marginVertical: 10 }}>
+            <View style={{ height, borderWidth: 1, borderColor: p.border, borderRadius: 10, overflow: "hidden", backgroundColor: p.surface }}>
+              <ArchDiagram diagram={fig} palette={p} embedded />
+            </View>
+            <Text style={{ color: p.textMuted, fontSize: 12.5, marginTop: 6 }}>
+              {caption || fig.title}
+              {" · "}
+              <Text style={{ color: p.accent }} onPress={() => push(`/diagram/${fd!.id}?figure=${fm![2]}`)}>
+                open full size
               </Text>
             </Text>
           </View>

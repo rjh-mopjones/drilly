@@ -24,7 +24,7 @@
 declare const process: { argv: string[]; exit(code: number): never };
 
 import { readFileSync } from "node:fs";
-import { DIAGRAMS } from "../mobile/lib/diagrams";
+import { DIAGRAMS, figureDiagram } from "../mobile/lib/diagrams";
 import {
   beatLights,
   beatText,
@@ -316,6 +316,51 @@ const ids = want.length ? want : Object.keys(DIAGRAMS);
 let failed = 0;
 let warned = 0;
 
+/**
+ * A figure is a small diagram: same router, same rules about crossings and
+ * boxes under arrows, but judged on a phone-width canvas because that is
+ * where it is read, and its boxes may carry no detail.
+ */
+const FIGURE_CANVAS_W = 340;
+const FIGURE_CANVAS_H = 520;
+function checkFigure(fig: Diagram): Report {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+  for (const n of fig.nodes) {
+    if (seen.has(n.id)) errors.push(`duplicate node id "${n.id}"`);
+    seen.add(n.id);
+    if (n.label.length > MAX_NODE_LABEL) warnings.push(`"${n.label}" is ${n.label.length} chars; it will be cut off`);
+    if (n.sub && n.sub.length > MAX_NODE_SUB) warnings.push(`sub of "${n.label}" is ${n.sub.length} chars; it will be cut off`);
+  }
+  for (const e of fig.edges) {
+    if (!seen.has(e.from)) errors.push(`edge ${e.id}: no node "${e.from}"`);
+    if (!seen.has(e.to)) errors.push(`edge ${e.id}: no node "${e.to}"`);
+    if (e.label && e.label.length > MAX_LABEL) errors.push(`edge ${e.id} label ${e.label.length} chars (max ${MAX_LABEL})`);
+    if (!e.tier) errors.push(`edge ${e.id} has no tier`);
+  }
+  const texts: string[] = [fig.title, ...fig.nodes.flatMap((n) => [n.label, n.sub ?? "", n.detail?.what ?? "", n.detail?.why ?? ""]), ...fig.edges.flatMap((e) => [e.label ?? "", e.detail?.what ?? "", e.detail?.why ?? ""])];
+  for (const s of texts) {
+    for (const re of CROSS_REF) if (re.test(s)) errors.push(`reference to something the reader cannot see: "${s.match(re)?.[0]}"`);
+    for (const re of COACHING) if (re.test(s)) errors.push(`explains the interview or the drawing: "${s.match(re)?.[0]}"`);
+  }
+  if (errors.some((m) => m.includes("no node"))) return { errors, warnings, line: "" };
+  const L = layoutDiagram(fig);
+  const boxes = L.diagram.nodes.filter((n) => !isFrame(n.kind) || L.collapsed.has(n.id));
+  const cols = new Set(boxes.map((n) => n.col)).size;
+  const zoom = Math.min(FIGURE_CANVAS_W / L.bounds.w, FIGURE_CANVAS_H / L.bounds.h);
+  if (boxes.length > 8) errors.push(`${boxes.length} boxes (max 8 in a figure)`);
+  if (cols > 2) warnings.push(`${cols} columns; a figure reads on a phone at 2`);
+  if (zoom < 0.4) errors.push(`phone zoom ${zoom.toFixed(2)} < 0.40: ${Math.round(L.bounds.w)}×${Math.round(L.bounds.h)} units is too wide for a phone; stack it`);
+  else if (zoom < 0.55) warnings.push(`phone zoom ${zoom.toFixed(2)}: readable only after a pinch`);
+  if (L.crossings > 0) errors.push(`${L.crossings} crossing(s)`);
+  if (L.boxHits > 0) errors.push(`${L.boxHits} arrow(s) run under or along a box`);
+  if (Object.keys(L.routes).length < fig.edges.length) errors.push(`${fig.edges.length - Object.keys(L.routes).length} edge(s) could not be routed`);
+  if (precomputed[fig.id]?.hash !== specHash(fig)) warnings.push("precomputed layout is stale");
+  const line = `phone zoom ${zoom.toFixed(2)}  boxes ${String(boxes.length).padStart(2)}  edges ${String(fig.edges.length).padStart(2)}  cols ${cols}  cross ${L.crossings}  hits ${L.boxHits}`;
+  return { errors, warnings, line };
+}
+
 for (const id of ids) {
   const d = DIAGRAMS[id];
   if (!d) {
@@ -328,9 +373,20 @@ for (const id of ids) {
   if (errors.length) failed++;
   warned += warnings.length;
   console.log(`${tag} ${id.padEnd(22)} ${line}`);
-  if (summary) continue;
-  for (const m of errors) console.log(`      ${m}`);
-  for (const m of warnings) console.log(`      (warn) ${m}`);
+  if (!summary) {
+    for (const m of errors) console.log(`      ${m}`);
+    for (const m of warnings) console.log(`      (warn) ${m}`);
+  }
+  for (const [key, fig] of Object.entries(d.figures ?? {})) {
+    const r = checkFigure(figureDiagram(d, key) as Diagram);
+    const ftag = r.errors.length ? "✗" : r.warnings.length ? "~" : "✓";
+    if (r.errors.length) failed++;
+    warned += r.warnings.length;
+    console.log(`  ${ftag} figure ${key.padEnd(15)} ${r.line}`);
+    if (summary) continue;
+    for (const m of r.errors) console.log(`        ${m}`);
+    for (const m of r.warnings) console.log(`        (warn) ${m}`);
+  }
 }
 
 console.log(`\n${ids.length} diagram(s): ${ids.length - failed} clean, ${failed} failing, ${warned} warning(s)`);

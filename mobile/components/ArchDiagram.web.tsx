@@ -692,9 +692,14 @@ export default function ArchDiagram({
     [diagram, layout, palette, sel, lit, litEdges, hover],
   );
 
-  const onNodeClick = useCallback((_e: unknown, n: Node) => {
-    setSel((cur) => (cur?.kind === "node" && cur.id === n.id ? null : { kind: "node", id: n.id }));
-  }, []);
+  const onNodeClick = useCallback(
+    (_e: unknown, n: Node) => {
+      // A figure box may carry no detail; then there is nothing to open.
+      if (!diagram.nodes.find((x) => x.id === n.id)?.detail) return;
+      setSel((cur) => (cur?.kind === "node" && cur.id === n.id ? null : { kind: "node", id: n.id }));
+    },
+    [diagram],
+  );
   const onEdgeClick = useCallback((_e: unknown, ed: Edge) => selectEdge(ed.id), [selectEdge]);
 
   const wrapRef = useRef<HTMLDivElement | null>(null);

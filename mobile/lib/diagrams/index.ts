@@ -127,6 +127,29 @@ export function getDiagram(id: string): Diagram | undefined {
   return DIAGRAMS[id];
 }
 
+/** A figure as a Diagram of its own, so the layout engine and renderer need no special case. */
+export function figureDiagram(d: Diagram, key: string): Diagram | undefined {
+  const f = d.figures?.[key];
+  if (!f) return undefined;
+  return {
+    id: `${d.id}#${key}`,
+    title: f.title,
+    question: d.question,
+    overview: { shape: "", beats: [], crux: "" },
+    sourceId: d.sourceId,
+    itemId: d.itemId,
+    nodes: f.nodes,
+    edges: f.edges,
+  };
+}
+
+/** Every figure of every diagram, keyed `<diagram>#<figure>`, for the layout build and the gate. */
+export function allFigures(): Record<string, Diagram> {
+  const out: Record<string, Diagram> = {};
+  for (const d of Object.values(DIAGRAMS)) for (const key of Object.keys(d.figures ?? {})) out[`${d.id}#${key}`] = figureDiagram(d, key) as Diagram;
+  return out;
+}
+
 /** The diagram belonging to a reader item, if one exists. */
 /**
  * Where a tap on an item goes. A question with a diagram opens on the diagram
