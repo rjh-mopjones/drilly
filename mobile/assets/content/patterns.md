@@ -11226,3 +11226,233 @@ Read it back through the numbers. 11.5 petabytes of egress is what turns the que
 **Why is comparing an updated cohort against last week's numbers not good enough to trigger an automatic halt?** Crash rate, battery drain and engagement all shift for reasons unrelated to any particular build, so a historical comparison conflates the new release with everything else that changed in the meantime. Only a concurrent, never-updated holdback controls for those confounders.
 
 **Why does the update client need its own, slower release track separate from the payload it delivers?** It is the one component whose failure removes the device's only remaining path to receiving any future fix at all. Every other part of this system is recoverable through a forward release; a broken updater is not, because nothing can reach the device to deliver that fix.
+### 57. Design a Betting Odds Model Pipeline and Trader Platform
+#### Understanding the problem
+A sports-betting analytics firm has three things that do not yet talk to each other. About 120 scrapers pull websites and vendor feeds and write CSV files. A statistical model, written in Python, reads CSV from local disk and produces suggested odds. And a handful of traders need to see those odds beside the real-time prices of ten bookmakers, so they can spot where the model disagrees with the market.
+
+The model runs once a day, but it also has to re-run during the day when something changes: a team sheet lands, the weather turns. Nothing in the brief is large. There are ~400 fixtures a day, ~20 traders, and the biggest file is a few hundred megabytes. What makes it hard is *time*, in three different shapes.
+
+First, files are written by programs that share no clock. A model that reads a folder sees whatever happens to be there, including the half of a file that has been written so far.
+
+Second, a rerun has a deadline. Lineups are published about 60 minutes before kick-off. A run that takes 25 minutes and is queued behind another run leaves the traders pricing blind.
+
+Third, the two feeds the traders look at run on different clocks. A model figure is true of one moment; the market moves every second. Put them side by side without saying *when* each was true, and the "edge" between them is fiction.
+
+> **What this is not.** It is not a big-data pipeline. Eight gigabytes a day fits on a laptop. The scrapers and the model already exist and should be left alone. The design's job is the joints between three systems: what a file *is* once written, what a run *is* once started, and what a price *is* once shown.
+
+#### Requirements and the numbers
+**Functional.** Scrapers write CSV; the model reads CSV from local disk. A daily run at 06:00 over everything. Reruns triggered by events, scoped to the fixtures they touch, and on demand from a trader. Every run's output kept, addressable by run. Traders see the model's odds beside each bookmaker's live price, with the edge between them, and can tell how old each figure is.
+
+**Non-functional.** A rerun triggered by a lineup lands on screen within 5 minutes. An in-play market change is on screen within 1 second; pre-match within 30 seconds. A run is repeatable on the same inputs. No file is ever read half-written.
+
+Four numbers decide the design.
+
+**How much data, in how many pieces?** ~120 sources, most scraped a few times a day, one CSV of 2–5MB per scrape; a few historical exports at ~400MB. Call it **~2,500 files and ~8GB a day**, ~3TB a year if kept for ever, which it should be, because backtests need history.
+
+**How long does the model take?** A full run reads the day's ~8GB and prices ~400 fixtures × 25 markets on a 16-core box: **~25 minutes**. A lineup file touches 1 to 10 fixtures. Pricing only those is under 5% of the work: **~2 minutes**. So a rerun *can* be fast, but only if something knows which fixtures to price.
+
+**How fast does the market move?** 400 fixtures × 25 markets × ~3 selections is ~30k selections, × 10 bookmakers is **300k prices**. Pre-match they move slowly; in play a fixture's prices change on every event, up to **~5,000 changes a second** across ~30 live matches. The vendor's REST API allows ~20 requests a second per key; its in-play feed is a stream.
+
+**How many readers?** **~20 traders**, each watching ~50 fixtures. This is the number that keeps the read side small: the whole book, every price and every model row, is ~60MB, and it fits in one process.
+
+> **The numbers to carry.** ~2,500 files and ~8GB a day · ~25 min full run vs ~2 min scoped rerun · 5-min rerun target against lineups at ~60 min before kick-off · 300k prices, ~5,000 changes/s in play · ~20 traders, ~60MB of state.
+
+#### Two problems in one pipeline
+The brief reads as one pipeline, but it is a **batch** problem stapled to a **streaming** problem, and they want different things.
+
+The batch half moves *files* and runs a *job*. It cares about atomicity, reproducibility and knowing which fixtures a file touches. Its unit of time is a run.
+
+The streaming half moves *prices* and keeps a *book*. It cares about freshness, change detection and sequence. Its unit of time is a message.
+
+They meet in exactly one place, the trader's screen, and the design's hardest question is what that meeting means. Naming the two halves keeps the parts honest: nothing on the batch side needs to be fast, and nothing on the streaming side needs to be durable for more than a day.
+
+The entities:
+
+- **File version** `{source, key, version, checksum, rows, produced_at}`: one scrape's CSV, immutable.
+- **Snapshot** `{snapshot_id, sealed_at, [file versions]}`: one version per source at one moment.
+- **Run** `{run_id, snapshot_id, scope: [fixture_id], state}`: one execution of the model.
+- **Model row** `{run_id, fixture, market, selection, prob, fair_odds, as_of, snapshot_id}`.
+- **Price** `{bookmaker, fixture, market, selection, odds, seq, received_at}`.
+
+And the interfaces that matter:
+
+```
+PUT  s3://raw/{source}/{date}/{time}.csv          (scraper → store, atomic, versioned)
+POST /runs        { snapshot_id, scope, trigger }  (orchestrator → runner)
+WS   /book?fixtures=…&since_seq=1204                (screen → gateway)
+       ← { type:"snapshot", seq, rows:[…] }
+       ← { type:"delta", seq, price | model_row }
+POST /runs/rerun  { fixture_id }                    (screen → orchestrator)
+```
+
+#### High-level design
+Follow the numbered arrows. The batch path runs from the scrapers to the Odds store; the streaming path runs from the bookmakers to the screen; they meet in the Trader gateway.
+
+[The hot path, ① to ⑧](/diagram/odds-pipeline?focus=e2,e4,e5,e6,e7,e11,e12,e13)
+
+1. A **Scraper** finishes and uploads its CSV to the **Raw CSV store**, an object store with versioning on. The object appears only once complete.
+2. The store's object-created event lands in the **Catalog**, which records the version and seals a new snapshot. If the source is rerun-tagged, the Catalog tells the **Orchestrator** which fixtures the file touches.
+3. The Orchestrator coalesces triggers for 30 seconds, then sends one job to the **Model runner**: run_id, snapshot_id, scope.
+4. The runner pulls only the objects in the snapshot it does not already hold, ~2MB for a lineup, and lays the snapshot out as a local directory.
+5. The model runs on plain local CSV and its rows are written to the **Odds store** under the run_id; the runner announces run_published on the **Odds bus**.
+6. Separately, the **Market ingester** polls and streams the **Bookmaker APIs**, maps their names onto ours, and publishes only changed prices to the bus.
+7. The **Trader gateway** consumes both: prices update its in-memory book, run_published makes it load the run's rows.
+8. Each **Trader UI** gets a snapshot on connect and then deltas over a WebSocket, each with a sequence number.
+
+> **Why the flow is shaped this way.** The model is never asked to be fast; the streaming side is never asked to be durable. The scrapers change by one line, the model by zero. Everything the design adds sits between existing things, and each addition answers one of the three clocks.
+
+#### Files that are safe to read
+The model reads a directory. What has to be true of that directory for the run to be correct?
+
+[Where a file becomes a fact: the store, the event, the Catalog](/diagram/odds-pipeline?focus=scrapers,blob,catalog,e2,e3)
+
+**Bad: a shared network folder.** Scrapers write into it, the model reads from it. A file system shows a file as it grows. A 400MB export at 10MB/s is visible and half-written for ~40 seconds, and a model that starts inside that window reads half the rows and prices every fixture wrong. Nothing errors. The same folder also has no notion of *which* version a run read, so the run cannot be repeated.
+
+**Good: write to a temporary name, then rename.** A rename is atomic on one file system, so a reader sees either no file or a complete one. Add a `.done` marker or a manifest per scrape and the model can wait for it. It fixes the partial read. It does not fix the rest: the folder still holds one version of each file, so a rerun triggered at 14:02 and a daily run at 06:00 cannot both say what they read, and a scraper that overwrites yesterday's lineups destroys the input of a run still in flight.
+
+**Great: a versioned object store, and a Catalog that seals snapshots.** An object store gives atomicity for free: the object does not exist until the last byte is written. With versioning on, a new scrape of the same source is a *new version*, never an overwrite, so any run that pinned the old version still reads it. The Catalog turns each object-created event into a row, with checksum, row count and produced_at read from the file header, and seals a **snapshot**: one version per source at one moment, under an id.
+
+[A snapshot: one version per source, sealed under an id](/diagram/odds-pipeline?figure=snapshot)
+
+Pinning a run to a snapshot id is what buys the two things a folder cannot give. **Reproducibility**: the run reads the same bytes a month later. **Staleness**: a fixture whose newest snapshot is newer than the run that priced it is, by definition, stale, and a screen can say so without guessing.
+
+> **The one rule for the scrapers.** Upload the CSV as one atomic object to `source/date/time`, and never overwrite. That is a ten-line change per scraper. Everything else in this half of the design follows from it.
+
+The Catalog also does the boring safety work: a file whose row count is under 20% of its source's 7-day median, or whose columns differ, is quarantined, and the previous version stays in the snapshot with a `data_stale` flag on the fixtures it feeds.
+
+#### Getting the CSVs onto the model's disk
+The model insists on local files. It is worth taking that requirement seriously rather than arguing with it: local files are the one interface that never changes under the model's feet.
+
+[The runner pulls what it lacks from the store](/diagram/odds-pipeline?focus=blob,runner,e6)
+
+**Bad: mount the object store as a file system.** Every read becomes an HTTP request at ~20ms. A pandas load that pages through a file in 4KB reads makes thousands of them, and the full ~8GB takes ~20 minutes to read before the model has done any arithmetic. Fine for a demo, and a 25-minute run becomes a 45-minute one.
+
+**Good: sync the whole snapshot before each run.** Pull every object in the snapshot to a fresh directory, ~8GB at ~200MB/s, about 40 seconds. Simple and correct. It is fine for the 06:00 run and wrong for a rerun: 40 seconds and 8GB of transfer to reprice two fixtures because one 12KB lineup file changed.
+
+**Great: a content-addressed cache, and a snapshot as a directory of links.** The runner stores every file under the hash of its bytes. Making a snapshot local means listing the snapshot's hashes, pulling the ones not already present, verifying each, and then building a directory of links into the cache. A lineup rerun pulls ~2MB. The daily run pulls the day's new files once. The model sees a plain directory of CSV and cannot tell the difference. Eviction by last use above 80% of the disk keeps a year of versions from filling it.
+
+Two details make it safe. The directory is built only after every file is present and its hash verified, so a half-pulled snapshot is never something the model can start on. And the model is started *on the directory*, never on the cache, so the cache can evict without a running job noticing.
+
+#### One run at a time, reruns in minutes
+The model has two rhythms: a scheduled full run and event-driven reruns. Who decides when it runs, on what, and which run wins?
+
+[The Orchestrator: triggers in, one job out](/diagram/odds-pipeline?focus=catalog,orchestrator,runner,e4,e5,e14)
+
+**Bad: cron for the daily run, and a script anyone can call for a rerun.** Two people press rerun in the same minute and the model runs twice on the same inputs. A rerun starts while the daily run is writing, and the Odds store holds a mix of both. A lineup that arrives in four files over eight seconds triggers four reruns. And nothing knows that the third rerun in the queue is already out of date.
+
+**Good: a queue of run requests and a single worker.** Serialises the runs and stops the double-write. Still every trigger becomes a run, so a busy Saturday queues ~60 of them and the last lineup of the afternoon waits behind an hour of stale reruns.
+
+**Great: an Orchestrator with coalescing, scope and supersession.** It holds a jobs table in the Catalog, not in memory, so a restart forgets nothing. Three rules do the work.
+
+- **Coalesce.** Triggers are held for 30 seconds and merged into one job whose scope is the union of the fixtures they touch. Four files become one run. The 30 seconds cost 10% of the rerun budget and save most of the queue.
+- **Scope.** The Catalog knows which fixture ids a file names, so the job carries the list and the runner prices only those. A file naming more than 50 fixtures is deferred to the daily run whatever its tag; a rerun that would take over 5 minutes is refused, not started.
+- **Supersede.** One job in flight per model. A job still *queued* when a newer trigger arrives is replaced by it, with the union of both scopes. The model never runs on inputs already superseded.
+
+A trader's rerun-now is just another trigger, and it is refused with *already current* if the fixture's current run already used the newest snapshot.
+
+**The rerun budget.** Lineups land ~60 minutes before kick-off; the target is odds on screen within 5.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 146" role="img" aria-label="Rerun budget: scrape, register, coalesce, pull, model and publish add to about 3.5 minutes against a 5-minute target">
+  <style>
+    .seg{fill:var(--accent);fill-opacity:.25;stroke:var(--accent);stroke-width:1.2}
+    .big{fill:var(--accent);fill-opacity:.55;stroke:var(--accent);stroke-width:1.2}
+    .tgt{stroke:currentColor;stroke-width:1.5;stroke-dasharray:4 3}
+    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+  </style>
+  <text class="b" x="8" y="16">Lineup published → new odds on screen</text>
+  <g transform="translate(8,28)">
+    <rect class="seg" x="0" y="0" width="76" height="20" rx="3"/>
+    <rect class="seg" x="76" y="0" width="3" height="20"/>
+    <rect class="seg" x="79" y="0" width="38" height="20" rx="3"/>
+    <rect class="seg" x="117" y="0" width="3" height="20"/>
+    <rect class="big" x="120" y="0" width="152" height="20" rx="3"/>
+    <rect class="seg" x="272" y="0" width="3" height="20"/>
+    <line class="tgt" x1="380" y1="-6" x2="380" y2="26"/>
+  </g>
+  <text class="t" x="8" y="70">scrape ≤ 60s · register ~1s · coalesce 30s · pull under 1s</text>
+  <text class="t" x="8" y="88">scoped model ~120s (dark) · write + publish ~1s</text>
+  <text class="b" x="8" y="112">≈ 3.5 min, target 5 min (dashed line)</text>
+  <text class="t" x="8" y="132">a full 25-min run would cross the line five times over</text>
+</svg>
+```
+
+Scrape at most 60 seconds on the lineup scraper's 1-minute cadence, upload and register ~1 second, coalesce 30 seconds, pull under 1 second, scoped model ~2 minutes, write and publish ~1 second: **~3.5 minutes**. Traders get ~55 minutes of priced market. Note where the budget goes: the model itself is under two thirds of it, and the rest is waiting on purpose.
+
+#### Live prices on a trader's screen
+The other half of the screen is ten bookmakers' prices, moving. How do ~5,000 changes a second reach 20 screens within a second, without any screen doing 5,000 things a second?
+
+[The streaming half: ingester, bus, gateway, screen](/diagram/odds-pipeline?focus=bookmakers,ingester,bus,gateway,ui,e10,e11,e12,e13)
+
+**Bad: each browser calls the bookmaker API.** Twenty screens × 400 fixtures at the vendor's 20 requests a second per key is a 400-second sweep per screen, and the key is banned by lunch. Every screen also does its own name mapping, and no two agree.
+
+**Good: one server polls, screens poll the server.** The mapping happens once, the vendor sees one client. Screens poll every second for their ~37k prices: 20 × 37k is ~750k reads a second to discover ~1,000 changes. It works, wastefully, and it cannot do better than one second because polling is its clock.
+
+**Great: an ingester that publishes changes, a log, one stateful gateway, and a socket that carries deltas.** Four parts, each doing one thing.
+
+- The **Market ingester** owns the vendor relationship and the mapping table. It sweeps pre-match fixtures every 30 seconds, ~14 requests a second inside the 20 limit, and holds the in-play stream. It keeps the last value per price and publishes only when the value differs: ~10,000 prices a second polled becomes ~2,000 published. Each change carries a per-price sequence number.
+- The **Odds bus** is a log, not pub/sub, for one reason: recovery. A compacted prices topic keeps the last value per price, so a restarted gateway rebuilds its whole book alone in under a minute, and a restarted ingester rebuilds its last-value table without republishing 300k prices as changes.
+- The **Trader gateway** holds the book in memory, ~60MB, and on every delta recomputes one edge and writes it to the sockets subscribed to that fixture. ~7,000 changes a second is well under 10% of one core. A warm standby follows the same log.
+- The **socket** sends a snapshot on connect stamped with the sequence of every price in it, then deltas. A screen applies a delta only if its sequence is newer than what it holds, so a late delta cannot overwrite a fresh snapshot, and a reconnecting screen asks for everything after the last sequence it saw.
+
+[Snapshot then stream: correct after any reconnect](/diagram/odds-pipeline?figure=connect)
+
+Vendor to screen is ingester ~50ms, bus ~5ms, gateway ~50ms: **~100ms in play** against a 1-second target. Pre-match the 30-second sweep is the floor, and the screen shows the real age rather than pretending.
+
+#### Joining two clocks
+Here is the meeting point, and the thing most likely to hurt someone. A model row says: *given snapshot 4,812, this selection's probability is 0.50*. A market row says: *at 14:41:07 this bookmaker offers 2.10*. What is the edge, and when is it a lie?
+
+[Where the feeds meet: the gateway reads the run and the Catalog's newest snapshot](/diagram/odds-pipeline?focus=odds-store,catalog,gateway,e9,e12)
+
+**The arithmetic.** A decimal price of 2.10 implies a probability of 1 ÷ 2.10 = 47.6%. But a bookmaker's three prices on one market sum to more than 100%; that excess is the **overround**, their margin, typically 5%. Divide each implied probability by the sum to remove it: 47.6 ÷ 105 = 45.4%. The edge is the model's 50.0% minus 45.4% = **+4.6 points**. That subtraction is all the gateway computes per delta, which is why one process is enough.
+
+**Bad: show the two numbers side by side.** The edge looks real whatever the model's age. A lineup landed at 14:02, the market repriced by 14:05, and a screen showing a 13:30 model row beside a 14:41 price reports a 4.6-point edge that is entirely the trader's missing information. Acting on it is giving money away with a chart.
+
+**Good: show the model's age.** Every model row carries `as_of`; draw it beside every edge. A 71-minute-old figure is visibly 71 minutes old. Better, but it asks the trader to know whether anything happened in those 71 minutes, and that is exactly what they do not know.
+
+**Great: compare snapshots, not clocks.** Every model row carries the `snapshot_id` it was priced under. The gateway holds the Catalog's newest snapshot per fixture, updated on every object-created event. If the fixture's newest snapshot is newer than the run's, the model is stale *by construction*, whatever the clock says, and the fixture is greyed with *rerun pending* until the run lands ~3.5 minutes later. A model row that is 3 hours old for a fixture with no new inputs is still current, and shown as such.
+
+Two ordering rules keep the join honest. *Current* in the Odds store is the newest `snapshot_id` among complete runs for a fixture, never the last run to finish, so an older scoped rerun that lands late can never displace a newer full run. And the gateway loads a run by merging per fixture, replacing only the fixtures the run priced and only where the snapshot is newer.
+
+#### Where it breaks
+| Layer | Failure | How the design handles it |
+|---|---|---|
+| Scraper | A site changes and the CSV has the right columns and zero rows | Catalog quarantines a file under 20% of the source's 7-day row median; the previous version stays in the snapshot with `data_stale` on its fixtures |
+| Store | A scraper writes today's file to yesterday's key | The Catalog builds snapshots from `produced_at` in the file header, not the key |
+| Catalog | Object events arrive late or twice | Registration is idempotent on (key, version); a 5-minute reconciliation lists the store and registers anything missed |
+| Orchestrator | Restart mid-run forgets the job and starts a duplicate | Jobs live in the runs table; on restart it reads running jobs and completes them from their run_published messages |
+| Runner | The model crashes half way through writing | Rows commit per fixture; a run is complete only after the last commit; the gateway loads only complete runs |
+| Runner | A bad input row yields a probability of 1.4 | The writer rejects a fixture whose probabilities are outside (0, 1) or do not sum to 1 within 1%; the previous run stays current for it |
+| Odds store | An older scoped rerun completes after a newer full run | Current is derived from the newest `snapshot_id` per fixture, not the last writer |
+| Ingester | The in-play stream drops for 20 seconds | One full poll of the ~30 live fixtures on reconnect; the gap is shown as *reconnecting*, not as a stale price |
+| Ingester | A bookmaker renames a market and its prices stop mapping | Unmapped rate per bookmaker alerts above 1%; unmapped prices are held and backfilled when the mapping is added |
+| Gateway | Falls behind under a burst | Lag above 1 second stamps every push with its real age and the screen greys it; at ~7,000/s the process is under 10% loaded, so lag means something is broken |
+| Screen | A laptop wakes from sleep showing old prices as live | Every price carries its received time; older than 5 s in play or 60 s pre-match is greyed; reconnect resumes from the last sequence |
+
+#### What this design does not solve
+**Information the scrapers never captured.** An injury posted on social media moves the market and triggers nothing, because no source carries it. The screen shows a real edge that is actually the trader's missing information. The design cannot know what it does not ingest; the manual rerun is the honest fallback, and it can only re-price on what the model has.
+
+**The mapping table is a person.** Ten bookmakers name teams and markets ten ways, and the ingester's mapping is maintained by hand. It is monitored, not solved: an unmapped-rate alert tells someone to fix it, and prices are held until they do.
+
+**The model's own correctness.** The pipeline can say a run was complete, repeatable and current. It cannot say the odds are good. A rejected fixture is a probability outside its range, not a wrong one inside it.
+
+#### Final design
+Read it back through the three clocks. Files written by programs with no shared clock become atomic, versioned objects, and the Catalog names moments by sealing snapshots. A rerun with a 5-minute deadline is scoped, coalesced and superseded by the Orchestrator, and made local in seconds by a content-addressed cache, so ~3.5 minutes is enough. And two feeds on different clocks are joined by comparing snapshot ids, not timestamps, so a stale model is stale by construction and the screen never shows an edge without saying which moment each half of it belongs to.
+
+[The whole design](/diagram/odds-pipeline?focus=sources,scrapers,blob,catalog,orchestrator,runner,odds-store,bus,bookmakers,ingester,gateway,ui)
+
+> **The numbers to remember.** ~2,500 files and ~8GB a day · ~2MB pulled for a rerun vs ~8GB for the daily run · ~3.5 min lineup-to-odds vs 5 min target · 300k prices, ~5,000 changes/s in play, ~1MB/s on the bus · ~60MB of gateway state, one process · edge = model % − implied % after the overround.
+
+#### Check your understanding
+**Why is a versioned object store safer than write-then-rename on a shared folder?** Both make a single file atomic. Only versioning keeps the old bytes when a new scrape lands, so a run pinned to a snapshot still reads what it pinned, and a later file can be recognised as making that run stale.
+
+**A lineup arrives as four CSV files eight seconds apart. How many runs?** One. The Orchestrator holds triggers for 30 seconds and merges them into one job whose scope is the union of the fixtures they touch.
+
+**Why does a rerun pull ~2MB and not ~8GB?** The runner's cache is content-addressed. The snapshot lists hashes; everything but the new lineup file is already on disk, so only that is pulled, and the snapshot is a directory of links into the cache.
+
+**Why a log rather than pub/sub for the market feed?** Recovery. A compacted topic keeps the last value per price, so a restarted gateway rebuilds its book in under a minute, and a restarted ingester rebuilds its last-value table without republishing 300k prices as changes.
+
+**How does the screen know the model is stale without trusting any clock?** Every model row carries the snapshot it was priced under. If the Catalog holds a newer snapshot for that fixture, the model is stale by construction, and the fixture is greyed with *rerun pending* until the new run lands.
+
+**A bookmaker offers 2.10, 3.40 and 3.80 on a three-way market. What is the edge if the model says 50%?** Implied 47.6 + 29.4 + 26.3 = 103.3%. Remove the overround: 47.6 ÷ 103.3 = 46.1%. Edge = 50.0 − 46.1 = +3.9 points.

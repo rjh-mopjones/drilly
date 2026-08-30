@@ -61,6 +61,7 @@ import { UNIQUE_ID_GENERATOR } from "./unique-id-generator";
 import { DISTRIBUTED_KV_STORE } from "./distributed-kv-store";
 import { CONSISTENT_HASHING } from "./consistent-hashing";
 import { RATE_LIMITER } from "./rate-limiter";
+import { ODDS_PIPELINE } from "./odds-pipeline";
 
 export * from "./types";
 
@@ -121,6 +122,7 @@ export const DIAGRAMS: Record<string, Diagram> = {
   "distributed-kv-store": DISTRIBUTED_KV_STORE,
   "consistent-hashing": CONSISTENT_HASHING,
   "rate-limiter": RATE_LIMITER,
+  "odds-pipeline": ODDS_PIPELINE,
 };
 
 export function getDiagram(id: string): Diagram | undefined {
