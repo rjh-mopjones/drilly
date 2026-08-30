@@ -119,7 +119,7 @@ function Rim({ color, dashed }: { color: string; dashed?: boolean }) {
       aria-hidden
     >
       <path
-        d="M0 2 C 18 10, 82 10, 100 2"
+        d="M0 1.5 C 22 7.5, 78 7.5, 100 1.5"
         fill="none"
         stroke={color}
         strokeWidth={1.3}
