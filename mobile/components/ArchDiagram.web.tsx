@@ -4,7 +4,6 @@ import {
   Background,
   BackgroundVariant,
   BaseEdge,
-  Controls,
   EdgeLabelRenderer,
   Handle,
   Position,
@@ -791,8 +790,7 @@ export default function ArchDiagram({
         elementsSelectable
       >
         <Background variant={BackgroundVariant.Dots} gap={22} size={1} color={palette.border} />
-        {/* Phones pinch; the +/- chrome and the hint only cover the picture there. */}
-        {narrow || embedded ? null : <Controls showInteractive={false} />}
+        {/* No zoom chrome: wheel and pinch zoom, and every panel re-fits the picture. */}
       </ReactFlow>
 
       {embedded ? null : (
@@ -864,9 +862,7 @@ export default function ArchDiagram({
           side="right"
           onClose={() => setSel(null)}
         />
-      ) : narrow || embedded ? null : (
-        <Hint palette={palette} />
-      )}
+      ) : null}
     </div>
   );
 }
@@ -874,31 +870,6 @@ export default function ArchDiagram({
 function edgeTitle(e: DiagramEdge, d: Diagram): string {
   const name = (id: string) => d.nodes.find((n) => n.id === id)?.label ?? id;
   return `${name(e.from)} → ${name(e.to)}`;
-}
-
-/** Sits to the right of the zoom controls so it never covers them. */
-function Hint({ palette: p }: { palette: Palette }) {
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left: 62,
-        bottom: 14,
-        maxWidth: "calc(100% - 80px)",
-        padding: "6px 10px",
-        borderRadius: 8,
-        background: p.surface,
-        border: `1px solid ${p.border}`,
-        color: p.textMuted,
-        fontFamily: UI_FONT,
-        fontSize: 12.5,
-        lineHeight: 1.3,
-        pointerEvents: "none",
-      }}
-    >
-      Tap any box or arrow. Bold arrows are the hot path; hover a thin one for its label.
-    </div>
-  );
 }
 
 function panelPlacement(narrow: boolean, side: "left" | "right"): React.CSSProperties {
