@@ -10262,6 +10262,8 @@ Follow one login from a client to a token that resource services can verify with
 
 > **Why the flow is shaped this way.** Authentication can afford to be slow because it happens rarely. Verification has to be nearly free because it happens constantly. Putting both behind the same synchronous interface would force the cheap, frequent path to pay the expensive, rare path's cost.
 
+> **If this were plain password login.** Strip the SSO parts and step 1 is the only step that changes shape: no browser redirect, no authorization code, no PKCE, just your own app posting a username and password straight to the Auth Service. Steps 2 to 6 survive word for word, because they were never about SSO. The identity lookup, the argon2id pool and its ~375 cores, breached-password screening, rate limiting and MFA are the price of *passwords*, whoever asks for them. The one decision that quietly reopens is after step 6: with a single first-party app, a plain opaque session cookie checked against the Session store per request is simpler than tokens and instantly revocable, and it is the right answer while verifications stay near login volume. The moment many services verify at ~100x the login rate, the arithmetic drags you back to this design's tokens, whatever the login box looked like. What the simple version gives up is the reason SSO exists at all: enterprise SAML, third-party clients, and signing in once across every app.
+
 #### Two paths, a hundredfold apart
 Every verified request could, in principle, ask the issuer whether the token is still good. Why does that principle break at this scale?
 
