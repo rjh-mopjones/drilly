@@ -370,6 +370,8 @@ export const GLOSSARY: Record<string, string> = {
   PTP: "precision time protocol: hardware-assisted clock sync to microseconds",
   "clock drift": "a machine's clock running fast or slow relative to true time, typically tens of parts per million",
   "leap smear": "spreading a leap second over a day so clocks never step",
+  CTR: "click-through rate: clicks divided by impressions; the shallowest engagement signal and the easiest one to game",
+  "feature store": "the system that serves model input features at low latency online and consistently for training offline",
   overround: "the amount by which a bookmaker's implied probabilities sum to more than 100%; their margin, removed before comparing with a model",
   "implied probability": "1 divided by a decimal price; what the bookmaker's odds say the chance is, before the overround is removed",
   Airflow: "a scheduler that runs a graph of dependent tasks on a timetable; its file sensors poll on the order of a minute",

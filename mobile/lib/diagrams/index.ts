@@ -62,6 +62,11 @@ import { DISTRIBUTED_KV_STORE } from "./distributed-kv-store";
 import { CONSISTENT_HASHING } from "./consistent-hashing";
 import { RATE_LIMITER } from "./rate-limiter";
 import { ODDS_PIPELINE } from "./odds-pipeline";
+import { CHATGPT } from "./chatgpt";
+import { LIVE_COMMENTS } from "./live-comments";
+import { CODE_JUDGE } from "./code-judge";
+import { RECOMMENDATION } from "./recommendation";
+import { FOOD_DELIVERY } from "./food-delivery";
 
 export * from "./types";
 
@@ -123,6 +128,11 @@ export const DIAGRAMS: Record<string, Diagram> = {
   "consistent-hashing": CONSISTENT_HASHING,
   "rate-limiter": RATE_LIMITER,
   "odds-pipeline": ODDS_PIPELINE,
+  "chatgpt": CHATGPT,
+  "live-comments": LIVE_COMMENTS,
+  "code-judge": CODE_JUDGE,
+  "recommendation": RECOMMENDATION,
+  "food-delivery": FOOD_DELIVERY,
 };
 
 export function getDiagram(id: string): Diagram | undefined {

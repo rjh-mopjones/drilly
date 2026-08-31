@@ -11516,3 +11516,844 @@ Read it back through the three clocks. Files written by programs with no shared 
 **How does the screen know the model is stale without trusting any clock?** Every model row carries the snapshot it was priced under. If the Catalog holds a newer snapshot for that fixture, the model is stale by construction, and the fixture is greyed with *rerun pending* until the new run lands.
 
 **A bookmaker offers 2.10, 3.40 and 3.80 on a three-way market. What is the edge if the model says 50%?** Implied 47.6 + 29.4 + 26.3 = 103.3%. Remove the overround: 47.6 ÷ 103.3 = 46.1%. Edge = 50.0 − 46.1 = +3.9 points.
+### 58. Design ChatGPT (an LLM Chat Application)
+#### Understanding the problem
+Design the product, not the model. Somewhere below this system sits an inference fleet, GPUs, batching, KV caches, that turns a prompt into a token stream; that fleet is its own design and this one consumes it. What is left is everything that makes a raw completion endpoint into a chat application used by tens of millions of people: conversations that remember themselves, answers that appear word by word, safety checks on both directions of the text, and a bill that tracks every token.
+
+Three tensions shape the design.
+
+First, a turn is not a request. A 400-token answer at ~50 tokens a second takes ~8 seconds to generate. Hold a normal request open for that and the user watches a spinner; stream it and they start reading at ~600ms. So the fundamental unit is a long-lived stream, running through tiers that otherwise want to be stateless.
+
+Second, the model has no memory. Every turn, the system must re-tell the model everything that matters from the conversation so far, and every token of that retelling is paid for. Left unmanaged, the prompt grows with the thread until a single "thanks!" costs 100k tokens to answer.
+
+Third, the answer is being read while it is still being written. Moderation, billing and persistence all have to work on text that does not fully exist yet.
+
+> **What this is not.** Not an inference-serving design: batching, KV cache and GPU scheduling live behind one box here, consumed through three promises (a stream that starts fast, exact token counts, readable queue depth). And not a retrieval design: answering from private documents bolts a retrieval pipeline onto this same chat skeleton, and is its own question.
+
+#### Requirements and the numbers
+**Functional.** Multi-turn conversations with server-held history. Streamed answers with resume after disconnect. Input and output safety moderation. Model tiers per plan, with failover. Per-token usage metering and plan quotas. Conversation list, titles, deletion.
+
+**Non-functional.** First token in under ~1 second. No turn generated or billed twice, whatever clients and networks do. Prompt cost flat with conversation length. Safety verdicts within ~1 second of the offending text. Chat availability independent of billing availability.
+
+Four numbers decide the design.
+
+**How many streams are open at once?** 50M daily users × ~10 turns is ~500M turns a day, ~20k/s at peak. Each turn streams ~8 seconds. 20,000 × 8 = **~160k concurrent open streams**, about 8k per gateway node across ~20 nodes. This is a connection-holding problem, and it decides that a dedicated edge tier holds them.
+
+**What does memory cost?** A 200-turn conversation replayed verbatim is a ~100k-token prompt. Rebuilt under a budget, system text ~300 + rolling summary ~500 + last ~10 turns ~5,500 + new message ~300, it is **~6,600 tokens, ~12× cheaper**, on every turn of every long thread.
+
+**What is the daily token bill?** 500M turns × (~1,200 prompt + ~400 completion) ≈ **~800B tokens a day**. At a ~10× cost gap between the small and large model pools, which model answers each turn is the biggest cost decision in the system.
+
+**Where does the first second go?** Auth + quota ~5ms, history load ~20ms, input moderation ~10ms, routing + queue ~100ms, prefill ~400ms: **~535ms to the first token** against a ~1s target. Everything after that is generation speed, which belongs to the fleet.
+
+> **The numbers to carry.** ~160k concurrent streams · 8k-token prompt budget vs ~100k replayed · ~800B tokens/day · ~535ms to first token vs ~1s · ~1TB/day of new conversation text.
+
+#### High-level design
+Follow one turn. The client sends a message; everything else is what happens before, during and after the stream.
+
+[The hot path, message to stream](/diagram/chatgpt?focus=client,gateway,chat-svc,convo-store,router,inference,e1,e2,e3,e5,e6,e7)
+
+1. The **Client apps** send the message with a client-minted idempotency key; the **Edge gateway** authenticates, checks the **Quota store**, and opens the SSE response.
+2. A stateless **Chat service** node loads the conversation from the **Conversation store**: pinned system text, the rolling summary, the recent turns.
+3. It assembles a prompt under the 8k budget and has the **Moderation service** classify the input, ~10ms.
+4. The **Model router** picks the smallest capable model and queues the request on the **LLM inference fleet**.
+5. Tokens stream back through the gateway to the client, and simultaneously append to the turn's buffer in the Conversation store.
+6. The Moderation service scans the output in ~50-token chunks beside the stream, able to cut it mid-sentence.
+7. The fleet emits exact token counts to **Usage metering**; a 1-minute rollup updates the Quota store the gateway reads next turn.
+8. Off the hot path, the **Summarizer** folds old turns into the rolling summary once a thread passes ~6k stored tokens.
+
+> **Why the flow is shaped this way.** State lives in exactly one place, the conversation store, so every compute tier stays stateless and any node can pick up any turn. The stream is consumed twice, once by the user and once by the buffer, and that redundancy is what makes disconnects, retries and node deaths invisible.
+
+#### Streaming a turn that nothing is allowed to own
+An 8-second stateful operation has to run on tiers that stay stateless. What happens when the connection drops at second five?
+
+[The stream and its buffer](/diagram/chatgpt?focus=gateway,chat-svc,convo-store,inference,e3,e7)
+
+**Bad: block until the answer is complete, return JSON.** The user waits ~8–12 seconds staring at nothing, and at ~20k turns/s the tier holds ~160k blocked requests. A disconnect at second seven loses the whole answer; the retry generates and bills it again. Every part of this is wrong, and it is what the first prototype always does.
+
+**Good: stream over SSE, straight from model to client.** First token at ~600ms, and the connection tier is built to hold streams. But the stream is now the only copy of the answer: a dropped connection loses the tail, a client retry is a fresh generation, and a gateway crash takes 8,000 answers with it.
+
+**Great: stream to two consumers, the client and a server-side buffer.** As tokens generate, the chat service appends them in ~50-token chunks to a turn buffer in the conversation store. The client's stream is now merely the *fast path* to text that durably exists. A reconnect carries `turn_id` + last offset and any gateway node replays the missing chunks from the buffer, then rejoins the live stream. A retry carries the same idempotency key and attaches to the in-flight turn instead of generating again: one generation, one bill, however many taps.
+
+[A dropped stream resumes from the turn buffer, not from the model](/diagram/chatgpt?figure=resume)
+
+Two details make it honest. The gateway holds the client ~50 tokens behind generation, so an output-moderation cut removes text the user has not yet seen. And a slow client never backpressures a GPU: generation always runs at full speed into the buffer, and the phone on 2G catches up from it.
+
+#### The context budget
+The model remembers nothing; the system re-tells it the conversation every turn, and pays per token of the retelling. What exactly gets retold?
+
+[History, summary, and the summarizer](/diagram/chatgpt?focus=chat-svc,convo-store,summarizer,e3,e12)
+
+**Bad: replay the whole conversation.** Correct for short threads, and the cost grows linearly with thread length: by turn 200 every exchange costs ~100k prompt tokens, ~12× the budgeted cost, and eventually overflows the context window outright. Worse, if the *client* holds and resends the history, the server cannot enforce any budget and must trust the transcript it is handed.
+
+**Good: a sliding window, the last N turns.** Flat cost, trivial to build. The model forgets everything past the window edge, and users notice exactly that: constraints stated at the start of a long session, "answer in Spanish", "my app is on Postgres 14", silently stop applying. The failure is certain and permanent for any thread longer than the window.
+
+**Great: a rolling summary plus verbatim recent turns.** The prompt is assembled fresh each turn: pinned system text (~300 tokens), a rolling summary of everything old (~500), the last ~10 turns verbatim (~5,500), the new message (~300), packed under a hard 8k ceiling with headroom for tool output. An async Summarizer maintains the summary: when a thread's stored turns pass ~6k tokens it folds the oldest into the summary using spare small-model capacity, off the hot path, versioned so a bad summary can be rebuilt from the originals it replaced.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 168" role="img" aria-label="The 8k prompt budget: system 300, summary 500, recent turns 5500, new message 300, headroom 1400; a verbatim replay would be 100k tokens">
+  <style>
+    .seg{fill:var(--accent);fill-opacity:.25;stroke:var(--accent);stroke-width:1.2}
+    .big{fill:var(--accent);fill-opacity:.55;stroke:var(--accent);stroke-width:1.2}
+    .free{fill:none;stroke:currentColor;stroke-opacity:.5;stroke-width:1.2;stroke-dasharray:4 3}
+    .t{font:12px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor;opacity:.8}
+    .b{font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;fill:currentColor}
+  </style>
+  <text class="b" x="4" y="14">One turn's prompt, packed to an 8k budget</text>
+  <g transform="translate(4,26)">
+    <rect class="seg" x="0" y="0" width="14" height="22" rx="3"/>
+    <rect class="seg" x="14" y="0" width="24" height="22" rx="3"/>
+    <rect class="big" x="38" y="0" width="264" height="22" rx="3"/>
+    <rect class="seg" x="302" y="0" width="14" height="22" rx="3"/>
+    <rect class="free" x="316" y="0" width="68" height="22" rx="3"/>
+  </g>
+  <text class="t" x="4" y="70">system ~300 · summary ~500 · last ~10 turns ~5,500 (dark)</text>
+  <text class="t" x="4" y="88">new message ~300 · headroom ~1,400 (dashed)</text>
+  <text class="b" x="4" y="116">~6,600 of 8,000 tokens, flat however long the thread</text>
+  <text class="t" x="4" y="140">verbatim replay of a 200-turn thread: ~100,000 tokens,</text>
+  <text class="t" x="4" y="158">~12x the cost, and no better answers</text>
+</svg>
+```
+
+The residual failure is quiet: a summary that loses a fact the user established early makes later answers subtly wrong with no error anywhere. Summaries are versioned beside the turns they replaced so a report can be diagnosed and rebuilt, but detection still depends on a human noticing.
+
+#### Which model answers
+~800B tokens a day makes routing the largest cost lever in the system, bigger than any infrastructure optimisation below it.
+
+[The router and the fleet](/diagram/chatgpt?focus=chat-svc,router,inference,e5,e6)
+
+**Bad: one flagship model for everything.** Simple, best answers, and the bill is the whole fleet at flagship prices for a traffic mix where most turns are short factual or conversational exchanges a small model answers indistinguishably well.
+
+**Good: route by plan.** Free tier small, paid tier large. Captures most of the saving and follows the money, but it routes by who is asking rather than what is asked: paid users burn large-model tokens on "thanks!", and free users get poor answers on genuinely hard turns.
+
+**Great: route by turn, default small, with brownout.** The small model is the default for everyone; the large pool serves opted-in requests, long prompts, and turns the small model itself flags as beyond it. Failover between pools and providers lives here too, and it sheds as it moves: when the large pool's queue passes ~30 seconds of work, free-tier turns brown out to the small model rather than queueing, and beyond the cap new turns get a retry-after instead of joining a collapsing backlog. With ~80% of turns on the small pool at a ~10× cost gap, the routing mix, not raw volume, sets the daily bill.
+
+The dangerous failure here is silent: a routing tweak that sends hard turns to the small model degrades answers while every latency and error dashboard stays green. The guard is a sampled shadow, ~0.1% of small-model turns also run on the large model offline and a judge model compares; divergence pages a human. Imperfect, and the only tripwire that fires on a quality regression.
+
+#### Safety on a moving stream
+Both directions of text need checking, and the output is being read at 50 tokens a second while it is still being generated.
+
+[Moderation beside the stream](/diagram/chatgpt?focus=chat-svc,moderation,e4)
+
+**Bad: moderate the complete answer before showing any of it.** Safe, and it turns the ~8-second stream back into an ~8-second spinner, undoing the product's defining feature for 100% of turns to protect against a small fraction.
+
+**Good: classify the input only.** One ~10ms check before any GPU is spent: most turns pass, some get a refusal template, flagged patterns get logged. Cheap and worth doing, but it bets that a clean question never yields an answer that must not ship, and loses that bet on jailbreaks, on model mistakes, and on topics where the answer, not the question, is the problem.
+
+**Great: input classify, plus a chunked scan racing the output.** The input check stays, inside the first-token budget. The output is scanned in overlapping ~50-token chunks, one classifier call per chunk running beside the stream, ~8 scans on a typical answer. A verdict cuts the stream mid-sentence, replaces the partial answer with a refusal, and tombstones the turn buffer so a refresh cannot resurrect it. The gateway's ~50-token delivery lag means the cut lands on text the user has not yet seen; exposure is bounded at roughly one second of tokens. When the classifier tier itself degrades, input moderation fails closed for flagged-history users and open with sampling for the rest, and output falls back to a cheaper pattern tier plus retroactive scanning, whose verdicts tombstone stored turns after the fact.
+
+#### Metering without touching the hot path
+Every token is money, and the metering pipeline must never be the reason a turn is slow or chat is down.
+
+[Metering and quota](/diagram/chatgpt?focus=gateway,billing,inference,metering,e9,e10,e11)
+
+**Bad: debit a live balance inside every turn.** Exact, and it puts a global counter write on the path of 20k turns/s and couples chat availability to billing availability. A billing incident is now a chat outage.
+
+**Good: check quota at admission, meter asynchronously.** The gateway reads a per-user rollup row (~1ms, cached 10s); the inference fleet emits exact token counts per turn onto a metering log; a rollup job aggregates per user per minute into the quota store. The hot path never waits on billing.
+
+**Great: the same, with the gaps engineered instead of ignored.** The overrun is *bounded*: cache TTL plus one rollup interval means a user racing their limit gets at most ~a minute of overshoot, priced into plans. Events are keyed by the turn's idempotency key, so a retried emit cannot double-bill, and a reconciler diffs finalised turns against metering events to re-emit anything a dying node dropped. The log is retained 90 days and rollups are deterministic, so a pricing bug is a rewind and replay with an adjustment entry, never a guess. And if rollups stall for 5 minutes, the gateway applies a coarse per-user rate cap, degrading to fairness rather than to unlimited free usage.
+
+Counting happens where generation happened: the fleet's tokenizer is the billing tokenizer, so the number billed is the number computed, and a turn abandoned mid-stream still bills the tokens it generated, charged as generated, not as delivered.
+
+#### Where it breaks
+| Layer | Failure | How the design handles it |
+|---|---|---|
+| Client | Retry taps mint fresh keys and re-ask the same question | Server-side dedup on (conversation, message hash) within a short window attaches the retry to the in-flight turn |
+| Gateway | A node dies holding ~8k live streams | Clients reconnect anywhere with turn_id + offset; the buffer replays the gap; generation never stopped |
+| Chat service | A node crashes mid-turn after inference started | Turn records carry a lease; a sweeper finalises turns whose buffer completed and fails the rest cleanly |
+| Conversation store | ~160k buffer appends/s at peak | Chunk appends spread across partitions by conversation id; buffers collapse into one row on finalise |
+| Summarizer | A summary silently drops a fact from early in the thread | Versioned summaries beside the turns they replaced; rebuildable on report; detection stays human |
+| Router | A tweak quietly degrades answer quality with green dashboards | ~0.1% shadow sampling against the large model with a judge comparison; divergence pages |
+| Inference pool | The large pool degrades under load | Brownout sheds free tier to the small pool; queue caps reject with retry-after before collapse |
+| Moderation | Classifier tier degrades | Input fails closed for flagged users, open+sampled otherwise; output falls back to patterns + retro-scan with tombstones |
+| Metering | A node dies between streaming and emitting usage | Reconciler diffs finalised turns against events and re-emits; turn-id keying makes repair idempotent |
+| Quota | Rollup stall freezes balances while usage continues | Gateway watches rollup freshness; past 5 min it applies a per-user rate cap as a stopgap |
+
+#### What this design does not solve
+**Answer quality is measured by proxy, everywhere.** The router's shadow sampling, the judge model, the moderation classifiers, all of them are models watching a model. A quality regression that fools the judge, or unsafe text the classifier scores clean, ships. The design bounds exposure and makes failures diagnosable; it cannot make them impossible.
+
+**The summary is lossy compression with no error signal.** A thread's oldest context survives only as ~500 tokens of summary. When compression loses the wrong fact, every later answer is quietly worse, and nothing in the system knows. The alternatives, unbounded prompts or hard forgetting, are worse; this is a chosen defect, not an oversight.
+
+**Abandoned generations still cost money.** A user who closes the tab at second two still triggered a full generation, and the tokens are billed as generated. Cancelling on disconnect would save some of it, at the price of making every network blip kill a resumable turn; the design keeps resumability and eats the waste.
+
+#### Final design
+Read it back through the numbers. ~160k concurrent streams force a dedicated SSE edge and stateless everything behind it. The ~12× gap between a replayed thread and an 8k budgeted prompt forces server-held history, the budget, and the summarizer that makes the budget survivable. ~800B tokens a day makes the router's small-model default the biggest cost decision in the system, guarded by shadow sampling because its failure mode is silent. The read-while-writing stream forces chunked output moderation with a delivery lag, and the turn buffer, written beside the client's stream, is what turns disconnects, retries and node deaths into replays instead of re-generations, with the idempotency key making one turn one bill by construction.
+
+[The whole design](/diagram/chatgpt?focus=client,gateway,chat-svc,convo-store,billing,inference,router,summarizer,metering,moderation)
+
+> **The numbers to remember.** ~160k concurrent streams over ~20 gateway nodes · 8k-token budget vs ~100k replayed, ~12× · ~800B tokens/day, ~80% on the small model at ~10× cost gap · ~535ms to first token vs ~1s · overrun bounded at ~1 minute of turns.
+
+#### Check your understanding
+**Why does the completion stream into the conversation store as well as to the client?** The client's connection is the least reliable part of the system. Buffering server-side makes the stream resumable from any node by turn id and offset, makes retries attach instead of re-generate, and means a gateway crash interrupts delivery, never generation.
+
+**Why is the prompt rebuilt from server-held history instead of the client resending the conversation?** Cost and enforcement. Client-replay prompts grow with the thread to ~100k tokens; a server-side budget holds them at ~6,600. And a budget can only be enforced on history the server owns; a client-sent transcript would have to be trusted as given.
+
+**A user's answer stops mid-sentence and is replaced by a refusal. What happened?** The output moderation scan, running in ~50-token chunks beside the stream, returned a verdict on generated text. The stream was cut, the partial answer replaced, and the turn buffer tombstoned so no refresh or resume can bring the removed text back.
+
+**Why is quota checked from a minute-stale rollup instead of a live balance?** A live debit puts billing on the path of 20k turns/s and couples chat uptime to billing uptime. The stale read costs at most ~1 minute of overshoot, which is bounded and priced in; a billing outage taking down chat is neither.
+
+**Why does the router default everyone to the small model rather than routing by plan?** Plans say who is asking, not what is asked. Routing by turn sends the ~80% of traffic a small model answers indistinguishably to the cheap pool whoever sent it, and escalates hard turns whoever sent them: the cost win and the quality win at once.
+
+**What is the one failure in this design that no dashboard catches?** Quiet quality loss: a routing change or a lossy summary that makes answers worse while latency, errors and cost all stay green. The shadow-sample-plus-judge tripwire and versioned summaries exist precisely because nothing else would fire.
+### 59. Design Live Comments (Facebook Live, Twitch Chat)
+#### Understanding the problem
+A creator goes live. A million people watch. Some of them type. Every viewer should see a chat that feels alive: comments appearing within a second or two of being posted, their own comments instantly. Behind that sentence hides the most extreme fan-out ratio in mainstream system design.
+
+The numbers make the point better than prose. The head stream peaks at 5,000 comments a second with 1,000,000 concurrent viewers. Deliver every comment to every viewer and you owe 5,000 × 1,000,000 = **five billion deliveries a second**, for one stream. No queueing tier survives that, and here is the twist: it would be effort spent making the product *worse*. A human can read perhaps 10 chat lines a second. A screen scrolling 5,000 a second is noise.
+
+So this problem is not "deliver all the comments". It is: **decide, once, what a readable chat for this stream looks like this second, and deliver that decision to everyone cheaply.** The fan-out ratio is broken by construction, not survived by capacity.
+
+Two more constraints shape everything. There are ~2M concurrent live streams, and ~1.9M of them have fewer than 100 viewers; they must cost almost nothing. And the author of a comment is special: whatever sampling does to everyone else, your own comment appears on your own screen, instantly.
+
+> **What this is not.** Not a chat system: WhatsApp-style messaging is many small rooms with full delivery, offline queues and read receipts, and none of those survive a million-viewer room. And not a news feed: a feed is pull on read with minutes of freshness slack; this is push with a ~2-second budget and no per-viewer storage at all.
+
+#### Requirements and the numbers
+**Functional.** Post a comment to a live stream; see it locally at once. Receive the room's chat in near-real time. Join late and see recent history. Spam filtering and after-the-fact takedowns that also remove from screens. Chat replay alongside the VOD.
+
+**Non-functional.** Post-to-room under ~2s. 100M concurrent viewers, 2M concurrent streams. Delivery cost independent of comment rate. A quiet stream costs ~nothing. No lost comments for the author, ever.
+
+Four numbers decide the design.
+
+**The naive fan-out.** 5,000 comments/s × 1M viewers = **5B deliveries/s** for the head stream alone. This single multiplication rules out per-viewer queues, per-comment pub/sub to clients, and every design where delivery scales with comment rate × audience.
+
+**The read cap.** A viewer reads at most ~10 lines/s. Cap what any viewer is sent at **≤15 comments per second, delivered as one batched frame per second**. Delivery cost becomes *viewers × 1/s*, independent of comment rate: the invariant the whole design exists to reach.
+
+**The connection tier.** 100M concurrent viewers on long-lived connections at ~50k per node is **~2,000 edge nodes**, each doing ~50k frame writes a second at a few hundred Mbps. Comfortable, *because* of the frame cap.
+
+**The archive.** 200k comments/s peak × ~300B ≈ **60MB/s, ~5TB/day**. Every comment is stored, sampled or not: backfill, VOD replay and moderation all need the full record.
+
+> **The numbers to carry.** 5B/s if fan-out is naive · ≤15 comments per 1-second frame · ~2,000 edges × ~50k connections · ~2,000 RPCs/s to broadcast the head stream · ~5TB/day archived.
+
+#### Two problems in one pipeline
+The write path and the read path share nothing but the comments. **Posting** is a rare per-user action, ~200k/s globally, that can afford request semantics: auth, rate limits, idempotent retries, a ~15ms ack. **Broadcasting** is a continuous push to 100M sockets that can afford none of that per message. The design splits them completely: posts go up over plain HTTP to an ingest API; chat comes down a held connection from an edge tier. Between them sits the one component that makes the ratio survivable, the sampler.
+
+The entities:
+
+- **Comment** `{stream_id, seq, author, text, ts}`, ~300B; `seq` is per-stream and assigned by the log.
+- **Frame**: one second of one stream's chat: sequence range, ≤15 comments, retraction ids. ~1KB, capped.
+- **Subscription**: a lease saying edge node E holds ≥1 viewer of stream S.
+
+```
+POST /streams/{id}/comments  { text, client_key }   -> { seq }        (~15ms)
+SSE  /watch/{stream_id}?after_seq=…                 <- frame/s, backfill first
+GET  /streams/{id}/history?before_seq=…&limit=50    -> late-join backfill
+```
+
+#### High-level design
+Follow one comment from a thumb to a million screens.
+
+[The hot path, post to room](/diagram/live-comments?focus=viewer,ingest,spam,bus,sampler,edge,e1,e2,e3,e4,e5,e7)
+
+1. A **Viewer** posts to the **Comment ingest API** and sees it on their own screen immediately: local echo, confirmed at the ~15ms ack.
+2. The **Spam + moderation** filter scores it in ~10ms; obvious junk is dropped or shadowed before it costs anything downstream.
+3. The comment appends to the **Stream bus**, partitioned by stream id, receiving its per-stream sequence number.
+4. The **Fan-out sampler** worker owning that stream reads its partition and, once a second, packs a frame: creator comments always, replies to shown comments preferentially, then a score-weighted sample, ≤15 in total.
+5. The sampler asks the **Subscription registry** which edges hold viewers of this stream and sends the frame to exactly those: ~2,000 RPCs for the head stream, 2 for a small one.
+6. Each **Edge broadcast server** loops over its local sockets for that stream and writes the frame, injecting the viewer's own unsampled comments into their copy. The **Comment store** archives everything off the bus and serves late-join backfill.
+
+> **Why the flow is shaped this way.** All the choosing happens once per stream per second, at the sampler. All the multiplying happens inside edge memory, as local socket writes. The network between tiers only ever carries frames proportional to subscribed edges, which is why a million-viewer room costs ~2,000 RPCs a second to reach.
+
+#### Holding a hundred million connections
+Before any comment moves, 100M viewers have to be reachable. What does the receive path ride on?
+
+[The edge tier](/diagram/live-comments?focus=edge,viewer,e7)
+
+**Bad: clients poll for new comments every second.** The cadence is right, and the cost is absurd: 100M HTTP requests a second, each paying connection setup, headers, auth and routing, mostly to learn nothing changed. The serving tier is sized for pure overhead.
+
+**Good: a held connection per viewer, comments pushed as they arrive.** SSE or a WebSocket to an edge node; ~64 bytes of state per connection (stream id, last seq, auth handle) means one node holds ~50k of them in a few MB. But pushing *per comment* re-imports the ratio at the socket: the head stream would need 5,000 writes per second *per connection*.
+
+**Great: a held connection receiving one batched frame per second.** The edge writes each connection one ~1KB frame a second containing the sampled chat: ~50k writes/s and a few hundred Mbps per node, flat regardless of comment rate. The 1-second batching costs latency inside the ~2s budget and buys rate-independence, and it is the same tick the sampler already runs on. A node death drops 50k viewers whose clients reconnect anywhere with their last seq; the registry's ~10s lease quietly stops frames to the dead node.
+
+#### Breaking the ratio
+The comment exists, the sockets are held. The core question: how does one comment reach a million screens without anyone doing a million units of work per comment?
+
+[Choose once, multiply in memory](/diagram/live-comments?figure=ratio)
+
+**Bad: a delivery queue per viewer.** The mental model everyone arrives with, and the arithmetic executioner: 5,000/s × 1M queues = 5B enqueues a second, plus 100M queues of state for people who mostly never look back. It also *delivers the unreadable*: every viewer drowns in the full firehose.
+
+**Good: pub/sub per stream, every comment to every subscribed edge, clients throttle.** Kills the per-viewer queues: 5,000 msg/s × 2,000 edges = 10M bus deliveries/s, survivable. But each edge must still write 5,000 messages/s down each of its local sockets: the ratio moved, it did not die. And every phone burns battery discarding 99.7% of what it receives.
+
+**Great: sample once per stream into a shared frame, then broadcast the frame.** The sampler scores the second's arrivals *once* and packs ≤15 survivors into one frame. From that moment nothing downstream depends on comment rate: the frame goes to ~2,000 subscribed edges as ~2,000 RPCs, and each edge does one buffered write per local connection. The five-billion multiplication still happens, as a loop over in-memory sockets, the only place it is affordable.
+
+[The sampler and its inputs](/diagram/live-comments?focus=bus,sampler,registry,e4,e5,e6)
+
+The bus matters here for recovery, not just transport: a sampler worker that stalls is reassigned within ~5s and resumes from its partition offset, sending a catch-up frame. Viewers see a pause, then a burst; never lost comments.
+
+#### Sampling without cheating anyone
+Every viewer sees a sample. What makes the sample defensible rather than accidental?
+
+[Scoring at the sampler](/diagram/live-comments?focus=sampler,e4)
+
+**Bad: most recent 15 wins.** Trivially gameable (post fast, get seen), and it hands the visible chat to spammers precisely on the streams big enough for visibility to matter.
+
+**Good: score-weighted sampling.** Rank the second's comments on author reputation, engagement signals and spam score; sample the frame's 15 slots by weight. Quality rises, gaming gets expensive. But pure scoring silently deletes the two things a chat cannot lose: the creator, and yourself.
+
+**Great: deterministic inclusion classes, then weighted sampling for the rest.** Guaranteed slots first: the creator's comments always ship; replies to comments that were shown ship preferentially, so visible threads stay coherent. Your own comments are handled off-frame entirely: local echo at post time, and the edge injects them into your copy of every frame, so the author experience is total delivery even when the room's is sampled. The remaining slots go by weight. The frame everyone receives is the *same* frame; personalisation is the memory-cheap injection at the edge, never a per-viewer scoring pass.
+
+Takedowns ride the same path in reverse: a moderation verdict tombstones the comment in the store and puts a retraction id into the next frames, so screens that showed it remove it within a second or two.
+
+#### Late joiners, gaps, and what "ordered" means
+Viewers arrive mid-stream, phones sleep and wake, edges die. What keeps the chat coherent through churn?
+
+[Join and backfill](/diagram/live-comments?focus=edge,registry,store,e8,e10)
+
+**Bad: joiners start from silence.** Cheapest possible, and an empty chat under a million-viewer stream reads as broken. First impressions of the room are the product.
+
+**Good: replay recent comments from the bus.** Works until the joiner is the first viewer of the stream on that node, or the archive consumer is what lagged; and the bus's 24h retention makes it useless for VOD replay anyway.
+
+**Great: sequence numbers everywhere, store-backed backfill, idempotent frames.** Everything keys on the per-stream `seq` the log assigned. On join or reconnect the client sends the last seq it rendered; the edge backfills the last ~50 comments (~10KB) from the Comment store, mostly from its own in-memory frame cache after a mass reconnect, then live frames take over, the seam deduped by seq. Frames carry their sequence *range*, so a lost frame RPC is visible as a gap in the next one and repairable if it matters; in a sampled chat, a one-second hole usually is not. Ordering is per stream only, by partition; there is no cross-stream order because nothing needs one.
+
+#### Two million streams, mostly tiny
+The head stream gets the headlines; the fleet's shape is 1.9M streams with double-digit audiences. What keeps them nearly free, and what absorbs the skew?
+
+[The registry and the skew](/diagram/live-comments?focus=registry,sampler,edge,e6,e8)
+
+**Bad: every stream's frames to every edge, filter locally.** 2M frames/s × 2,000 edges = 4B frame deliveries a second, ~all filtered into the void. The quiet majority bankrupts the design.
+
+**Good: static partitioning of streams to edge clusters.** Cheap routing, and it fights viewer geography: a viewer connects to a nearby edge, not to their stream's home cluster, and the head stream still lands on one unlucky cluster.
+
+**Great: subscription follows viewers.** An edge's first viewer of a stream registers a ~10s lease in the registry; the sampler delivers each frame to exactly the edges leased to that stream. An unwatched stream is sampled cheaply (its tick processes a handful of comments) and delivered *nowhere*. The head stream naturally reaches all ~2,000 edges; a 40-viewer stream reaches 2 or 3. Skew on the bus side is accepted rather than sharded away: 5,000 appends/s of 300B is ~1.5MB/s, inside a single partition's ceiling, and per-stream ordering is the product requirement; a stream approaching the ceiling is rate-capped at ingest first.
+
+#### Where it breaks
+| Layer | Failure | How the design handles it |
+|---|---|---|
+| Ingest | Ack lost, client retries the same comment | Client key makes the append idempotent; retry returns the original seq |
+| Spam | A raid floods a stream faster than reports arrive | Per-stream velocity monitor on unique-author rate and account age flips the stream to restricted posting and pages moderation |
+| Bus | Head stream's partition takes all the heat | ~1.5MB/s is inside one partition's ceiling; ingest rate-caps a stream before the log feels it |
+| Sampler | A worker stalls; its streams' chats freeze | Heartbeat per shard, reassignment ~5s, resume from offset with a catch-up frame: a pause, never a gap |
+| Sampler | Worker lags >2s behind its partitions | Sheds by sampling the newest window first: freshness over completeness |
+| Registry | Entry outlives its viewers | Wasted frames for one ~10s lease, then expiry; a missing entry self-heals on next join |
+| Edge | Node dies with 50k connections | Reconnect anywhere with last seq; backfill covers the gap; lease expiry stops frames to the corpse |
+| Edge | A connection too slow for 1 frame/s | Per-connection buffer caps; oldest frames dropped for that viewer: more-sampled chat, then seq-gap backfill on recovery |
+| Store | Viral VOD replays chat to millions | VOD chat rendered once into timed segments and served from the CDN; the store serves the render, not the crowd |
+| Moderation | Bad comment already on screens | Retraction ids in subsequent frames remove it; tombstone in the store keeps replays clean |
+
+#### What this design does not solve
+**Everyone's chat is different, and that is structural.** Two viewers of the same stream see different samples; a reply can arrive without its context. Deterministic inclusion (creator, self, replies-to-shown) bounds the damage, but no design at 5,000/s → 15/s avoids divergence. The product accepts it; so should the designer, out loud.
+
+**Sampling hides spam without removing it.** A spam comment that never gets sampled is still stored, still archived, still in the author's own view. Spend on moderation is justified by the archive and by small rooms; in the head stream's live view, the sampler is accidentally doing most of the suppression.
+
+**The creator's chat is a different product wearing the same pipe.** At 5,000/s no creator reads chat either; they need aggregation (questions, superfans, themes), not a faster firehose. This design delivers them the same sampled frame and stops; the creator dashboard is a separate consumer of the bus this design only leaves room for.
+
+#### Final design
+Read it back through the ratio. Five billion naive deliveries a second collapse to: one scoring pass per stream per second at the sampler, ≤15 survivors in a ~1KB shared frame, ~2,000 RPCs to the edges the registry says have viewers, and one buffered write per second per socket, with the million-fold multiplication confined to edge memory. Posting stays a ~15ms HTTP path with local echo so authors never feel the sampling; sequence numbers stitch backfill, reconnects and retractions into one coherent per-stream order; and 1.9M quiet streams cost a cheap tick and no delivery at all.
+
+[The whole design](/diagram/live-comments?focus=viewer,ingest,spam,bus,sampler,registry,edge,store)
+
+> **The numbers to remember.** 5B/s naive vs ~2,000 frame RPCs/s · ≤15 comments per 1s frame, whatever the rate · ~2,000 edges × 50k conns, ~64B per conn · post-to-room ~600ms typical, ≤~1.1s worst, vs 2s target · ~5TB/day archived.
+
+#### Check your understanding
+**Why is the frame built once per stream instead of once per viewer?** Choosing is the expensive step: scoring 5,000 candidates. Done per viewer it multiplies by a million; done per stream it happens once, and personalisation shrinks to injecting the viewer's own comments at the edge, a memory merge.
+
+**Where does the 1M-fold multiplication actually happen, and why is that acceptable there?** Inside each edge node, as a loop writing one buffered frame to each local socket. No network hop, no queue, ~64B of state per connection: the only tier where a million of anything per second is routine.
+
+**A viewer posts a comment that never gets sampled. What do they see?** Their comment, instantly and permanently: local echo at post time, confirmed at the ack, injected by the edge into their copy of every subsequent frame. Sampling shapes the room's view, never the author's.
+
+**Why does a stream with 40 viewers cost almost nothing?** Its sampler tick processes a handful of comments, and the registry lists only the 2–3 edges holding its viewers, so its frames go to 2–3 places. The 1.9M quiet streams ride the same code path as the head stream at proportional cost.
+
+**An edge node dies. What do its 50k viewers lose?** About a second. Clients reconnect through the load balancer with their last sequence number; the new edge backfills the gap (mostly from its frame cache) and resumes frames; the registry lease stops deliveries to the dead node within ~10s.
+
+**Why per-stream sequence numbers rather than timestamps?** The log's partition assigns seq at append, giving a total order within the stream with no clock skew arguments, and seq ranges on frames make gaps detectable and backfill idempotent. Cross-stream order is deliberately not defined; nothing consumes it.
+### 60. Design LeetCode (an Online Code Judge)
+#### Understanding the problem
+An online judge accepts source code from strangers, runs it against hidden test cases, and returns a verdict in seconds. Ten million people practise on it quietly; once a week, thirty thousand of them show up at the same minute for a contest where the verdicts decide ratings people care about.
+
+Three problems live inside that sentence, and they are different kinds of problem.
+
+The first is adversarial: every submission is a program you must assume is hostile. It will try to read the test data, open sockets, fork-bomb the host, plant files for the next run. The judge's core loop is "execute the attacker".
+
+The second is metrological: a verdict is a *measurement*. Time-limit verdicts sit exactly at the boundary where a few percent of hardware jitter flips accepted into time-limit-exceeded, and a judge that gives the same code different verdicts at different hours is not a judge, it is a lottery. Users diff verdicts on forums within a day.
+
+The third is a scheduled stampede: contest start multiplies load by ~5× inside sixty seconds. Uniquely among burst problems, this one is announced weeks in advance, with a registration list. The design that ignores that gift deserves what happens to it.
+
+> **What this is not.** It shares the "run code in a sandbox" bone with a CI/CD build farm, and the resemblance ends there. A build farm runs *trusted* code and optimises throughput via caching, since most work repeats. A judge runs *adversarial* code where nothing repeats, caching a verdict is meaningless, and the product is the fairness of a single measurement. Different problem, same jail technology.
+
+#### Requirements and the numbers
+**Functional.** Submit code in ~10 languages; get a verdict with per-case results, times and memory. Hidden test cases, special judges for problems with multiple valid answers. Contests: scoring, penalties, live standings with a final-hour freeze. Rejudge a problem after a test fix.
+
+**Non-functional.** Verdict p50 under 20s, including contest bursts. Same code, same verdict, whatever the hour or hardware. Test data never readable by submissions. One verdict per submission, however many crashes and retries occur. Per-user fairness under load.
+
+Four numbers decide the design.
+
+**How many sandboxes does the burst need?** Contest open: ~1,000 submissions/s. A full judging run is compile (~1s) plus up to 20 cases at 1–2s limits: ~15s of occupancy. 1,000 × 15 = **~15,000 concurrent sandboxes**. Too many. Run cases cheapest-first and stop at the first failure, and most wrong submissions die early: average occupancy drops to **~6s, so ~6,000 sandboxes**, each 2 vCPU + 256MB, a ~12k-vCPU pool.
+
+**Where does the verdict's 20 seconds go?** Queue ~2s + sandbox from warm template ~1s + compile ~1s + cases ~6s + writeback ~1s ≈ **~11s at burst**. The budget is spent *inside* the sandbox, which is why occupancy, not queue depth, sizes the fleet.
+
+**What does a wrong verdict cost, and how often?** With wall-clock timing on shared hosts, boundary jitter of a few percent flips roughly **1 in 100** near-limit verdicts. CPU-time accounting on pinned cores plus one re-run of near-limit results pushes that to ~**1 in 10,000**, because a wrong verdict now needs two independent bad measurements.
+
+**How big is the exfiltration channel?** A submission's only output is stdout. Cap it at **64KB per run** and bulk test-data theft becomes a drip: a determined attacker leaks kilobytes per submission against per-user rate limits, not megabytes per run.
+
+> **The numbers to carry.** ~1,000 submits/s at contest open · ~6s average occupancy with fail-fast, ~6,000 prewarmed sandboxes · verdict ~11s at burst vs 20s p50 target · near-limit re-run: wrong boundary verdicts ~1 in 10,000 · 64KB output cap.
+
+#### Judging and competing are different systems
+A verdict is true forever: this code, this test version, these times. A *score* is contest law: when the contest clock says it landed, what earlier wrong attempts cost, whether standings are frozen. The design keeps them apart: a judging pipeline that has never heard of a penalty, and a contest layer that consumes verdicts as a feed and folds them into standings. The join is one field, the submission id, which is the idempotency key of the entire system.
+
+The entities:
+
+- **Submission** `{id, user, problem, lang, source, contest?}`; the id is minted at acceptance and every later stage dedupes on it.
+- **Verdict** `{submission_id, outcome, per-case results, cpu_times, memory, test_version}`, immutable; rejudges append, never edit.
+- **Test version**: a content-hashed bundle of cases per problem; verdicts pin the version they ran against.
+
+```
+POST /submissions      { problem, lang, source, retry_key } -> { id }   (progress streams on the held connection)
+GET  /submissions/{id}                                       -> { state, verdict? }
+GET  /contests/{id}/standings?page=…                         -> from the leaderboard cache
+```
+
+#### High-level design
+Follow one submission from the editor to the standings.
+
+[The hot path, submit to verdict](/diagram/code-judge?focus=coder,api,queue,workers,tests,verdicts,e1,e2,e3,e4,e5)
+
+1. A **Coder** submits; the **Submission API** authenticates, applies a per-user in-flight cap of 2, enqueues, and holds the connection for progress.
+2. The **Judge queue**, partitioned by language pool, hands the run to a **Judge worker** under a claim lease of 2× the worst judging time.
+3. The worker clones a fresh sandbox from a warm per-language template: no network, private filesystem, 256MB, fixed CPU quota on pinned cores.
+4. It compiles, then streams test inputs in from the **Test-case store** (cached locally by version hash), cheapest cases first, stopping at the first failure.
+5. Output is compared *outside* the sandbox; the verdict writes to the **Verdict store**, first write wins on submission id, and the API pushes it to the client.
+6. The **Contest service** consumes contest verdicts, applies scoring and penalties, and updates the **Leaderboard cache** that serves live standings.
+7. Around it all, the **Capacity controller** scales on queue depth continuously and prewarms the pool from the contest calendar at T−15 minutes.
+
+> **Why the flow is shaped this way.** Everything dangerous happens inside a disposable jail; everything secret stays outside it; everything that can crash is replayed by lease and deduped by submission id. The queue makes bursts a wait instead of an outage, and the calendar makes the biggest wait ~2 seconds.
+
+#### Running code you must assume is hostile
+The core loop executes the attacker. What does the execution environment have to be?
+
+[The worker and its sandbox](/diagram/code-judge?focus=workers,e3)
+
+**Bad: exec() on the API host with ulimits.** The prototype everyone writes. The submission shares a kernel, a filesystem and a network stack with your service: it reads the test folder, mails itself the answers, forks until the box dies. This is not a hardening gap; it is the wrong species of boundary.
+
+**Good: containers with seccomp, dropped capabilities, no network.** A real improvement and the industry's default reflex. But containers share the host kernel, and the kernel is exactly what a hostile program attacks; and a *reused* container accumulates whatever the last run planted, tmpfiles, background processes, cgroup debris. Cleaning reliably between adversarial runs is harder than not reusing at all.
+
+**Great: a fresh syscall-filtered jail or microVM per run, cloned from a warm template, destroyed after.** One run, one sandbox: private filesystem containing only the toolchain and the submission, network denied at construction, 256MB and a fixed CPU quota on pinned cores. Cloning from a per-language snapshot takes ~1s, small against ~6s of judging. Freshness makes the security argument structural: nothing persists to find, nothing survives to interfere. Defence in depth assumes the jail fails anyway: the host holds no secrets beyond a claim lease, expected outputs never enter it, egress is dropped at the network layer, hosts recycle on schedule. An escape wastes one host instead of winning the game.
+
+Compilation runs inside the jail too, with its own 10s cap: a compiler bomb is just another submission that exceeds its budget and gets a verdict.
+
+#### A verdict is a measurement
+Two identical submissions, one at 2am, one mid-contest. What guarantees them the same verdict?
+
+[Where fairness is manufactured](/diagram/code-judge?focus=workers,verdicts,e5)
+
+**Bad: wall-clock time on busy shared hosts.** The measurement includes the neighbours: another run's cache pressure, a noisy VM, the contest itself. Near the limit, a few percent of jitter flips verdicts, roughly 1 in 100 boundary submissions, and users cross-check on forums within a day. The judge's credibility is the product; this spends it.
+
+**Good: generous limits.** Set limits at 3–4× the reference solution so jitter cannot reach them. It works, and it quietly changes the problems: the intended O(n log n) solution is no longer required, the O(n²) one passes too, and problem setters lose the ability to demand the real algorithm.
+
+**Great: engineer the measurement like an experiment.** Charge CPU time from the sandbox's own accounting, not wall time, so a descheduled run is not a slow run. Pin cores and fix the quota, so neighbours cannot appear in the data. Apply a per-language multiplier, so an interpreted solution is not judged against a compiled budget. And re-run any result within 5% of the limit once, keeping the better time: a wrong boundary verdict now requires two independent bad measurements, ~1 in 10,000. What remains is honest: hardware generations differ by a few percent, so limits carry a per-fleet calibration constant, and setters follow the rule *limits at 2× reference, never 1.1×*.
+
+#### The stampede that RSVPs
+Contest open multiplies submission rate by five in under a minute, and the last five minutes do it again. How is that absorbed?
+
+[Prewarm beats reaction](/diagram/code-judge?figure=burst)
+
+**Bad: reactive autoscaling on queue depth.** The controller notices depth growing at 14:30:20, requests capacity, and has it booted and warm minutes later, after the spike has already put ten thousand submissions into a queue draining at a fraction of arrival rate. Reactive scaling loses every race it starts behind, and this race starts behind by construction.
+
+**Good: provision for peak permanently.** ~6,000 sandboxes standing 24/7 for a burst that occupies ~2 hours a week: a ~5× fleet idling ~98% of the time. It works, and finance is correct to hate it.
+
+**Great: believe the calendar.** The burst is announced, with registration counts. At T−15 minutes the Capacity controller prewarms toward a target sized from registrations × historical submit rate × ~6s occupancy, plus 30% headroom; it alarms at T−10 if capacity has not materialised, while a human can still delay the start; it holds the pool through the end-of-contest resubmit wave and scales in after T+30. Depth-based scaling keeps running underneath for the unscheduled spike, where the queue absorbs minutes visibly and per-user caps keep the wait fair.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 170" role="img" aria-label="Submissions jump from 200 to 1,000 per second at contest open; the prewarmed pool of 6,000 sandboxes is standing before the spike arrives">
+  <style>
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .tgt{stroke:currentColor;stroke-width:1.5;stroke-dasharray:4 3}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+  </style>
+  <text class="lbl" x="4" y="14">Steady day: ~200 submits/s · ~1,200 sandboxes</text>
+  <rect class="bar" x="4" y="22" width="77" height="20" rx="4"/>
+  <text class="lbl" x="4" y="66">Contest open: ~1,000 submits/s for minutes</text>
+  <rect class="fillacc" x="4" y="74" width="384" height="20" rx="4"/>
+  <line class="tgt" x1="4" y1="112" x2="388" y2="112"/>
+  <text class="sub" x="4" y="130">prewarmed at T−15min: ~6,000 sandboxes (dashed line),</text>
+  <text class="sub" x="4" y="148">sized as 1,000/s × ~6s occupancy + 30% headroom,</text>
+  <text class="sub" x="4" y="166">so the open-minute queue wait stays ~2s</text>
+</svg>
+```
+
+Fail-fast ordering is half of this story: cheapest, most-discriminating cases first, stop at first failure. Most wrong submissions never reach the stress tests, occupancy falls from ~15s to ~6s, and the burst pool shrinks by the same ratio.
+
+#### Hidden tests stay hidden
+The test data is the product's integrity, and the program reading it is the adversary. Where may the data go?
+
+[The trust boundary around test data](/diagram/code-judge?focus=tests,workers,e4)
+
+**Bad: ship the case bundle into the sandbox.** Self-contained and fatal: everything inside the jail is readable by the submission, and a bundle with expected outputs turns every problem into "print the answer file". Judges have actually shipped this.
+
+**Good: stream inputs in, keep expected outputs out.** Input arrives on stdin per case; the expected output never enters the sandbox; comparison, including special judges for float tolerance and multiple-valid-answer problems, runs trusted-side. The secret is safe by construction. The *inputs* are still exposed, necessarily, to the code that must read them.
+
+**Great: the same, with the exfiltration channel priced.** A submission's only voice is stdout, capped at 64KB and truncated with a wrong-answer verdict beyond it. Leaking inputs is now a drip against per-user rate limits and the in-flight cap: kilobytes per submission, with every attempt leaving a stored, reviewable record. Version-hashing does the operational half: bundles are cached on workers by content hash, so a republished problem is a new hash, cache staleness is impossible by construction, and every verdict pins the test version it ran against, which is what makes a post-fix rejudge an exact sweep rather than a guess.
+
+#### From verdict to standings
+Thirty thousand people refresh standings while a rejudge might rewrite history. How does scoring stay both live and correctable?
+
+[The contest layer](/diagram/code-judge?focus=verdicts,contest,leaderboard,e6,e7,e8)
+
+**Bad: increment scores in place as verdicts arrive.** Fast, and every correction becomes surgery: a rejudged verdict, a duplicate delivery, a late verdict after the freeze, each is a manual edit to live standings during the most-watched hour, with no way to prove the result.
+
+**Good: recompute standings from the verdict table on a timer.** Correct and auditable, but a full recompute per refresh interval does repeated work that grows with the contest, and participants see standings jump in steps.
+
+**Great: scoring as a deterministic fold over an immutable verdict log.** The Contest service consumes the verdict feed exactly-once by submission id and folds it into scores: solve time plus 5 minutes per wrong attempt. Verdicts are immutable and version-pinned; a rejudge appends new verdicts and the fold replays cleanly, publishing a standings diff instead of a mystery. The Leaderboard cache, a sorted set per contest, absorbs the ~5,000 reads/s of refresh habit at microsecond latency and is rebuilt from the fold in ~2s if lost. The final-hour freeze is enforced at the write: public updates buffer and flush at unfreeze, participants' own rows keep moving privately, and responses carry a freeze epoch so unfreeze is a visible flip, not a stale mystery.
+
+#### Where it breaks
+| Layer | Failure | How the design handles it |
+|---|---|---|
+| API | Double-click or retry submits twice | Client retry key dedupes; second request returns the first submission id |
+| Queue | Worker dies mid-judge | Claim lease of 2× worst time expires; run requeues; verdict write dedupes if the first worker was merely slow |
+| Queue | A poison submission crashes every claimer | Claim count on the message: 3 strikes, quarantined with an internal-error verdict, paged |
+| Sandbox | A submission escapes the jail | Host holds no secrets, outputs live outside, egress dropped, hosts recycled: one wasted host, not a breach |
+| Timing | Jitter at the limit boundary | CPU-time accounting, pinned cores, language multipliers, near-limit re-run: two bad measurements required |
+| Test store | A wrong test case ships | Versioned bundles + version-pinned verdicts make the rejudge sweep exact; standings recompute with a published diff |
+| Test store | 50MB stress input × thousands of contest runs | Version-hash cache on workers: fetch once, judge many; store load scales with workers, not submissions |
+| Capacity | Prewarm capacity unavailable at T−10 | Alarm while humans can still delay the start, or run with visible longer queues |
+| Capacity | An unannounced viral burst | Depth scaling underneath; queue absorbs minutes; per-user caps keep the wait fair |
+| Contest | Rejudge after ratings consumed the old verdicts | Fold replays from the log; new standings and a diff publish; ratings re-run |
+| Leaderboard | Cache lost mid-freeze | Serve last snapshot with a staleness banner; rebuild from the fold in ~2s |
+
+#### What this design does not solve
+**Slow exfiltration of test inputs.** The 64KB cap and rate limits make theft a drip, not a download, but a patient adversary leaking a problem's inputs across hundreds of submissions is spending effort, not defeated. Rotating and expanding test sets, and treating leaked-answer detection as moderation, is the containment; prevention is not on offer while hostile code must read the inputs to be judged.
+
+**Plagiarism and account sharing.** The judge proves what code ran, never who wrote it. Contest integrity beyond the sandbox, similarity detection, account patterns, appeals, is an adjacent human-in-the-loop system consuming this one's stored submissions.
+
+**Perfect cross-hardware equality.** Two fleet generations differ by a few percent however carefully the measurement is engineered. Calibration constants and the 2×-reference rule for setters absorb it; a submission engineered to sit at 1.02× the limit is gambling either way, and the design declines to pretend otherwise.
+
+#### Final design
+Read it back through the three problems. Hostility is answered by construction: a fresh jail per run, secrets outside it, a 64KB voice, defence in depth behind it. Fairness is answered by metrology: CPU time on pinned cores, language multipliers, and a near-limit re-run that makes wrong boundary verdicts need two failures, ~1 in 10,000. The stampede is answered by its own announcement: fail-fast ordering cuts occupancy to ~6s, the calendar prewarms ~6,000 sandboxes at T−15, and the queue's lease-and-dedupe protocol lets any worker die at any moment while the submission id guarantees exactly one verdict, folded exactly once into standings that can always be recomputed from the log.
+
+[The whole design](/diagram/code-judge?focus=coder,api,queue,capacity,workers,tests,verdicts,contest,leaderboard)
+
+> **The numbers to remember.** ~1,000 submits/s at contest open · ~6s occupancy with fail-fast (from ~15s), ~6,000 prewarmed sandboxes · verdict ~11s at burst vs 20s p50 · boundary verdicts wrong ~1 in 10,000 after the re-run rule · 64KB output cap · scoring = a fold over an immutable, version-pinned verdict log.
+
+#### Check your understanding
+**Why does the expected output never enter the sandbox, while the input must?** The submission has to read the input to be judged, so the input is necessarily exposed to the adversary. The expected output is not needed inside: stdout is captured and compared trusted-side, so the answer key stays out of the attacker's address space by construction.
+
+**Why is a fresh sandbox per run worth ~1s of setup?** Reuse means inheriting whatever a hostile run planted: files, processes, resource debris. Cleaning reliably is harder than cloning a warm template, and freshness also serves fairness, since nothing left running can steal cycles from the next measurement.
+
+**A worker crashes after writing the verdict but before acknowledging the claim. What happens?** The lease expires, the submission requeues, a second worker judges it and writes: and loses, because the verdict store is first-write-wins on submission id. Cost: one wasted judging run. Outcome: exactly one verdict, which is the invariant.
+
+**Why does the judge time CPU rather than the wall clock?** Wall time measures the neighbours, the scheduler and the contest load as much as the code. CPU time from the sandbox's own accounting, on pinned cores with a fixed quota, measures the submission, which is the thing being judged.
+
+**Why is scoring a fold over the verdict log instead of incrementing scores in place?** Because rejudges and disputes are routine: a fold over immutable, version-pinned verdicts recomputes standings deterministically and publishes a diff. In-place increments turn every correction into hand-editing live standings during the freeze hour.
+
+**The contest starts in 15 minutes and the prewarm target is missed. What does the design do?** Alarms at T−10, while there is still a decision to make: delay the start, or open with visibly longer queue waits and say so. The queue plus per-user caps keep the degraded mode fair; what the design refuses to do is discover the problem at 14:30:20.
+### 61. Design a Recommendation System (Home Feed Ranking)
+#### Understanding the problem
+A hundred million people open an app whose first screen is a feed of twenty items chosen from a catalogue of fifty million, and the choosing is the product. Nothing here is a lookup: relevance is predicted, per user, per request, on a 250ms budget, by a model that was itself built from what users did with yesterday's predictions.
+
+That last clause is the strange part, and it is worth sitting with. Every other design in this collection processes data the world gives it. A recommender mostly processes data *it created*: the model decides what is shown, what is shown determines what can be clicked, and the clicks train the next model. The system is its own upstream. Most of the hard decisions below, exploration, position logging, holdouts, are about deliberately puncturing that loop before it seals itself shut.
+
+The other defining tension is arithmetic. The best model you can afford to run cannot look at fifty million items, and the retrieval that can look at fifty million items is not good enough to pick the final twenty. Neither stage works alone; the design is the funnel that lets each do only what it is cheap enough to do.
+
+> **What this is not.** Not search: there is no query, so nothing anchors relevance except the user's own history, which raises the loop problem search does not have. And not the trending system: trending finds what is globally surging, one answer for everyone, and appears here only as one candidate source among four.
+
+#### Requirements and the numbers
+**Functional.** A personalised page of 20 from a 50M-item catalogue. Fresh items surface within minutes of upload. Followed creators reliably appear. Engagement events collected as training data. Models retrained daily and shipped safely, with rollback.
+
+**Non-functional.** 250ms p99 for the page. ~30k requests/s peak. Ranking uses features no staler than minutes for fast-moving signals. Training examples match what was actually served. A model change is measurable and reversible.
+
+Four numbers decide the design.
+
+**Why a funnel exists at all.** The ranking model costs ~0.1ms per item, batched on accelerators. Over 50M items that is **~5,000 seconds per request**. Over 500 items it is ~50ms. Between those two numbers sits every recommender ever built at scale: cheap retrieval must shrink 50M to hundreds before the model that is actually good at ranking is allowed to run.
+
+**What retrieval costs.** Items live as 128-dim embeddings: 50M × 512B ≈ **25GB of vectors, ~50GB with the graph index**, sharded in memory, answering approximate top-1,000 in ~10ms at ~95% recall. Approximate is free here: the 3,000th-best candidate was never going to survive ranking anyway.
+
+**Where the 250ms goes.** Candidates ~30ms (parallel, hedged, droppable) + hydration ~30ms + ranking ~50ms + re-rank ~10ms ≈ **~150ms spent**, with headroom for transport and one slow hop. Every stage has a degraded mode; the page is never late, only worse.
+
+**What feeds the loop.** **10B impressions a day**, each logged with its position, joined to ~1.5B as-served feature records (~3TB/day). ~2% of served slots are exploration: deliberately non-optimal choices that are the only reason tomorrow's model knows anything today's does not.
+
+> **The numbers to carry.** ~5,000s to score 50M vs ~50ms for 500 · 3,000 → 500 → 20 · ~50GB ANN index, ~10ms top-1k · ~150ms spent vs 250ms p99 · 10B impressions/day, ~2% explored.
+
+#### High-level design
+Follow one page request down the funnel, then follow the data back up.
+
+[The hot path, request to page](/diagram/recommendation?focus=user,feed-api,cand,ann,ranker,features,e1,e2,e3,e4,e5)
+
+1. The **Feed service** receives the request, computes the user's taste vector, and scatters to the **Candidate sources** in parallel.
+2. Four cheap opinions come back: ~1,000 nearest-to-taste from the **ANN index**, ~500 trending, ~500 from followed creators, ~500 fresh items owed exploration. Union, dedupe: ~3,000.
+3. A lightweight pre-scorer trims to 500; the **Ranking model service** hydrates them from the **Online feature store** in one batched read and scores each for engagement depth, ~50ms.
+4. As it scores, the ranker logs the exact features it used to the **Event log**, keyed by request id.
+5. The Feed service re-ranks the top 50 for diversity and policy, serves 20, and the client logs impressions (with position), clicks and watch time back to the same log.
+6. Overnight: the **Training pipeline** joins outcomes to as-served features and retrains; the **Embedding builder** refreshes item vectors and rebuilds the index; the **Model registry** walks the new model through shadow and holdout before promotion. Continuously: **Realtime aggregates** fold the log into minute-fresh counters in the feature store.
+
+> **Why the flow is shaped this way.** Down the funnel, each stage is ~10× cheaper per item than the one below it, so the expensive model only ever sees survivors. Up the loop, one event log feeds the trainer, the aggregates and the debugger from the same bytes, so nothing can disagree about what happened.
+
+#### The funnel
+Why can no single stage do this job, and how do the stages divide it?
+
+[Each stage ~10x cheaper per item than the next](/diagram/recommendation?figure=funnel)
+
+**Bad: score everything with the good model.** The honest baseline that explains everything else. ~0.1ms × 50M = ~83 minutes per page. No batching, no accelerator, no caching trick survives eight orders of magnitude; personalised brute force is simply unavailable.
+
+**Good: one cheap stage, heuristics all the way down.** Retrieval scores (vector distance, popularity, recency) rank the page directly. It fits the budget and it plateaus hard: a dot product cannot express *this user finishes long videos from small creators at night*, and cross features are exactly what pages live on. Engagement gaps between heuristic-ranked and model-ranked feeds are the most consistently reproduced result in the field.
+
+**Great: stages matched to their arithmetic.** Retrieval is plural and cheap: four sources, four theories of relevance, none needing to be very right, unioned into ~3,000. A pre-scorer trims to 500. The heavy model, fed ~300 fresh features per pair, spends its ~50ms where quality is actually decided. Final rules encode product promises the score cannot express: creator caps, policy filters, don't-repeat-yesterday. Each stage's failure is also contained: a junk-emitting source is caught by its survival rate through ranking collapsing, and auto-muted.
+
+#### Retrieval that knows the user
+50M items, ~30ms, and "roughly right" as the bar. What can retrieval actually be?
+
+[The taste path: towers, index, query](/diagram/recommendation?focus=ann,embed,e3,e12,e13)
+
+**Bad: retrieve by tags and categories.** An inverted index of labels finds items *sharing labels*, which is not the signal: two cooking videos can have disjoint audiences, and the best item for this user might share no tag with anything they watched. Label taxonomies also rot at 50M items.
+
+**Good: exact nearest-neighbour over learned embeddings.** A two-tower model learns user and item vectors whose dot product predicts engagement; retrieval becomes geometry. Exact search over 25GB of vectors is a linear scan, hundreds of ms at best: right signal, wrong latency.
+
+**Great: the same geometry under an approximate graph index.** An HNSW-style navigable graph answers top-1,000 in ~10ms at ~95% recall, sharded in memory. The 5% it misses are items surrounded by near-identical neighbours already in the set, and a ranker stands behind retrieval precisely so its errors are cheap. Two disciplines keep it honest: tower pairs version together, the user tower the ranker runs is pinned to the index build it matches, so the two sides of the dot product always share a space; and deletions apply as a query-time tombstone filter, so takedowns take effect immediately whatever the nightly rebuild is doing. New items enter with a content-only embedding within ~5 minutes, replaced by a behaviour-informed one at the next rebuild.
+
+#### The features and the skew
+The model is only as good as its inputs, and its inputs live in two worlds: milliseconds at serving, hours at training. What breaks between them?
+
+[The feature store and the honesty write](/diagram/recommendation?focus=ranker,features,log,e5,e14)
+
+**Bad: compute features at serve time, recompute them at training time.** The natural first architecture, and the classic silent killer. Training re-derives "the item's CTR" from the warehouse at midnight; serving read it from a live counter at 14:02. For any feature that moves, the model trains on values it will never see in production, and the freshest features, the ones worth the most, move most. Nothing errors. Offline metrics look great. The served model is quietly worse everywhere, and nobody can say why.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 158" role="img" aria-label="The same feature at serve time and re-derived at training time disagree; the logged value is what the model actually saw">
+  <style>
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+  </style>
+  <text class="lbl" x="4" y="14">item_ctr_1h, as served at 14:02 → 0.031</text>
+  <rect class="fillacc" x="4" y="22" width="120" height="20" rx="4"/>
+  <text class="lbl" x="4" y="66">same feature re-derived at 23:50 → 0.058</text>
+  <rect class="bar" x="4" y="74" width="224" height="20" rx="4"/>
+  <text class="sub" x="4" y="116">the item went viral in between; training on 0.058</text>
+  <text class="sub" x="4" y="134">teaches the model a world the ranker never saw.</text>
+  <text class="sub" x="4" y="152">The fix is to log 0.031 at serve time and train on that.</text>
+</svg>
+```
+
+**Good: snapshot the feature store on the training schedule.** Closer, but a daily snapshot still misses everything sub-daily, which includes the minute-fresh counters and all session state, and the snapshot job becomes its own drift source.
+
+**Great: the ranker logs the features it scored with, and training joins on those.** For every scored candidate, the exact ~300-value vector, the request id, the model version and the served position go to the event log (~2KB × 1.5B/day ≈ 3TB/day, 30-day retention: the storage bill for a model that trains on the truth). Training joins outcomes to servings *by request id*, never by time proximity; a serving with no outcome in the window becomes a negative example, because silence is the common outcome. Under load, feature logging sheds by *sampling with recorded rates*, never by stopping, so training reweights instead of inheriting a silent gap. The store itself is dual-fed, batch and stream writing the same registry-defined features, with divergence monitors that quarantine a flapping feature to its batch value.
+
+#### Freshness, cold start, and the loop's leaks
+A video uploaded at noon has zero history, and history is most of the features. What stops the catalogue's newest items from being invisible forever?
+
+[The fast loop](/diagram/recommendation?focus=stream-agg,features,log,cand,e8,e9)
+
+**Bad: rely on the daily batch.** A new item's features are NULL until tomorrow, so the model scores it at the prior, so it gets no impressions, so its features are still ~NULL tomorrow. This is the feedback loop as a trap: the system cannot learn about what it never shows.
+
+**Good: boost new items unconditionally.** Surfaces them, but as an unpriced subsidy: a fixed boost is too strong for junk and too weak for gems, and it decays on a clock rather than on evidence.
+
+**Great: paid exploration plus a fast feature loop.** ~2% of served slots are exploration: under-exposed items the model would not have picked, injected by the fresh-candidate source, served to real users. The point is not their engagement today; it is that they *generate evidence*. Realtime aggregates fold the event log into minute-fresh counters, so the noon upload has real impressions, clicks and completion numbers in the feature store by 12:05, and the next scoring of it is informed rather than blind. Streamed features carry their watermark, and the ranker discounts anything staler than 10 minutes toward batch values: stale-but-labelled degrades quality; stale-and-trusted degrades it silently. Position logging is the third leak: every impression records its slot, training treats position as a feature and neutralises it at serving, so the model cannot credit an item for having been placed first.
+
+#### Shipping a model you cannot smoke-test
+A bad model returns 200s, renders beautiful pages, and quietly loses users. How does one ship at all?
+
+[The registry's gauntlet](/diagram/recommendation?focus=trainer,registry,ranker,e10,e11)
+
+**Bad: promote on offline eval.** The nightly model beats the incumbent on held-out logged data, ship it. But logged data was generated by the *old* policy: offline eval measures "would you have ranked yesterday's servings better", not "will your different choices do better", and those diverge exactly when the model changed most.
+
+**Good: A/B test everything.** Honest, and unbounded: a full experiment per nightly model means weeks of queue, and a broken model still reaches its arm's users at full strength for days.
+
+**Great: a gauntlet with graduated exposure.** Offline eval parity gates registration into the running; a **shadow** run scores ~1% of live traffic with results discarded, catching latency, crashes and score-distribution weirdness with zero user exposure; a **~2% online holdout** compares engagement depth against the incumbent for ~3 days, the only honest meter of a policy change; then promotion, as a pointer flip with the prior version kept warm, so rollback is under a minute, which matters because relevance regressions are discovered late by nature. Two backstops close the gaps: training-data health checks hard-block promotion for models trained on flagged days, and long-term holdback cohorts stay on an old model for weeks to catch slow damage the 3-day gate cannot see.
+
+#### Where it breaks
+| Layer | Failure | How the design handles it |
+|---|---|---|
+| Feed service | A slow hop threatens the 250ms p99 | Per-hop budgets with degraded modes; past 200ms spent, serve retrieval order: quality bends, latency never |
+| Candidate source | A source degrades into returning junk | Survival-rate-through-ranking per source; a collapsing rate auto-mutes the source and pages |
+| ANN index | Rebuild and delta stream disagree on a deleted item | Query-time tombstone filter makes takedowns immediate regardless of build state |
+| Embeddings | New towers misalign with last night's index | Tower pairs version together; a pair activates only when its matching index is built |
+| Feature store | Batch and stream writers fight over a feature | Single feature registry, overlap-window diffing, quarantine-to-batch on divergence |
+| Ranker | Hydration misses features | Training-time defaults with a penalty flag; >5% failure flips the request to retrieval-order fallback |
+| Event log | Client events lost unevenly across cohorts | Per-cohort loss monitors; training excludes flagged cohorts rather than learning from a broken sensor |
+| Realtime aggregates | Stream lag makes 'last hour' mean three hours | Watermarks travel with values; the ranker discounts stale features instead of trusting them |
+| Trainer | A pipeline bug poisons a day of examples | Distribution checks vs the prior week; models trained on flagged data cannot promote |
+| Registry | A regression too slow for the 3-day holdout | Long-term holdback cohorts on the prior model for weeks: a small, deliberate meter |
+
+#### What this design does not solve
+**The loop is punctured, not opened.** Exploration is 2%, the holdout is 2%, and the other ~96% of what users see is still the model's own past choices echoed back. Offline evaluation of a policy from data generated by another policy remains fundamentally limited; the online holdout is the only honest meter, and it is small, slow, and always arguing with someone who wants its traffic back.
+
+**The objective is a proxy, and proxies bend.** Watch-past-30s resists clickbait better than clicks, and it still is not "the user's life went better". Optimising any measurable engagement signal hard enough produces content shaped to that signal; choosing the objective is a product-ethics decision this architecture executes but cannot make.
+
+**Filter bubbles are the converged state, not a bug.** A well-trained engagement model narrows toward what each user already responds to. Diversity rules at re-rank and exploration traffic push back at the margins; the gravity is structural. The design makes the trade-off explicit and tunable, which is all a design can do.
+
+#### Final design
+Read it back through the two loops. The fast loop is the funnel: 50M items to 3,000 by four cheap theories of relevance, to 500 by a pre-scorer, to 20 by an expensive model reading ~300 fresh features, inside ~150ms of a 250ms budget, with every hop owning a degraded mode. The slow loop is the data: one event log carrying impressions with positions, outcomes, and the ranker's as-served feature vectors; a trainer that joins by request id so examples are byte-identical to what was served; aggregates that close the freshness gap by the minute; and a registry that walks every new model through shadow and holdout because relevance has no error code. The 2% exploration tax and the position correction are the design admitting its central fact: this system is its own upstream, and it stays honest only where it deliberately leaks.
+
+[The whole design](/diagram/recommendation?focus=user,feed-api,cand,ann,log,ranker,features,embed,stream-agg,trainer,registry)
+
+> **The numbers to remember.** ~5,000s to score 50M vs ~50ms for 500 · 3,000 → 500 → 20 · ~10ms ANN top-1k at ~95% recall · ~3TB/day of as-served features, joined by request id · 2% explored, 2% holdout · rollback = a pointer flip, under a minute.
+
+#### Check your understanding
+**Why can't the ranking model just score the whole catalogue?** ~0.1ms per item × 50M is ~83 minutes per request. The funnel exists to spend the good model only on the ~500 items cheap retrieval already thinks are plausible, which turns the same arithmetic into ~50ms.
+
+**Why does the ranker log the features it scored with, when training could recompute them?** Recomputed features disagree with serve time for anything that moves, so the model would train on inputs it never sees in production: training-serving skew, the field's classic silent failure. Logging as-served values makes each example byte-identical to what the model saw.
+
+**Why is retrieval allowed to be approximate when ranking is not?** Retrieval's errors are cheap: a missed 3,000th-best candidate almost never survives ranking anyway, so ~95% recall at ~10ms dominates 100% recall at hundreds of ms. Ranking's errors are the page itself.
+
+**A video uploaded at noon: walk its first hour.** ~12:05 it has a content-only embedding in the ANN index and appears in the fresh/explore source. Exploration slots buy it real impressions; realtime aggregates write its minute-fresh engagement counters to the feature store; by ~13:00 the ranker scores it on evidence, not priors. Its behaviour-informed embedding lands at the next nightly rebuild.
+
+**Why does every impression log its position?** Slot 1 gets clicked partly for being slot 1. Training with position as a feature, neutralised at serving, stops the model from crediting items for their placement; otherwise the feed's own layout trains the next model's biases.
+
+**Why does promotion need a live holdout when offline eval already compared the models?** Offline eval scores the new model on data the old policy generated: it answers "would you have ranked those servings better", not "will your different choices perform". Only live traffic measures the policy change itself, which is why the holdout exists and why rollback is built to be instant.
+### 62. Design DoorDash (a Food Delivery Platform)
+#### Understanding the problem
+A customer orders dinner from an app, a restaurant cooks it, a courier carries it, and the platform in the middle promised all three of them things it does not control. That is the problem in one sentence: food delivery is a *three-sided marketplace synchronisation problem* wearing a logistics costume.
+
+The synchronisation is against a clock nobody owns. A kitchen finishes when it finishes: prep time runs ~15 minutes with an error of ~7, and the platform learns it, never sets it. Dispatch a courier too early and they stand in a queue at the counter, burning the paid supply the next order needed. Too late, and the food sits dying under a heat lamp while a customer watches a stalled dot. Everything interesting in this design flows from that asymmetry: **couriers can be scheduled; food cannot.**
+
+The second defining fact is that every number the customer sees is a *prediction dressed as a promise*. The 35-minute quote at browse time commits a kitchen that has not confirmed and a courier who has not been chosen. Keeping ~90% of those promises, while wasting as few courier-minutes as possible, is the actual product.
+
+The third fact is scale's shape: modest in volume (~100 orders/s at peak, a Postgres-sized write load), extreme in liveness. 300k couriers ping every 5 seconds, forever, and three separate parties act concurrently on every order.
+
+> **What this is not.** Not ride-hailing, though it looks identical from a helicopter. A passenger is ready the instant they book, so nearest-free-driver-now is *correct* there; here, "ready" is a prediction with a 7-minute error, and matching people instead of times is the classic wrong answer. And not the payment system: money appears here as three idempotent calls tied to state transitions, consuming that design rather than restating it.
+
+#### Requirements and the numbers
+**Functional.** Browse nearby open restaurants with live delivery quotes. Order, pay, and track to the door. Restaurant confirmation and prep flow on a tablet. Courier offers, acceptance, and status. Cancellations and refunds along every failure path.
+
+**Non-functional.** ~90% of orders within their quoted window. Courier waiting at restaurants minimised: it is paid time. Location freshness ~5s on the tracking map. No order stranded by any party's silence. Money moves only with state transitions.
+
+Four numbers decide the design.
+
+**The load's shape.** 2M orders/day, concentrated into ~3 dinner hours across ~500 city zones: **~100 orders/s nationally, ~12 per minute in a busy zone**. Dispatch is embarrassingly per-zone; nothing about matching is a big-data problem. The state machine writes ~800 transitions/s at peak: one relational database.
+
+**The uncertainty that shapes dispatch.** Prep is ~15 min median with **~7 min of error**; the drive is ~6-12 min. The error is the same size as the drive, which is why *when to assign* matters more than *whom to assign*, and why assignment is re-planned every tick until a courier commits.
+
+**The firehose.** 300k online couriers × 1 ping/5s = **60k location updates/s** (~6MB/s). Written once to a stream, consumed twice, retained minutes, and never written per-ping to any database.
+
+**The dispatch tick.** Every zone matches its unassigned orders to its available-*soon* couriers every **10 seconds**: a batch small enough to solve optimally in milliseconds, big enough that the matcher has real choices, fast enough that tick latency is noise against a 35-minute promise.
+
+> **The numbers to carry.** ~100 orders/s peak, ~12/min per zone · prep ~15 min ± ~7 · 60k pings/s, 2 consumers · 10s zone tick, ~15% of orders stacked · quote buffered to ~90% on-time.
+
+#### Three parties, one truth
+Before any algorithm: three independent actors, each with retries, flaky networks and free will, act on every order. The design's spine is a single **order state machine** owned by the Order service: placed → confirmed → preparing → ready → assigned → picked up → delivered, plus the exception states. Every transition is guarded (preparing cannot follow cancelled), idempotent on (order, transition), serialised on the order row, and timestamped. Every app renders from it; every notification publishes from its committed log, never from intent; every dispute and every model below trains on its timestamps. The three parties can disagree about nothing except the future.
+
+The entities:
+
+- **Order** `{id, customer, restaurant, cart, quote, state, courier?}` plus its transition log.
+- **Courier state** (soft, in-memory): position, heading, current task, predicted `free_at`.
+- **Prediction** `{ready_at, σ}` per order; `{drive_time, σ}` per candidate pairing.
+
+```
+POST /orders            { cart, address, quote_token, idem_key } -> { order_id }
+POST /orders/{id}/transition   { to, party, ts, idem_key }        (guarded)
+WS   /track/{order_id}          <- state + smoothed courier position
+POST /courier/offers/{id}/accept                                   (20s window)
+```
+
+#### High-level design
+Follow one dinner from tap to doorbell.
+
+[The hot path, checkout to doorbell](/diagram/food-delivery?focus=eater,order-svc,order-db,resto,dispatch,courier,tracker,e1,e2,e3,e4,e5,e6)
+
+1. The customer browses **Restaurant discovery**: nearby, open, each with a live quote assembled from the **Prediction service** plus a keepability buffer.
+2. Checkout hits the **Order service** with an idempotency key; payment authorises (capture waits for delivery), the state machine row is written, and the order rings on the **Restaurant tablet**.
+3. Confirmation starts the clock that matters: predicted `ready_at`, with its uncertainty, from the Prediction service.
+4. The order enters its zone's pool at the **Dispatch engine**, which re-plans every 10s against a courier board fed by the **Location stream**, and sends a timed offer so the courier arrives near food-ready.
+5. The **Courier app** accepts within a 20s window, drives, and taps the transitions: arrived, picked up, delivered.
+6. **Tracking + push** forwards the courier's smoothed, road-snapped position to the one customer watching; delivery captures the payment and scores the promise.
+
+> **Why the flow is shaped this way.** One machine holds the truth; predictions decide the timing; the batch decides the pairing; and every timestamp the flow generates feeds back into the predictions that will time tomorrow's assignments. The marketplace is a control loop, and the state machine is its sensor.
+
+#### Dispatch is a batching problem
+An order needs a courier. The obvious answer is wrong in an instructive way.
+
+[Assign to the food's clock, not the map's](/diagram/food-delivery?figure=timed-assignment)
+
+**Bad: at payment, assign the nearest free courier.** Ride-hailing logic. The courier drives 4 minutes and waits 11, because the food needed 15 more and "nearest, now" never asked the kitchen. It also cannot see the *better* courier: the one finishing a drop 2 minutes from the restaurant, invisible because they are technically busy. Result: wasted courier-hours at counters *and* cold food, the worst of both.
+
+**Good: broadcast the order, let couriers claim it.** A market, self-organising, and how several real platforms started. Its failure is selection: couriers cherry-pick short, high-tip runs, far orders rot unclaimed until the platform bribes them with boosts, and the platform has given up the one thing only it can see, the global picture of the zone.
+
+**Great: batch the zone every 10 seconds and match times, not places.** The Dispatch engine holds a courier board built from the location stream: who is online, where, on what task, and, crucially, predicted **free_at**. Each tick it matches the zone's pool (~a handful of orders) against available-soon couriers, minimising total *predicted lateness*: predicted arrival vs predicted food-ready, per pairing. The problem is dozens-by-dozens; solving it optimally is milliseconds, and the cleverness is entirely in the cost function. Assignment is *timed*: an 18:02 order with `ready_at` 18:19 and a 6-minute drive is offered ~18:11, and until a courier is actually en route the plan re-evaluates every tick, so a slipping kitchen slides its assignment instead of stranding a courier. Stacking falls out naturally: two orders, one restaurant or one direction, one courier, when neither promise breaks: ~15% of dinner orders, the single biggest efficiency lever. Offers give the courier 20 seconds; declines cascade down the tick's pre-ranked fallbacks.
+
+A zone running dry is handled honestly: widen to neighbouring zones with a drive-time penalty, raise the zone's quotes so new promises stay keepable, then pause low-value intake. Making more couriers exist is the marketplace's pricing lever, not the matcher's.
+
+#### When is the food actually ready?
+Every timing decision above consumed `ready_at`. Where does it come from, and how wrong is it allowed to be?
+
+[The prediction loop](/diagram/food-delivery?focus=eta,resto,dispatch,e12,e14)
+
+**Bad: static prep times, entered at onboarding.** "We take 20 minutes", typed once, describing the kitchen's calm-Tuesday self, wrong by Friday and drifting forever. Every quote and every assignment inherits the fiction.
+
+**Good: the restaurant reports readiness live.** The tablet's confirm and ready taps are real signals, and they are also *biased* ones: kitchens under pressure tap late, and measured against courier pickups, self-reported ready runs ~3 minutes optimistic. Trust, but calibrate.
+
+**Great: learn it, per restaurant, with uncertainty, from data the flow already produces.** The Prediction service models prep from the restaurant's history, time-of-day, and *live load*: orders in the kitchen now, tonight's confirm-to-ready drift. It emits `(ready_at, σ)`, and σ is not decoration: dispatch pads assignment timing by it, sending couriers to high-variance kitchens deliberately a touch late, because a waiting courier costs the marketplace more than a 2-minute-old handoff costs the meal. The ground truth is free: courier-arrival vs food-ready is measured ~2M times a day by the state machine's own timestamps, no labelling, and cuts error to ~4 minutes for well-observed kitchens. An abnormal night, a party of 40, a broken fryer, still beats the model; live-load features pull predictions toward the anomaly within ~15 minutes, and the *slammed* throttle (the kitchen pausing intake) is the honest fallback that costs orders instead of promises.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 176" role="img" aria-label="A timed assignment lands the courier one minute before the food; a greedy assignment lands them nine minutes early">
+  <style>
+    .lane{fill:none;stroke:currentColor;stroke-opacity:.35;stroke-width:1.2}
+    .prep{fill:var(--accent);fill-opacity:.18;stroke:var(--accent);stroke-width:1.2}
+    .drive{fill:currentColor;fill-opacity:.12;stroke:currentColor;stroke-opacity:.5;stroke-width:1.2}
+    .wait{fill:var(--accent);fill-opacity:.55}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+  </style>
+  <text class="lbl" x="4" y="14">Kitchen: confirmed 18:02, food ready 18:19</text>
+  <rect class="prep" x="4" y="22" width="340" height="16" rx="3"/>
+  <text class="lbl" x="4" y="66">Greedy: assign 18:02 → arrives 18:10, waits 9 min</text>
+  <rect class="drive" x="4" y="74" width="160" height="16" rx="3"/>
+  <rect class="wait" x="164" y="74" width="180" height="16" rx="3"/>
+  <text class="lbl" x="4" y="118">Timed: offer 18:11 → arrives 18:18, waits 1 min</text>
+  <rect class="drive" x="184" y="126" width="140" height="16" rx="3"/>
+  <rect class="wait" x="324" y="126" width="20" height="16" rx="3"/>
+  <text class="sub" x="4" y="162">dark block = courier waiting at the counter: paid time,</text>
+  <text class="sub" x="4" y="176">recovered by aiming arrival at predicted ready</text>
+</svg>
+```
+
+#### Sixty thousand pings a second
+Location data is the marketplace's nervous system and its most disposable data: every point is stale in five seconds. What is the right plumbing for that combination?
+
+[One stream, two consumers](/diagram/food-delivery?focus=courier,loc,dispatch,tracker,e7,e8,e9)
+
+**Bad: write every ping to a courier-locations table.** 60k row writes/s buy a table that is wrong 5 seconds later, queried two ways at most, and a compaction headache forever. Write amplification in service of staleness.
+
+**Good: keep only a live geo-index of current courier positions.** Right for "who is near X now", and it answers only that: the tracker needs continuous trails per active order, dispatch needs `free_at` (a function of task progress, not position alone), and neither falls out of a point-in-time index.
+
+**Great: a short-retention stream with two in-memory consumers.** One append per ping, partitioned by zone, retained ~10 minutes, ~6MB/s. The **courier board** folds everything into per-zone soft state (position, heading, task, `free_at`) and is rebuilt from the stream in ~a minute after a restart; assignments are leases reconciled against the order store, and the store wins. **Tracking + push** consumes only pings of couriers on active orders, ~50k/s, smooths and road-snaps them (urban-canyon GPS teleports otherwise), and forwards each to its *single* watcher: tracking is millions of 1:1 feeds, never a broadcast. A silent courier ages on the board with widening uncertainty rather than freezing; 60 seconds of silence on an active order escalates from app-wake push to phone call, and the customer's dot degrades to an honest status message rather than a lie.
+
+#### A quote you can keep
+The number on the browse screen is a promise made before the kitchen confirmed or a courier existed. How is it set?
+
+[Discovery and the promise](/diagram/food-delivery?focus=eater,search,eta,e10,e11)
+
+**Bad: quote what marketing wants.** "30 min" everywhere converts beautifully and breaks hourly, and every break costs support tickets, refunds and the customer's next order. Late food is remembered; honest quotes are not.
+
+**Good: quote the median prediction.** Honest on average and broken half the time by construction: a p50 quote is a coin flip per order, and customers experience the tail, not the mean.
+
+**Great: quote prediction plus a priced buffer, and defend it end to end.** The quote = prep + drive + courier-supply delay, padded to ~90% keepability: the buffer is a tuned business dial (wider loses conversion, broken loses customers). It is defended in three places: a zone-pressure multiplier (unassigned orders per available courier) refreshes every 30s independent of per-restaurant caches, so demand spikes widen quotes in seconds; **checkout re-validates** the quote, so a customer who lingered sees the honest new number before paying; and a slammed kitchen widens, then pauses, because declining an order beats breaking it. After checkout, the countdown is managed like the promise it is: damped, one-way-sticky updates, and a real slip shown once with a reason, never a twitching ETA.
+
+#### Where it breaks
+| Layer | Failure | How the design handles it |
+|---|---|---|
+| Checkout | Double-tap on a slow network | Idempotency key on the cart; second submit returns the first order |
+| Checkout | Auth succeeds, order write fails | Outbox + reconciler voids orphan auths within a minute |
+| Tablet | Kitchen goes dark mid-service | 2 missed heartbeats pause new intake; in-flight orders run on predictions; queue reconciles on reconnect |
+| Tablet | Order confirmed but never seen by a human | Re-ring, phone escalation at ~1 min, then customer-facing cancel with credit |
+| State machine | Cancel races confirm | Transitions serialise on the row; the loser gets the current state and defined rules, not a silent override |
+| Dispatch | Courier accepts then goes dark en route | Route-progress monitoring; 3 min stalled-and-silent → contact, reassign, record adjustment |
+| Dispatch | Offer expires in a pocket | 20s cascade to pre-ranked fallbacks; 3 unanswered offers marks the courier away |
+| Dispatch | Zone runs out of couriers | Neighbour-zone search with penalty, quotes widen, then intake pauses; incentives are the marketplace's lever |
+| Predictions | Prediction service down | Dispatch falls back to local rolling medians; discovery widens buffers; degraded mode is a paged metric |
+| Tracking | GPS scatter teleports the dot | Road-snapping filter with velocity; implausible jumps dropped, dot interpolates |
+| Payment | Capture fails after delivery | Meal stands; delivered-uncaptured is an explicit state; retries then dunning |
+| Courier | 'Delivered' tapped a block early | Geofence flags the tap; repeats affect the courier record; customer confirm closes the loop |
+
+#### What this design does not solve
+**Supply is priced, not summoned.** When a zone drains, this design degrades honestly: wider quotes, paused intake. Making couriers appear is surge pay, scheduling incentives and market design, a marketplace-economics system that steers the same signals (zone pressure) this design merely reports.
+
+**Fraud is instrumented, not prevented.** Refund abuse, courier-restaurant collusion, geofence-gaming: the state machine's timestamps and locations make every claim checkable, and a trust system must still adjudicate. This design's contribution is that the evidence exists.
+
+**The multi-restaurant cart.** Two kitchens, one courier, one promise multiplies every uncertainty in this document by every other. The batch matcher's structure extends to it (a stack with two pickups), and the honest quote for it is so wide that most platforms constrain the product instead. Declining to build it *is* a design decision.
+
+#### Final design
+Read it back as a control loop. One state machine holds the truth for three parties who share nothing else, and its guarded, timestamped transitions are simultaneously the customer's status screen, the courier's pay record, and the training set. Predictions with uncertainty turn the kitchen's uncontrollable clock into something dispatch can aim at; the 10-second zone batch turns matching into a real choice, including couriers who merely *will be* free; and the location firehose is written once, folded into soft state, and never stored as truth. Around the loop, promises are manufactured honestly: quoted at ~90% keepability, defended by zone pressure and re-validation, and scored on every delivery, with the score feeding the models that make tomorrow's promises. ~2M times a day.
+
+[The whole design](/diagram/food-delivery?focus=eater,order-svc,resto,pay,tracker,order-db,dispatch,eta,search,loc,courier)
+
+> **The numbers to remember.** ~12 orders/min per busy zone, 10s batch tick · prep ~15 ± ~7 min: assign to times, not places · courier wait ~9 min greedy → ~1-2 min timed · 60k pings/s, one stream, two consumers · ~15% stacked · quotes buffered to ~90% on-time, re-validated at checkout.
+
+#### Check your understanding
+**Why is nearest-free-courier the wrong dispatch rule here when it is the right one for ride-hailing?** A passenger is ready at booking; food is ready ~15±7 minutes later. Matching on current distance optimises the wrong clock: the courier arrives with the prep error as waiting time, while the courier finishing a drop next door, the better match, is invisible for being busy.
+
+**What does the courier board know that a geo-index of positions cannot tell you?** `free_at`: when each busy courier's current task ends and where. That single derived field is what lets the batch consider almost-free couriers, which is where most good assignments come from at dinner peak.
+
+**Why do offers go out at 18:11 for an 18:02 order?** Assignment is aimed so predicted arrival ≈ predicted food-ready (18:19 minus a 6-minute drive, minus margin). Until then the order sits in the pool, re-planned every tick, so a slipping kitchen moves the offer later instead of stranding a courier at the counter.
+
+**Why are prep predictions shipped with their uncertainty and not just a number?** Because consumers act on the variance differently: dispatch pads assignment timing by σ (a slightly late courier beats a waiting one), while discovery pads the quote by it (a keepable promise beats a fast one). One number cannot serve both trade-offs.
+
+**Why does payment capture wait for delivery when authorisation happened at checkout?** The money mirrors the state machine: auth reserves ability to pay, capture follows the delivered transition, refunds follow exception transitions. Nothing is taken for food that never arrived, and every money movement has a transition in the log to argue from.
+
+**Where does the training data for prep prediction come from?** From the flow itself: courier-arrival vs food-ready timestamps, written by the same guarded transitions that run the order, ~2M pairs a day. The marketplace instruments itself; nobody labels anything.
