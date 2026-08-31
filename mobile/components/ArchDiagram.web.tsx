@@ -7,7 +7,6 @@ import {
   EdgeLabelRenderer,
   Handle,
   Position,
-  MarkerType,
   type Edge,
   type EdgeProps,
   type Node,
@@ -356,6 +355,8 @@ type EdgeData = {
   bg: string;
   border: string;
   bold: boolean;
+  /** Arrowhead length in flow units; drawn as an inline triangle, never an SVG <marker>. */
+  aw: number;
 };
 
 /** Where a label goes when the layout did not place one (hover labels). */
@@ -374,14 +375,46 @@ function longestRunMid(points: Point[]): Point {
  * Edge drawn from the layout's polyline. The label is portalled into React
  * Flow's label layer, which LABEL_LAYER_CSS lifts above the nodes.
  */
-function RoutedEdge({ id, style, markerEnd, data }: EdgeProps) {
+/**
+ * Arrowhead as an inline filled triangle on the polyline's last segment.
+ * Deliberately NOT an SVG <marker>: markers resolve by fragment URL against a
+ * shared <defs>, and Chrome intermittently fails to resolve them on a tab's
+ * first paint (GPU-process restores), leaving every edge tipless until a hard
+ * reload. A plain <path> cannot fail that way.
+ */
+function arrowHead(points: Point[], len: number): string | null {
+  const n = points.length;
+  if (n < 2) return null;
+  const [tx, ty] = points[n - 1];
+  let i = n - 2;
+  while (i > 0 && Math.hypot(points[i][0] - tx, points[i][1] - ty) < 0.5) i--;
+  const [px, py] = points[i];
+  const dist = Math.hypot(tx - px, ty - py) || 1;
+  const ux = (tx - px) / dist;
+  const uy = (ty - py) / dist;
+  const bx = tx - ux * len;
+  const by = ty - uy * len;
+  const hw = len * 0.55;
+  return `M${tx} ${ty}L${bx - uy * hw} ${by + ux * hw}L${bx + uy * hw} ${by - ux * hw}Z`;
+}
+
+function RoutedEdge({ id, style, data }: EdgeProps) {
   const d = data as unknown as EdgeData;
   const path = useMemo(() => routePath(d.points), [d.points]);
+  const head = useMemo(() => arrowHead(d.points, d.aw), [d.points, d.aw]);
   const [lx, ly] = d.lx != null && d.ly != null ? [d.lx, d.ly] : longestRunMid(d.points);
   return (
     <>
       {/* interactionWidth 0 on purpose: clicks resolve by distance in nearestEdgeId(). */}
-      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={0} />
+      <BaseEdge id={id} path={path} style={style} interactionWidth={0} />
+      {head ? (
+        <path
+          d={head}
+          fill={(style?.stroke as string) ?? "currentColor"}
+          style={{ opacity: style?.opacity as number | undefined, transition: "opacity 140ms ease" }}
+          pointerEvents="none"
+        />
+      ) : null}
       {d.label && d.showLabel ? (
         <EdgeLabelRenderer>
           <div
@@ -674,6 +707,7 @@ export default function ArchDiagram({
               bg: palette.bg,
               border: isSel || hot ? `${palette.accent}88` : palette.border,
               bold: hot,
+              aw: hot ? 13 : 11,
             } satisfies EdgeData,
             animated: hot && !!e.animated && !dim,
             style: {
@@ -684,8 +718,6 @@ export default function ArchDiagram({
               cursor: "pointer",
               transition: "opacity 140ms ease, stroke-width 140ms ease",
             },
-            // Sized in flow units; at the 0.8+ zoom the gate guarantees this is ~11-14px.
-            markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: hot ? 16 : 14, height: hot ? 16 : 14 },
           };
         }),
     [diagram, layout, palette, sel, lit, litEdges, hover],
