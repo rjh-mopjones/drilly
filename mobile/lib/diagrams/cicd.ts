@@ -16,14 +16,14 @@ export const CICD: Diagram = {
         lights: ["action-cache", "e6"],
       },
       {
-        constraint: "one worker fleet runs pull-request code from anyone, at up to ~3,250 workers holding scoped production access",
-        decision: "Each job runs in its own Firecracker microVM, resumed from snapshot and destroyed after, with a 15-minute scoped credential",
-        lights: ["worker-pool", "e4"],
+        constraint: "~1,000 merges a day into one trunk, each needing a ~10-min validation of the trunk it will create, not the one it forked",
+        decision: "The Merge queue validates batches of 8 speculatively, 3 batches in flight, and evicts a PR only after 4 consecutive failures",
+        lights: ["merge-queue", "e2"],
       },
       {
         constraint: "a dropped column has 0 code-side recovery once it lands, against a rollback SLO of p95 under 5 minutes",
-        decision: "A schema lint gate blocks destructive DDL unless the matching expand phase is already recorded as globally deployed",
-        lights: ["schema-gate", "e2", "e14"],
+        decision: "The Pipeline Controller's schema lint blocks destructive DDL unless the matching expand phase is already recorded as globally deployed",
+        lights: ["pipeline-controller", "e14"],
       },
       {
         constraint: "rollback undoes the binary in ~45s but never the 1 email already sent or payment already captured",
@@ -42,8 +42,12 @@ export const CICD: Diagram = {
     },
     beats: [
       {
-        text: "The build side starts as a compilation of intent. A webhook lands, and the controller reads the pipeline spec at the head SHA rather than from a UI. It expands the spec into a DAG of around 140 jobs with fan-out shards and merge gates. Reading the spec at the SHA is what makes what ran reconstructible months later.",
-        lights: ["source-host", "pipeline-controller", "e1", "e3"],
+        text: "Trunk is what the build side protects. A presubmit proves a pull request against the trunk of an hour ago, so merging on green alone lets two individually green changes break trunk together. The Merge queue closes that gap: green PRs form batches of 8, each validated against the trunk that will exist when it merges. Batches behind run speculatively, assuming the ones ahead pass. At ~10 minutes a validation, that is ~1,150 merges a day through a gate a serial lock would cap at ~144.",
+        lights: ["source-host", "merge-queue", "e1", "e2"],
+      },
+      {
+        text: "Each run starts as a compilation of intent. The controller reads the pipeline spec at the batch's SHA rather than from a UI. It expands the spec into a DAG of around 140 jobs with fan-out shards and merge gates. Reading the spec at the SHA is what makes what ran reconstructible months later.",
+        lights: ["pipeline-controller", "e2", "e3"],
       },
       {
         text: "Then almost nothing runs. Every action is keyed by SHA-256 of its complete declared inputs, argv plus sorted env plus input file digests plus toolchain digest. Around 87% of those keys are answered from a content-addressed store in ~40ms. That turns 24 worker-minutes per run into 5.5, and a 14,300-worker fleet into 3,250. The cache is the entire economics.",
@@ -60,6 +64,10 @@ export const CICD: Diagram = {
       {
         text: "The artifact is the hinge. One signed, digest-addressed object crosses from the build plane to the deploy plane, and it is never rebuilt. Everything the deploy side claims about rollback speed rests on the fact that the previous artifact still exists, and pushing it is the same mechanism that pushed the new one.",
         lights: ["artifact-store", "deploy-controller", "e7", "e8"],
+      },
+      {
+        text: "Getting the digest onto the fleet is a bandwidth problem the origin never carries. 500MB to 10,000 tasks is ~5TB, but adjacent releases share most of their bytes, so a task pulls only ~60MB of novel chunks. The origin seeds each of the 12 cells once, ~720MB in total, and tasks fetch the rest from peers in their own cell. A rollback pulls nothing at all: the previous digest's chunks are still on every disk, which is what makes ~45 seconds possible.",
+        lights: ["artifact-store", "fleet", "e13", "e10"],
       },
       {
         text: "The deploy side is a risk problem solved by going slowly and measuring. 1% of tasks take the new digest against a freshly restarted baseline on the old one. The analyser needs ~23k requests per arm to call an error-rate doubling. So the rung bakes for 10 minutes and the ladder climbs 5%, 25%, one cell, region by region to global at ~3h50m. A REGRESS verdict restores the pinned previous digest in ~45 seconds.",
@@ -84,6 +92,14 @@ export const CICD: Diagram = {
       {
         value: "rollback to the pinned previous digest in ~45s",
         explain: "How fast a REGRESS verdict restores service, because the previous artifact was never deleted and pushing it uses the exact mechanism that pushed the new one.",
+      },
+      {
+        value: "batch of 8, 3 in flight: ~1,150 merges/day",
+        explain: "A serial merge lock validates one PR per ~10-min run, ~144 a day against ~1,000 arriving. Sharing one run across 8 PRs and speculating 3 batches deep lifts the ceiling above the arrival rate.",
+      },
+      {
+        value: "~720MB from the origin per deploy, not ~5TB",
+        explain: "500MB x 10,000 tasks is ~5TB per wave. Chunked images cut a task's pull to ~60MB of novel bytes, and the origin ships one seed per cell; peers inside each cell carry the rest.",
       },
     ],
   },
@@ -131,11 +147,11 @@ export const CICD: Diagram = {
       label: "Pipeline Controller",
       kind: "service",
       sub: "spec at head SHA, expands DAG",
-      col: 1,
+      col: 2,
       row: 0,
       parent: "build-plane",
       detail: {
-        what: "Reads .pipeline.yaml at the head SHA, validates it, and expands it into a DAG of jobs with fan-out shards and fan-in gates.",
+        what: "Reads .pipeline.yaml at the head SHA and expands it into a DAG of jobs with fan-out shards and fan-in gates. It also runs the schema lint over any migration files.",
         why: "The pipeline that runs has to be the pipeline that was reviewed. Reading the spec at the SHA is what makes what ran reconstructible. Test selection then walks the reverse dependency graph of the changed files and drops a 500k test suite to ~18k in 24 shards.",
         numbers: [
           { value: "~140 jobs in a wide PR DAG", explain: "The upper end of DAG size for a change touching many parts of the codebase." },
@@ -156,30 +172,36 @@ export const CICD: Diagram = {
       },
     },
     {
-      id: "schema-gate",
-      label: "Schema lint gate",
-      sub: "blocks destructive DDL",
+      id: "merge-queue",
+      label: "Merge queue",
+      sub: "batch of 8, speculative",
       kind: "service",
-      col: 2,
+      col: 1,
       row: 0,
       parent: "build-plane",
       detail: {
-        what: "A CI check that rejects a dropped column, a dropped table or a narrowing type change unless the matching expand phase is already recorded as globally deployed.",
-        why: "This is where the rollback promise is actually enforced, weeks before anyone needs it. Expand/contract as a convention is a convention people forget under deadline; as a gate in the build path it is a property of the system.",
+        what: "The gate between a green pull request and trunk: it batches green PRs, validates each batch against the trunk that will exist when it merges, and merges only what passed.",
+        why: "A presubmit proves a PR against the trunk of an hour ago, and at ~1,000 merges a day two logically conflicting PRs land together somewhere every week. Validating one PR at a time against the tip is correct and caps throughput at ~144 a day. So the queue validates batches of 8 as one run, and starts the next batches early on the optimistic assumption the ones ahead pass.",
         numbers: [
-          { value: "4 deploys over ~2 weeks for a column rename", explain: "The realistic timeline this gate enforces for a safe expand-then-contract migration." },
-          { value: "1 expand digest checked against the deploys table", explain: "The single lookup this gate performs to decide whether a contract step is currently safe." },
+          {
+            value: "batch of 8, 3 batches in flight",
+            explain: "8 PRs share one ~10-min validation; speculating 3 deep keeps ~24 PRs moving at once, so throughput is ~8 merges per 10 minutes, ~1,150 a day.",
+          },
+          {
+            value: "evict only after 4 consecutive failures",
+            explain: "One red run on a batch does not name a culprit and may be flake. A PR is thrown out only when repeated bisected runs keep failing, which cuts false evictions from ~25% to ~0.1%.",
+          },
         ],
         breaks: {
-          failure: "It only sees DDL that goes through the migration tooling.",
-          handled: "A destructive statement run by hand against production leaves the gate green and the rollback path already gone, an accepted gap outside this gate's reach.",
+          failure: "A red batch invalidates every speculative run built on top of it, so one failure costs up to 3 batches of compute and re-forms the queue.",
+          handled: "The queue bisects the failed batch to isolate the culprit while the batches behind re-form on the corrected base. The cost is bounded at ~3 wasted runs, and the action cache makes most of a re-run a lookup anyway.",
         },
         choice: {
-          pick: "Expand/contract enforced as a CI gate against deployed state",
-          instead: "Running migrations in a pre-deploy hook, one deploy per schema change.",
+          pick: "Speculative batches with bisect-on-failure and a flake-tolerant eviction rule",
+          instead: "A serial merge lock: one PR validated on the tip of trunk at a time.",
           decider:
-            "Migration duration against the rollback SLO of p95 under 5 minutes. Backfilling 400M rows in chunked batches at ~20k rows/s is ~6 hours, and on the deploy path those 6 hours sit inside the rollback path.",
-          flips: "Additive, bounded migrations under 1M rows and 10 seconds on a table with exactly one writing service, where the four-step ceremony is overhead.",
+            "Throughput against the merge rate. One 10-minute validation at a time is ~144 merges a day against ~1,000 arriving, so the queue grows without bound by lunchtime. Batching 8 and speculating 3 deep lifts the ceiling to ~1,150 a day with the same guarantee.",
+          flips: "A repo merging under ~100 PRs a day, where a serial lock holds the same guarantee with none of the speculation machinery.",
         },
       },
     },
@@ -443,35 +465,40 @@ export const CICD: Diagram = {
     {
       id: "e1",
       from: "source-host",
-      to: "pipeline-controller",
+      to: "merge-queue",
       tier: "hot",
       step: 1,
-      label: "push / PR webhook",
+      label: "green PR enters queue",
       detail: {
-        what: "The event carrying repo, ref, SHA and event type into the controller, which creates a run record.",
-        why: "It is the only signal that a commit exists, and its delivery guarantee belongs to somebody else. Run creation is idempotent on (repo_id, sha, spec_hash), and a reconciliation poller enqueues anything the webhook lost.",
+        what: "The event stream from the code host: pushes and PRs trigger presubmit runs, and a PR whose presubmit is green joins the merge queue.",
+        why: "It is the only signal that a change exists, and its delivery guarantee belongs to somebody else. Run creation is idempotent on (repo_id, sha, spec_hash), and a reconciliation poller enqueues anything the webhook lost.",
         numbers: [
-          { value: "~50k commits/day", explain: "The daily volume of trigger events this edge carries." },
-          { value: "gap detector runs every 5 min", explain: "How often the reconciliation poller checks for commits the webhook might have dropped." },
+          { value: "~50k commits/day, ~1,000 queue entries/day", explain: "Most pushes only trigger presubmit runs; roughly a thousand PRs a day come out green and ask to merge." },
+          { value: "gap detector runs every 5 min", explain: "How often the reconciliation poller checks for events the webhook might have dropped." },
         ],
         breaks: {
-          failure: "A dropped delivery is silent: the commit simply never builds.",
-          handled: "Nothing complains because nothing was expecting it, which is exactly why a periodic gap detector exists rather than relying on delivery guarantees alone.",
+          failure: "A dropped delivery is silent: the commit never builds, or a green PR never merges.",
+          handled: "Nothing complains because nothing was expecting it, which is exactly why the gap detector compares the host's state against run records and queue entries rather than trusting delivery.",
         },
       },
     },
     {
       id: "e2",
-      from: "pipeline-controller",
-      to: "schema-gate",
-      tier: "control",
-      label: "destructive DDL lint",
+      from: "merge-queue",
+      to: "pipeline-controller",
+      tier: "hot",
+      step: 2,
+      label: "batch of 8 at head SHA",
       detail: {
-        what: "Migration files in the change are handed to the lint, which classifies each statement and looks for narrowing or destructive DDL.",
-        why: "The cheapest place to stop an irreversible schema change is before the artifact exists. Once the column is dropped in production there is no code-side recovery, so this check is worth more than any amount of deploy-time care.",
+        what: "One validation run per batch: the 8 PRs applied together on top of the trunk the queue expects to exist when they merge.",
+        why: "This is the run that keeps trunk deployable, so it validates the future state, not the past one. Batches behind run speculatively on the assumption this one passes; a pass merges all 8, a fail triggers a bisect.",
+        numbers: [
+          { value: "~10 min per batch validation", explain: "The same p50 pipeline runtime as any run; the batch shares it across 8 PRs, which is where the throughput comes from." },
+          { value: "~125-190 batch runs/day", explain: "~1,000 merges a day in batches of 8, plus the re-runs that bisects and evictions cost." },
+        ],
         breaks: {
-          failure: "It only inspects DDL that goes through the tooling.",
-          handled: "A hand-run statement bypasses the whole gate without leaving a trace in the pipeline, an accepted gap outside this check's reach.",
+          failure: "A flaky test fails the batch and no PR in it is at fault.",
+          handled: "A failure only evicts after 4 consecutive failed runs of the suspect PR. A test that fails and then passes unchanged is quarantined and reported to its owners rather than allowed to keep evicting.",
         },
       },
     },
@@ -480,7 +507,7 @@ export const CICD: Diagram = {
       from: "pipeline-controller",
       to: "build-scheduler",
       tier: "hot",
-      step: 2,
+      step: 3,
       label: "DAG of ~140 jobs",
       detail: {
         what: "Expanded job records with their stage, dependencies and hard constraints, emitted to the scheduler for placement.",
@@ -500,7 +527,7 @@ export const CICD: Diagram = {
       from: "build-scheduler",
       to: "worker-pool",
       tier: "hot",
-      step: 3,
+      step: 4,
       label: "job + constraints",
       detail: {
         what: "A dispatched job claimed by a warm microVM that resumes from snapshot and starts executing actions.",
@@ -519,8 +546,7 @@ export const CICD: Diagram = {
       id: "e6",
       from: "worker-pool",
       to: "action-cache",
-      tier: "hot",
-      step: 4,
+      tier: "data",
       label: "87% hit, ~40ms",
       detail: {
         what: "A single lookup per action on the key, returning output digests to fetch from the CAS, or a miss that means actually compiling.",
@@ -656,13 +682,15 @@ export const CICD: Diagram = {
       from: "fleet",
       to: "artifact-store",
       tier: "data",
-      label: "fetch by digest, ~5TB",
+      label: "chunks via mirrors + peers",
       offset: 90,
       detail: {
         what: "Each task pulls the artifact it has been assigned, by digest, from a regional mirror or from a peer in its own cell.",
         why: "Deploy-time bandwidth is a real bottleneck, not a footnote: 500MB to 10,000 tasks is ~5TB in a few minutes. Mirrors plus in-cell peer distribution keep it off the origin store, at the cost of a distribution path that is harder to debug.",
         numbers: [
-          { value: "~500MB per task", explain: "The size each individual task fetches to update itself to the new digest." },
+          { value: "~60MB of novel chunks per task", explain: "Adjacent releases share most of their bytes, so of the 500MB image only the chunks the disk has never seen cross the network." },
+          { value: "~720MB origin egress per deploy", explain: "One ~60MB seed per cell from the origin; the other ~600GB moves peer-to-peer inside the cells and never touches the store." },
+          { value: "0 bytes fetched on rollback", explain: "The previous digest's chunks are still on every disk within the retention window, which is why a rollback is a restart, not a download." },
           { value: "artifact fetch p99 < 20s", explain: "The latency target this hop is held to, even under fleet-wide fetch pressure." },
         ],
         breaks: {
@@ -673,18 +701,21 @@ export const CICD: Diagram = {
     },
     {
       id: "e14",
-      from: "schema-gate",
+      from: "pipeline-controller",
       to: "deploy-controller",
       tier: "control",
-      label: "expand deployed?",
+      label: "DDL gate: expand deployed?",
       offset: 110,
       detail: {
-        what: "The gate queries deploy records for that service and refuses the change unless the matching expand digest has finished its ladder globally.",
-        why: "It is the one place the build plane depends on deploy-plane state, and it has to. Whether a contract phase is safe is a question about what is actually running everywhere, not about what has been merged.",
-        numbers: [{ value: "rename = 4 deploys over ~2 weeks", explain: "The realistic multi-deploy timeline this dependency enforces for one safe schema rename." }],
+        what: "The pipeline's schema lint classifies every migration statement in the change, and refuses a destructive one unless the matching expand digest is recorded as globally deployed.",
+        why: "This is where the rollback promise is enforced, weeks before anyone needs it, and the one place the build plane depends on deploy-plane state. Whether a contract phase is safe is a question about what is actually running everywhere, not about what has been merged. Expand/contract as a convention is forgotten under deadline; as a gate in the build path it is a property of the system.",
+        numbers: [
+          { value: "rename = 4 deploys over ~2 weeks", explain: "The realistic timeline this gate enforces for a safe expand-then-contract migration." },
+          { value: "1 expand digest checked against the deploys table", explain: "The single lookup that decides whether a contract statement is currently safe." },
+        ],
         breaks: {
-          failure: "If the deploy records are wrong or partially replicated the gate can misjudge the state.",
-          handled: "It either blocks a safe change or, worse, waves through a contract phase while some region still runs the old reader, which is why deploy-record accuracy is itself monitored.",
+          failure: "It only sees DDL that goes through the migration tooling, and it misjudges if deploy records are wrong or partially replicated.",
+          handled: "A hand-run statement bypasses the gate without a trace, an accepted gap. Worse than blocking a safe change is waving through a contract while a region still runs the old reader, which is why deploy-record accuracy is itself monitored.",
         },
       },
     },
@@ -724,6 +755,55 @@ export const CICD: Diagram = {
     },
   ],
   figures: {
+    "merge-queue": {
+      title: "Speculative batches: three validations in flight for one trunk",
+      nodes: [
+        { id: "q", label: "Queue: 24 green PRs", sub: "arrival order", kind: "queue", col: 0, row: 0 },
+        {
+          id: "b1",
+          label: "Batch A: PRs 1-8",
+          sub: "validating on trunk tip",
+          kind: "service",
+          col: 0,
+          row: 1,
+          detail: {
+            what: "The batch at the head of the queue, running one full validation of trunk plus all 8 PRs applied together.",
+            why: "A pass merges all 8 in one motion. A fail names no culprit yet: the queue bisects the batch, and only a PR that fails 4 consecutive runs is evicted, so a flake cannot throw out innocent work.",
+          },
+        },
+        {
+          id: "b2",
+          label: "Batch B: PRs 9-16",
+          sub: "assumes A merges",
+          kind: "service",
+          col: 0,
+          row: 2,
+          detail: {
+            what: "The next batch, already validating on a base that includes Batch A's PRs before A has merged.",
+            why: "Speculation is what buys throughput: waiting for A would serialise the queue back to one batch per 10 minutes. If A fails, this run is discarded and re-formed on the corrected base.",
+          },
+        },
+        { id: "b3", label: "Batch C: PRs 17-24", sub: "assumes A and B merge", kind: "service", col: 0, row: 3 },
+        {
+          id: "trunk",
+          label: "Trunk",
+          sub: "always deployable",
+          kind: "database",
+          col: 1,
+          row: 1,
+          detail: {
+            what: "The branch every deploy builds from; the queue exists so it is never broken.",
+            why: "A red trunk stops every team at once, so the queue spends speculative compute to keep it green. ~1,150 merges a day clear a gate a serial lock would cap at ~144.",
+          },
+        },
+      ],
+      edges: [
+        { id: "e1", from: "q", to: "b1", tier: "hot", step: 1, label: "form batch" },
+        { id: "e2", from: "b1", to: "trunk", tier: "hot", step: 2, label: "green: merge all 8" },
+        { id: "e3", from: "b2", to: "trunk", tier: "data", label: "merges after A" },
+        { id: "e4", from: "b3", to: "trunk", tier: "control", label: "re-forms if A fails" },
+      ],
+    },
     "expand-contract": {
       title: "Four deploys expand a schema before contracting it",
       nodes: [

@@ -10635,64 +10635,70 @@ Read it back through the three numbers. 1.4M distinct keys a minute and a day th
 #### Understanding the problem
 A CI/CD system takes every commit an engineering organisation produces, builds and tests it on a shared farm, and pushes the resulting artifact into production across a large fleet, safely enough that a bad change can be undone in minutes.
 
-Two things make this hard, and they are almost entirely unrelated.
+Three things make this hard, and they are almost entirely unrelated.
 
 First, the build side is a throughput problem. Thousands of commits a day, each expanding into a graph of jobs, have to run without the shared farm growing without bound, which means most of that work has to be avoided rather than executed.
 
-Second, the deploy side is a risk problem. Rolling out a new binary is easy to undo, because the old one is still sitting right there. Rolling back a change to production data is not, and no amount of build-side cleverness touches that.
+Second, the integration point is a rate problem. A thousand changes a day merge into one trunk that every deploy builds from, and each merge needs a validation that takes minutes. Keep trunk green naively and merges serialise; let them through in parallel and trunk breaks, stopping every team at once.
+
+Third, the deploy side is a risk problem. Rolling out a new binary is easy to undo, because the old one is still sitting right there. Rolling back a change to production data is not, and no amount of build-side cleverness touches that.
 
 > **What this is not.** It looks like the job scheduler design: dispatch arbitrary work onto a fleet, retry it, fan it out. The two genuinely share a dispatch layer. Where they diverge is what the hard problem actually is. A scheduler's difficulty is knowing whether a run happened at all, since time is an input nobody produces and absence is silent. Here execution is the easy, deliberately avoided part, since most actions return from cache rather than run. The deploy half then inverts the question entirely: a scheduler that runs a job twice is fixed with an idempotency key, but a pipeline that puts a bad binary on ten thousand tasks is fixed by taking it back out, and whether that is even possible was decided weeks earlier by whoever wrote the migration.
 
 #### Requirements and the numbers
-**Functional.** Webhook-triggered pipelines. A declarative build DAG. Distributed build and test execution. Signed, provenance-tracked artifacts. Rolling, blue-green and canary deploys with automated analysis. One-click and automatic rollback. Feature flags. Deploy freezes.
+**Functional.** Webhook-triggered pipelines. A declarative build DAG. Distributed build and test execution. A merge queue that keeps trunk always deployable. Signed, provenance-tracked artifacts. Rolling, blue-green and canary deploys with automated analysis. One-click and automatic rollback. Feature flags. Deploy freezes.
 
-**Non-functional.** p95 job queue wait under 30 seconds. p50 pipeline runtime under 10 minutes. Rollback p95 under 5 minutes from decision to fleet-wide. At least 99.9% pipeline control-plane availability. Zero long-lived secrets on any worker.
+**Non-functional.** p95 job queue wait under 30 seconds. p50 pipeline runtime under 10 minutes. Merge throughput at least the arrival rate, ~1,000 a day, without ever merging unvalidated code. Rollback p95 under 5 minutes from decision to fleet-wide. At least 99.9% pipeline control-plane availability. Zero long-lived secrets on any worker.
 
-The whole design is decided by four numbers, so derive them before drawing anything.
+The whole design is decided by five numbers, so derive them before drawing anything.
 
 **What does the action cache actually save?** At an 87% hit rate, a run executes roughly 5.5 worker-minutes instead of 24. Peak fleet size falls from roughly **14,300 workers to roughly 3,250**, a difference of about 44,000 vCPUs.
 
-**How much traffic does a small canary actually see?** A flagship service at 10,000 requests a second gives a 1% canary about **100 requests a second**.
+**How fast can trunk absorb merges?** Validating one PR at a time against the tip of trunk, at a p50 pipeline runtime of 10 minutes, is a ceiling of **~144 merges a day against ~1,000 arriving**. The queue is unbounded by lunchtime, so merges have to be validated in batches, and the batches have to overlap.
 
-**How much evidence does detecting a regression need?** Catching a doubling of a 0.1% error rate at standard confidence and power needs roughly **23,000 requests per arm**, which at 100 requests a second takes about 4 minutes.
+**What does a deploy physically move?** A 500MB artifact to 10,000 tasks is **~5TB per deploy wave**. At a 10Gbps fair share of the origin store that is over an hour, for one service, at the exact moment speed matters. Distribution has to come from somewhere other than the origin.
 
-**How fast is rollback compared with a rebuild?** Replacing canary tasks with the pinned previous artifact digest takes about **45 seconds**, because nothing is rebuilt; the previous artifact already exists.
+**How much traffic does a small canary actually see?** A flagship service at 10,000 requests a second gives a 1% canary about **100 requests a second**, and catching a doubling of a 0.1% error rate at standard confidence and power needs roughly **23,000 requests per arm**, about 4 minutes at that rate.
 
-> **The numbers to carry.** 87% cache hit rate: ~3,250 workers vs ~14,300 uncached · 1% canary at flagship traffic sees ~100 req/s, needs ~23k requests/arm (~4 min) to catch a doubling · rollback to a pinned digest ~45s · merge-to-global for a standard service ~3h50m.
+**How fast is rollback compared with a rebuild?** Replacing canary tasks with the pinned previous artifact digest takes about **45 seconds**, because nothing is rebuilt and, it will turn out, nothing is even downloaded.
 
-#### Building and deploying: two different systems joined by one object
-The design is really two systems that share exactly one artefact. **Building** is a throughput problem, solved by caching and horizontal scaling. **Deploying** is a risk problem, solved by going slowly and measuring. The immutable, digest-addressed artifact each build produces is the only thing that connects them.
+> **The numbers to carry.** 87% cache hit rate: ~3,250 workers vs ~14,300 uncached · ~144 serial merges/day vs ~1,000 arriving · ~5TB per deploy wave if every byte comes from the origin · 1% canary needs ~23k requests/arm (~4 min) · rollback to a pinned digest ~45s.
+
+#### Three problems joined by one object
+The design is really three systems in a row. **Building** is a throughput problem, solved by caching and horizontal scaling. **Integrating** is a rate problem, solved by batching and speculation. **Deploying** is a risk problem, solved by going slowly and measuring. The immutable, digest-addressed artifact a trunk build produces is the only thing that connects the first two to the third.
 
 The entities:
 
 - **Action**: one unit of build work, keyed by a hash of everything it declares as input.
 - **Job**: a scheduled unit of work placed on an ephemeral worker.
+- **Batch**: a group of green PRs validated together against the trunk they will create.
 - **Artifact**: an immutable, signed, digest-addressed build output.
 - **Deploy**: pushing an artifact to some fraction of the fleet, distinct from releasing the behaviour it contains.
 - **Migration**: a schema change, deliberately never a single atomic step.
 
 ```
 POST /webhook  (source push/PR)         -> pipeline run created
+POST /queue    body:{ pr_id }            -> PR enters the merge queue
 GET  /runs/{id}                          -> { status, jobs[] }
 POST /deploy   body:{ artifact_digest, service } -> { rollout_id }
 POST /rollback body:{ service }          -> { status }   # ~45s, no rebuild
 ```
 
 #### High-level design
-Follow one commit from a webhook to production traffic.
+Follow one change from a green pull request to production traffic.
 
-[The hot path, commit to fleet](/diagram/cicd?focus=source-host,pipeline-controller,build-scheduler,worker-pool,action-cache,artifact-store,deploy-controller,rollout-ladder,fleet,e1,e3,e4,e6,e7,e8,e9,e10)
+[The hot path, PR to fleet](/diagram/cicd?focus=source-host,merge-queue,pipeline-controller,build-scheduler,worker-pool,artifact-store,deploy-controller,rollout-ladder,fleet,e1,e2,e3,e4,e7,e8,e9,e10)
 
-1. The **Source host** fires a webhook into the **Pipeline Controller** on every push or pull request.
-2. The **Pipeline Controller** expands the pipeline spec at that exact commit into a DAG and hands jobs to the **Build Scheduler**.
-3. The **Build Scheduler** matches each job's constraints to the **Ephemeral workers**.
-4. Each **Ephemeral workers** instance checks the **Action cache + CAS** before running anything, and most actions return from there.
-5. Novel output uploads to the **Artifact store**, content-addressed.
+1. The **Source host** fires a webhook on every push and pull request; a PR whose presubmit run is green enters the **Merge queue**.
+2. The **Merge queue** forms a batch of 8 green PRs and hands the **Pipeline Controller** one validation run of the trunk those PRs will create.
+3. The **Pipeline Controller** expands the pipeline spec at that exact SHA into a DAG and hands jobs to the **Build Scheduler**.
+4. The **Build Scheduler** matches each job's constraints to the **Ephemeral workers**, which check the **Action cache + CAS** first and answer most actions from it.
+5. Novel output uploads to the **Artifact store**, content-addressed; a green batch merges all 8 PRs at once.
 6. The **Artifact store** hands a pinned digest to the **Deploy Controller**.
 7. The **Deploy Controller** starts the **Rollout ladder** at a small canary percentage.
-8. The **Rollout ladder** widens exposure across the **Production fleet**, one rung at a time.
+8. The **Rollout ladder** widens exposure across the **Production fleet**, one rung at a time, while tasks pull chunks from cell peers rather than the origin.
 
-> **Why the flow is shaped this way.** Building and deploying are separate systems joined by one immutable object. The build side is solved by caching and horizontal workers; the deploy side is solved by slowness and measurement. Wiring them through a pinned artifact digest means the thing rolled back to is the exact thing that passed, never a rebuild that might differ.
+> **Why the flow is shaped this way.** Three problems, three mechanisms, one immutable object between them. The build side is solved by caching, the merge rate by speculative batches, the deploy side by slowness and measurement. Wiring them through a pinned artifact digest means the thing rolled back to is the exact thing that passed, never a rebuild that might differ.
 
 #### Caching a build instead of running it
 Most of the work a build graph describes has already been done before, on some earlier commit. How do you avoid redoing it without risking a wrong answer?
@@ -10723,23 +10729,68 @@ Most of the work a build graph describes has already been done before, on some e
 
 This is only safe under one precondition: hermeticity, meaning an action reads nothing it did not declare. An action that quietly reads something outside its declared inputs can produce different outputs for the same key, and the cache will serve one of them, silently, behind a build that reports green. A slow build is visible. A wrong cache hit is not, and it is exactly what propagates into production.
 
-#### Comparing against a fair baseline
-A canary running on new code is compared against the rest of the fleet still running the old one. What breaks if that comparison population was already running before the canary started?
+The same dependency graph that keys the cache also picks the tests: selection walks the reverse dependencies of the changed files and drops a 500k-test suite to ~18k in 24 shards. That is what keeps a batch validation inside the 10-minute p50 the merge queue's arithmetic depends on.
 
-[The restarted baseline](/diagram/cicd?focus=rollout-ladder,fleet,canary-analyser,e9,e10,e11)
+#### Keeping trunk green at a thousand merges a day
+Every deploy builds from trunk, so a red trunk stops the whole company. How do a thousand changes a day get in without breaking it and without queueing for ever?
+
+[The merge queue in front of the controller](/diagram/cicd?focus=source-host,merge-queue,pipeline-controller,e1,e2)
+
+**Bad: merge whenever the PR's own presubmit is green.** The presubmit proved the change against the trunk of an hour ago, not the trunk it will actually land on. Two individually green changes that conflict logically, a renamed function and a new caller of the old name, merge cleanly and break trunk with no red run anywhere until after the damage. At ~1,000 merges a day this happens somewhere every week, and each time it does, every team behind it is blocked while someone bisects.
+
+**Good: a serial merge lock.** Take the PRs one at a time: rebase onto the tip, run the full validation, merge, repeat. Trunk is now provably green after every merge. The arithmetic kills it: one ~10-minute validation at a time is ~144 merges a day against ~1,000 arriving. The queue grows without bound by lunchtime, and engineers respond by batching their changes into giant PRs, which makes every failure harder to attribute.
+
+**Great: speculative batches with a flake-tolerant eviction rule.** Group 8 green PRs into a batch and validate them together on top of trunk: one 10-minute run now clears 8 merges. Then overlap the batches: while batch A validates, batch B is already running on a base that *assumes A merges*, and C assumes A and B. Three batches in flight is ~24 PRs moving at once and a ceiling of ~1,150 a day, above the arrival rate, through exactly the same gate.
+
+[Speculative batches: three validations in flight for one trunk](/diagram/cicd?figure=merge-queue)
+
+Two failure rules make it liveable. When a batch goes red, the culprit is unknown, so the queue bisects the batch to isolate it while the batches behind re-form on the corrected base; the waste is bounded at ~3 runs, and the action cache turns most of a re-run into lookups. And because test suites flake, a red run alone never evicts: a PR is thrown out only after 4 consecutive failures, and a test that fails then passes unchanged is quarantined and handed to its owners. Without that rule roughly a quarter of evictions are false; with it, ~0.1%.
+
+> **What the queue actually sells.** Not speed, certainty: the invariant that every commit on trunk passed the full validation *on trunk as it actually is*. Speculation is just the trick that makes the invariant affordable at this merge rate.
+
+#### Five terabytes to ten thousand tasks
+The ladder says which tasks should run the new digest. Something still has to put the bytes on them. How does 500MB reach 10,000 tasks without melting anything?
+
+[The distribution path](/diagram/cicd?focus=artifact-store,fleet,e13,e10)
+
+**Bad: every task pulls the whole artifact from the origin store.** 500MB × 10,000 tasks is ~5TB per deploy wave. At a 10Gbps fair share of the store's egress that is over an hour, and every concurrent deploy is competing for the same pipe. Worst of all, the slowest wave is the one you care most about: a rollback under incident pressure.
+
+**Good: regional and cell mirrors.** The origin ships the artifact once to a mirror in each of the 12 cells, ~6GB of egress, and tasks pull from their local mirror. The origin is out of the blast radius, and each mirror now serves ~830 tasks × 500MB ≈ 415GB per deploy, so mirrors are sized for deploy day rather than for average load.
+
+**Great: content-addressed chunks, seeded once per cell, fetched from peers.** Adjacent releases of the same service share most of their bytes, and the artifact store already chunks by content. So a task compares the new digest's chunk list against its own disk and pulls only the ~60MB it has never seen. The origin seeds each cell once, ~720MB in total, and the remaining ~600GB moves peer-to-peer inside the cells, on links that were otherwise idle.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 168" role="img" aria-label="Per task, a whole-image pull is 500MB; a chunked pull is about 60MB of novel bytes; a rollback pulls zero bytes">
+  <style>
+    .bar{fill:none;stroke:currentColor;stroke-width:1.2}
+    .fillacc{fill:var(--accent);fill-opacity:.22;stroke:var(--accent);stroke-width:1.4}
+    .lbl{fill:currentColor;font:600 12.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+    .sub{fill:currentColor;opacity:.8;font:11.5px system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+  </style>
+  <text class="lbl" x="4" y="14">Whole image per task: 500MB (fleet: ~5TB)</text>
+  <rect class="bar" x="4" y="22" width="384" height="22" rx="4"/>
+  <text class="lbl" x="4" y="66">Novel chunks only: ~60MB (fleet: ~600GB, via peers)</text>
+  <rect class="bar fillacc" x="4" y="74" width="46" height="22" rx="4"/>
+  <text class="lbl" x="4" y="118">Rollback: 0 bytes, chunks already on disk</text>
+  <rect class="bar" x="4" y="126" width="2" height="22"/>
+  <text class="sub" x="4" y="164">origin egress per deploy: ~5TB → ~6GB → ~720MB</text>
+</svg>
+```
+
+The number that matters most falls out at the end: a rollback moves **zero bytes**. The previous digest's chunks are still on every disk inside the retention window, so a REGRESS verdict is a restart against local files. That, as much as the pinned digest itself, is why rollback is ~45 seconds and not a second deploy wave.
+
+#### A fair canary, and how long to trust it
+The ladder's first rung puts the new digest on 1% of tasks. Two questions decide whether that rung means anything: compared against what, and for how long?
+
+[The canary and its baseline](/diagram/cicd?focus=rollout-ladder,fleet,canary-analyser,e9,e10,e11)
 
 **Bad: compare the canary against whichever tasks are already running the old version.** Simple, and those incumbent tasks have been up for hours or days, with warm JIT compilation, aged heap state and established connection pools that a freshly started canary task does not share, none of which has anything to do with the change being tested.
 
 **Good: compare against a recent historical average for the old version instead of live tasks.** This removes the live-incumbent skew and introduces a different one: the average now reflects whatever traffic mix and system state happened to hold during that earlier window, not the conditions the canary is actually running under right now.
 
-**Great: freshly restart an equal-sized baseline population on the old digest at the same moment the canary starts.** Both arms begin cold together, so JIT warm-up, heap age and connection-pool state affect both equally and cancel out of the comparison. What remains different between the two arms is the change itself.
+**Great: freshly restart an equal-sized baseline population on the old digest at the same moment the canary starts.** Both arms begin cold together, so JIT warm-up, heap age and connection-pool state affect both equally and cancel out of the comparison. What remains different between the two arms is the change itself. Without this, the classic failure is a canary that reads 15% worse on tail latency and is actually fine: the difference was never the code, it was that one arm had been running longer than the other.
 
-Without this, the classic failure is a canary that reads 15% worse on tail latency and is actually fine: the difference was never the code, it was that one arm had been running longer than the other.
-
-#### Bake time as a sample-size calculation
-How long should a canary run before its result can be trusted?
-
-[The statistics behind the wait](/diagram/cicd?focus=canary-analyser,fleet,e11,e12)
+That settles *compared against what*. *For how long* is a sample-size calculation, not a ritual.
 
 **Bad: wait a fixed, ritual amount of time regardless of traffic.** Easy to explain, and it is either far too short for a low-traffic service, where the sample collected in that window carries no statistical weight at all, or unnecessarily long for a high-traffic one that reached significance minutes ago.
 
@@ -10777,29 +10828,32 @@ When a canary fails, how does the previous version come back so quickly?
 
 **Good: keep the previous version's build logs and re-run the pipeline against the same commit.** Faster to locate than searching history from scratch, and it is still a build, with all of a build's variability and time cost, when the goal is restoring a known-good state as fast as possible.
 
-**Great: retain the previous artifact itself, immutable and addressed by its own digest.** Rollback becomes pointing the fleet back at a digest that already exists in the artifact store, which is exactly the same mechanism that pushed the new version forward, just aimed the other way. Nothing is rebuilt, branched, or re-verified, because the artifact being restored already passed everything it needed to the first time.
+**Great: retain the previous artifact itself, immutable and addressed by its own digest.** Rollback becomes pointing the fleet back at a digest that already exists in the artifact store, which is exactly the same mechanism that pushed the new version forward, just aimed the other way. Nothing is rebuilt, branched, re-verified, or, since the chunks are still on every disk, even downloaded.
 
 That speed depends on retention being reference-counted against what is actually deployed, not purely time-based. Expiring the rollback target of a service nobody has redeployed in months silently deletes the recovery path, discovered only during the incident that needed it.
 
 #### Expand/contract: keeping N and N-1 alive
 A schema change and a code deploy both touch production. Why can the schema change never be part of the same step as the deploy?
 
-[The migration that cannot be undone](/diagram/cicd?focus=schema-gate,deploy-controller,e2,e14)
+[The migration that cannot be undone](/diagram/cicd?focus=pipeline-controller,deploy-controller,e14)
 
 **Bad: run the migration as part of the deploy, in a pre-deploy hook.** This is what most frameworks do by default, and it is fine right up until the migration is destructive. A dropped or renamed column means the previous binary, the one rollback would restore, now queries something that no longer exists, so a rollback attempt turns a bad deploy into a worse outage.
 
 **Good: run the migration first, then wait a while before deploying the code that depends on it.** Better sequencing, and without an enforced boundary between the two, nothing stops a later migration from being destructive on its own, re-creating the exact same trap one step later.
 
-**Great: expand before contracting, across separate deploys, gated in CI.** A rename becomes four deploys: add the new column and dual-write both, backfill in the background, flip reads to the new column while still writing both, and only weeks later, once nothing depends on the old shape, drop it. A **Schema lint gate** rejects any destructive statement whose expand phase is not already recorded as fully deployed.
+**Great: expand before contracting, across separate deploys, gated in CI.** A rename becomes four deploys: add the new column and dual-write both, backfill in the background, flip reads to the new column while still writing both, and only weeks later, once nothing depends on the old shape, drop it. The Pipeline Controller's schema lint rejects any destructive statement whose expand phase is not already recorded as fully deployed. A backfill is also a reason on its own: chunking 400M rows at ~20k rows a second is ~6 hours, and a pre-deploy hook would put those 6 hours inside the rollback path.
 
 [Four deploys expand a schema before contracting it](/diagram/cicd?figure=expand-contract)
 
 #### Where it breaks
 | Layer | Failure | How the design handles it |
 |---|---|---|
+| Merge queue | A flaky test fails a batch and evicts a PR that did nothing wrong | A red run never evicts alone: 4 consecutive failures of the bisected suspect are required, and a fail-then-pass-unchanged test is quarantined to its owners |
+| Merge queue | A red batch invalidates every speculative run stacked on it | Waste is bounded at ~3 runs; the queue bisects for the culprit while later batches re-form, and the action cache makes re-runs mostly lookups |
 | Action cache | A non-hermetic action produces a wrong cached output served to later builds | A nightly canary re-executes a sample of hits and diffs the output digests; any mismatch evicts the key's subtree and pages |
 | Worker pool | A merge wave depletes the warm pool and queue wait breaches its SLO | Autoscaling on queue depth with a pre-booted buffer; low-priority jobs are shed first |
 | Worker isolation | A malicious build step attempts to escape its sandbox or exfiltrate credentials | One microVM per job, destroyed after use; fork pull requests run on a credential-free pool entirely |
+| Distribution | A cell's peer swarm is cold after a node-image refresh wiped local chunk stores | Tasks fall back to the cell mirror, which is sized for a full 415GB wave; the deploy slows to mirror speed rather than failing |
 | Artifact store | A regional store degrades and deploys cannot fetch artifacts | Deploys block rather than proceed against a partial fleet; multi-region replication covers currently deployed artifacts |
 | Canary analyser | The metrics pipeline lags or gaps, and the analyser has no data to score | Missing data is never treated as a pass; the rollout holds at its current rung and pages |
 | Deploy controller | The controller crashes mid-rollout, leaving the fleet on mixed versions | Rollout state is a durable object, not controller memory, so a new leader resumes from the last recorded phase |
@@ -10807,25 +10861,31 @@ A schema change and a code deploy both touch production. Why can the schema chan
 #### What this design does not solve
 **A canary is only a real gate at the top of the traffic distribution.** Detecting a genuine regression needs tens of thousands of requests per arm, which a flagship service reaches in minutes and a median internal service, at a fraction of that traffic, might need many hours to reach at the same canary percentage. For most services, the honest protection is fast rollback and synthetic probes, not the canary, and treating every green canary verdict as equally meaningful is a mistake the numbers do not support.
 
+**Flakiness is managed, never eliminated.** The queue's 4-strike rule and quarantine keep flaky tests from blocking merges, but a quarantined test is a test not protecting anything, and a genuinely intermittent product bug looks exactly like a flake until it hurts someone in production. The quarantine list only shrinks if teams are made to burn it down, which is an organisational lever, not an architectural one.
+
 **Rollback undoes the binary and never the effects it already emitted.** Expand/contract keeps the database in a state where the old code can still run, and a flag reverts a behaviour change in seconds, but neither takes back an email already sent, a payment already captured, or an event already consumed by forty downstream systems. A version that behaved wrongly for ten minutes before rollback cannot be rolled back in any sense the recipients of its effects would recognise.
 
 **Hermeticity is verified statistically, not proven.** The whole cache depends on a property checked by sampling a small fraction of hits and re-executing them, which reliably catches an action that misbehaves often and is close to blind to one that misbehaves on exactly one specific input. Detection is also always after the fact: by the time a mismatch is caught, every artifact built from that poisoned key has already shipped.
 
 #### Final design
-Read it back through the numbers. An 87% cache hit rate cutting the fleet from roughly 14,300 workers to roughly 3,250 is what makes the whole build side affordable, provided hermeticity actually holds. A 100-request-a-second canary needing roughly 23,000 requests per arm to reach significance is what sets bake time as arithmetic rather than ritual. A 45-second rollback against an artifact that already exists is what makes code changes cheaply reversible. And a four-deploy expand/contract sequence is what keeps schema changes from turning that same rollback into a worse outage.
+Read it back through the numbers. An 87% cache hit rate cutting the fleet from roughly 14,300 workers to roughly 3,250 is what makes the build side affordable, provided hermeticity actually holds. A serial merge ceiling of ~144 a day against ~1,000 arriving is what forces batches of 8 with three speculative runs in flight, and the 4-strike flake rule is what keeps that queue from evicting the innocent. A ~5TB deploy wave shrinking to ~60MB of novel chunks per task, seeded once per cell, is what lets 10,000 tasks converge in minutes and a rollback move zero bytes. A 100-request-a-second canary needing roughly 23,000 requests per arm is what sets bake time as arithmetic rather than ritual. And a four-deploy expand/contract sequence is what keeps schema changes from turning a 45-second rollback into a worse outage.
 
-[The whole design](/diagram/cicd?focus=source-host,pipeline-controller,schema-gate,build-scheduler,worker-pool,action-cache,artifact-store,deploy-controller,rollout-ladder,canary-analyser,fleet,flag-service)
+[The whole design](/diagram/cicd?focus=source-host,merge-queue,pipeline-controller,build-scheduler,worker-pool,action-cache,artifact-store,deploy-controller,rollout-ladder,canary-analyser,fleet,flag-service)
 
-> **The numbers to remember.** 87% cache hit rate: ~3,250 workers vs ~14,300 uncached · 1% canary at flagship traffic needs ~23k requests/arm, ~4 min, to catch a doubling · rollback to a pinned digest ~45s · expand/contract spreads an irreversible change over four deploys and several weeks.
+> **The numbers to remember.** 87% cache hit rate: ~3,250 workers vs ~14,300 · batch of 8, 3 in flight: ~1,150 merges/day vs a serial ceiling of ~144 · ~60MB novel chunks per task, ~720MB origin egress, 0 bytes on rollback · 1% canary needs ~23k requests/arm, ~4 min · expand/contract spreads an irreversible change over four deploys and several weeks.
 
 #### Check your understanding
 **Why is hermeticity the precondition for the action cache rather than a nice-to-have?** An action that reads anything it did not declare can produce different outputs for the same cache key, and the cache will silently serve one of them behind a build that still reports green, propagating a wrong output straight into production.
 
+**Two PRs are each green on their own presubmit. Why can merging both still break trunk?** Each presubmit validated its change against the trunk that existed when it ran, not against the other change. A renamed function in one PR and a new caller of the old name in the other merge cleanly and fail only when built together, which is exactly the state the merge queue's batch validation is the first to see.
+
+**Why does the merge queue run batch B before batch A has merged?** Throughput. Waiting for A serialises the queue at one ~10-minute validation per batch; running B on a base that assumes A merges keeps three batches in flight, ~1,150 merges a day. The price is bounded waste: if A fails, B's run is discarded and re-formed.
+
+**Why does a rollback download nothing?** The fleet's disks still hold the previous digest's chunks, because retention is reference-counted against what is deployed. Rollback is therefore a restart against local files: the ~45 seconds is process replacement, not distribution.
+
 **Why does the canary get compared against a freshly restarted baseline instead of the tasks already running the old version?** Long-running incumbents carry warm JIT state, aged heaps and established connection pools that a cold canary does not share, none of which reflects the actual change being tested. Restarting both arms together removes that skew from the comparison entirely.
 
 **Why does a low-traffic service's canary provide much weaker protection than a flagship service's?** Detecting a given regression needs a fixed number of requests per arm regardless of the service, so a service with little traffic takes proportionally longer to gather that evidence, sometimes far longer than any rollout budget allows, leaving fast rollback as the real protection instead.
-
-**Why is rolling back to a previous artifact fast while rolling back a database migration is not?** The previous artifact already exists, signed and immutable, so restoring it is a pointer change with nothing to rebuild or re-verify. A destructive schema change has already altered what data exists, so there is nothing equivalent to point back at.
 
 **Why does a destructive migration have to wait until its expand phase has fully deployed before it is allowed to run?** Rollback restores a previous binary, and that binary can only run correctly if the schema it expects still exists. Contracting before the expand phase has fully rolled out removes something the rollback target still depends on, turning a routine rollback into a crash loop.
 ### 55. Design an Online Auction System
